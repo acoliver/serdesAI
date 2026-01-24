@@ -89,8 +89,13 @@ use std::time::Duration;
 /// let config = ModelConfig::new("openai:gpt-4o")
 ///     .with_api_key("your-key")
 ///     .with_base_url("https://your-proxy.com/v1");
+///
+/// // With thinking enabled (Anthropic Claude)
+/// let config = ModelConfig::new("anthropic:claude-sonnet-4-20250514")
+///     .with_api_key("sk-...")
+///     .with_thinking(Some(10000));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelConfig {
     /// Model spec in `provider:model` format (e.g., "openai:gpt-4o")
     pub spec: String,
@@ -100,6 +105,12 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     /// Optional request timeout
     pub timeout: Option<Duration>,
+    /// Enable extended thinking (Anthropic Claude)
+    pub enable_thinking: bool,
+    /// Budget for thinking tokens (Anthropic Claude)
+    pub thinking_budget: Option<u64>,
+    /// Reasoning effort (OpenAI o1/o3 models)
+    pub reasoning_effort: Option<String>,
 }
 
 impl ModelConfig {
@@ -119,6 +130,9 @@ impl ModelConfig {
             api_key: None,
             base_url: None,
             timeout: None,
+            enable_thinking: false,
+            thinking_budget: None,
+            reasoning_effort: None,
         }
     }
 
@@ -143,6 +157,44 @@ impl ModelConfig {
         self
     }
 
+    /// Enable extended thinking with optional token budget (Anthropic Claude).
+    ///
+    /// When enabled, Claude models will use extended thinking to reason through
+    /// complex problems before responding.
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - Optional token budget for thinking. If `None`, uses model default.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = ModelConfig::new("anthropic:claude-sonnet-4-20250514")
+    ///     .with_thinking(Some(10000));
+    /// ```
+    #[must_use]
+    pub fn with_thinking(mut self, budget: Option<u64>) -> Self {
+        self.enable_thinking = true;
+        self.thinking_budget = budget;
+        self
+    }
+
+    /// Set reasoning effort for OpenAI o1/o3 models.
+    ///
+    /// Valid values are typically "low", "medium", "high".
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = ModelConfig::new("openai:o3-mini")
+    ///     .with_reasoning_effort("high");
+    /// ```
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
     /// Parse the provider and model name from the spec.
     fn parse_spec(&self) -> (&str, &str) {
         if self.spec.contains(':') {
@@ -156,49 +208,34 @@ impl ModelConfig {
     /// Build a model from this configuration.
     ///
     /// This creates the appropriate model type based on the provider,
-    /// applying any custom API key, base URL, or timeout settings.
+    /// applying any custom API key, base URL, timeout, thinking, and reasoning settings.
     ///
     /// # Note
     ///
-    /// This method delegates to `serdes_ai_models::infer_model_with_config` when
-    /// using default settings (no custom API key/base URL), or creates the model
-    /// directly when custom configuration is provided.
+    /// This method uses `serdes_ai_models::build_model_extended` to create models
+    /// with full configuration support including thinking and reasoning.
     ///
     /// The available providers depend on the features enabled in `serdes-ai-models`:
-    /// - `openai` (default) - OpenAI models (gpt-4o, gpt-4, etc.)
+    /// - `openai` (default) - OpenAI models (gpt-4o, gpt-4, o1, o3, etc.)
     /// - `anthropic` - Anthropic models (claude-3-5-sonnet, etc.)
     /// - `groq` - Groq models
     /// - `mistral` - Mistral models
     /// - `ollama` - Local Ollama models
     /// - `google` - Google/Gemini models
     pub fn build_model(&self) -> Result<Arc<dyn Model>, ModelError> {
-        // If no custom config, use infer_model which handles feature flags
-        if self.api_key.is_none() && self.base_url.is_none() && self.timeout.is_none() {
-            return serdes_ai_models::infer_model(&self.spec);
-        }
-
-        // Custom config requires building the model directly
         let (provider, model_name) = self.parse_spec();
 
-        // We need to build the model with custom settings
-        // This requires the concrete model types which are behind feature flags
-        // in serdes-ai-models. We use a helper function pattern.
-        self.build_model_with_config(provider, model_name)
-    }
+        // Use ExtendedModelConfig to support all options including thinking/reasoning
+        let extended_config = serdes_ai_models::ExtendedModelConfig {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            timeout: self.timeout,
+            enable_thinking: self.enable_thinking,
+            thinking_budget: self.thinking_budget,
+            reasoning_effort: self.reasoning_effort.clone(),
+        };
 
-    fn build_model_with_config(
-        &self,
-        provider: &str,
-        model_name: &str,
-    ) -> Result<Arc<dyn Model>, ModelError> {
-        // Use serdes_ai_models to build models - it has the feature flags
-        serdes_ai_models::build_model_with_config(
-            provider,
-            model_name,
-            self.api_key.as_deref(),
-            self.base_url.as_deref(),
-            self.timeout,
-        )
+        serdes_ai_models::build_model_extended(provider, model_name, extended_config)
     }
 }
 
