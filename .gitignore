@@ -11,6 +11,9 @@
 *.iml
 .fleet/
 
+# direnv
+.direnv/
+
 # OS files
 .DS_Store
 Thumbs.db
