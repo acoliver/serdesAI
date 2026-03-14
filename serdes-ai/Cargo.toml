@@ -26,6 +26,12 @@ full = [
     "ollama",
     "bedrock",
     "azure",
+    "openrouter",
+    "huggingface",
+    "cohere",
+    "chatgpt-oauth",
+    "claude-code-oauth",
+    "antigravity",
     "mcp",
     "embeddings",
     "graph",
@@ -44,6 +50,12 @@ groq = ["serdes-ai-models/groq"]
 ollama = ["serdes-ai-models/ollama"]
 bedrock = ["serdes-ai-models/bedrock"]
 azure = ["serdes-ai-models/azure"]
+openrouter = ["serdes-ai-models/openrouter"]
+huggingface = ["serdes-ai-models/huggingface"]
+cohere = ["serdes-ai-models/cohere"]
+chatgpt-oauth = ["serdes-ai-models/chatgpt-oauth"]
+claude-code-oauth = ["serdes-ai-models/claude-code-oauth"]
+antigravity = ["serdes-ai-models/antigravity"]
 
 # Optional components
 mcp = ["dep:serdes-ai-mcp"]
