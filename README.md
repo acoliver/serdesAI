@@ -12,7 +12,7 @@ SerdesAI is a comprehensive, type-safe Rust framework for building AI agents tha
 ## ✨ Features
 
 - 🤖 **Type-safe Agents** - Generic over dependencies and output types with compile-time validation
-- 🔌 **Multi-provider Support** - OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama, AWS Bedrock, Azure OpenAI
+- 🔌 **Multi-provider Support** - OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama, AWS Bedrock, Azure OpenAI, OpenRouter, HuggingFace, Cohere
 - 🛠️ **Tool Calling** - Define tools with automatic JSON schema generation via macros
 - 📡 **Streaming** - Real-time response streaming with backpressure support
 - 🔄 **Smart Retries** - Configurable retry strategies with exponential backoff
@@ -184,36 +184,42 @@ let result = graph.run(WorkflowState::default(), ()).await?;
 
 SerdesAI is organized as a workspace of focused crates:
 
-| Crate | Description |
-|-------|-------------|
-| `serdes-ai` | Main facade with re-exports |
-| `serdes-ai-core` | Core types, messages, errors |
-| `serdes-ai-agent` | Agent implementation |
-| `serdes-ai-models` | Model trait and providers |
-| `serdes-ai-providers` | Provider abstractions |
-| `serdes-ai-tools` | Tool definitions and execution |
-| `serdes-ai-toolsets` | Tool collections and composition |
-| `serdes-ai-output` | Output schemas and validation |
-| `serdes-ai-streaming` | Streaming support |
-| `serdes-ai-mcp` | MCP protocol support |
-| `serdes-ai-embeddings` | Embedding models |
-| `serdes-ai-retries` | Retry strategies |
-| `serdes-ai-graph` | Graph-based workflows |
-| `serdes-ai-evals` | Evaluation framework |
-| `serdes-ai-macros` | Procedural macros |
+| Crate                  | Description                      |
+| ---------------------- | -------------------------------- |
+| `serdes-ai`            | Main facade with re-exports      |
+| `serdes-ai-core`       | Core types, messages, errors     |
+| `serdes-ai-agent`      | Agent implementation             |
+| `serdes-ai-models`     | Model trait and providers        |
+| `serdes-ai-providers`  | Provider abstractions            |
+| `serdes-ai-tools`      | Tool definitions and execution   |
+| `serdes-ai-toolsets`   | Tool collections and composition |
+| `serdes-ai-output`     | Output schemas and validation    |
+| `serdes-ai-streaming`  | Streaming support                |
+| `serdes-ai-mcp`        | MCP protocol support             |
+| `serdes-ai-embeddings` | Embedding models                 |
+| `serdes-ai-retries`    | Retry strategies                 |
+| `serdes-ai-graph`      | Graph-based workflows            |
+| `serdes-ai-evals`      | Evaluation framework             |
+| `serdes-ai-macros`     | Procedural macros                |
 
 ## 🔌 Supported Providers
 
-| Provider | Feature Flag | Models | Status |
-|----------|--------------|--------|--------|
-| OpenAI | `openai` (default) | GPT-4, GPT-4o, o1, o3 | ✅ Full |
-| Anthropic | `anthropic` (default) | Claude 3.5, Claude 4 | ✅ Full |
-| Google | `google` (default) | Gemini 1.5, Gemini 2.0 | ✅ Full |
-| Groq | `groq` | Llama 3, Mixtral, Gemma | ✅ Full |
-| Mistral | `mistral` | Mistral Large, Codestral | ✅ Full |
-| Ollama | `ollama` | Any local model | ✅ Full |
-| Azure OpenAI | `azure` | Azure-hosted OpenAI | ✅ Full |
-| AWS Bedrock | `bedrock` | Claude, Llama, Titan | ✅ Full |
+| Provider          | Feature Flag        | Models                   | Status |
+| ----------------- | ------------------- | ------------------------ | ------ |
+| OpenAI            | `openai` (default)  | GPT-4, GPT-4o, o1, o3    | ✅ Full |
+| Anthropic         | `anthropic`         | Claude 3.5, Claude 4     | ✅ Full |
+| Google Gemini     | `gemini`            | Gemini 1.5, Gemini 2.0   | ✅ Full |
+| Groq              | `groq`              | Llama 3, Mixtral, Gemma  | ✅ Full |
+| Mistral           | `mistral`           | Mistral Large, Codestral | ✅ Full |
+| Ollama            | `ollama`            | Any local model          | ✅ Full |
+| Azure OpenAI      | `azure`             | Azure-hosted OpenAI      | ✅ Full |
+| AWS Bedrock       | `bedrock`           | Claude, Llama, Titan     | ✅ Full |
+| OpenRouter        | `openrouter`        | Multi-provider gateway   | ✅ Full |
+| HuggingFace       | `huggingface`       | Inference API models     | ✅ Full |
+| Cohere            | `cohere`            | Command, Embed models    | ✅ Full |
+| ChatGPT OAuth     | `chatgpt-oauth`     | ChatGPT via OAuth        | ✅ Full |
+| Claude Code OAuth | `claude-code-oauth` | Claude Code via OAuth    | ✅ Full |
+| Antigravity       | `antigravity`       | Antigravity models       | ✅ Full |
 
 ### Provider Examples
 
@@ -225,7 +231,7 @@ let model = OpenAIChatModel::from_env("gpt-4o")?;
 let model = AnthropicModel::from_env("claude-3-5-sonnet-20241022")?;
 
 // Google Gemini
-let model = GoogleModel::from_env("gemini-1.5-pro")?;
+let model = GeminiModel::from_env("gemini-1.5-pro")?;
 
 // Groq (ultra-fast inference)
 let model = GroqModel::from_env("llama-3.1-70b-versatile")?;
@@ -241,6 +247,18 @@ let model = AzureOpenAIModel::from_env("my-deployment")?;
 
 // AWS Bedrock
 let model = BedrockModel::new("anthropic.claude-3-sonnet-20240229-v1:0")?;
+
+// OpenRouter (multi-provider gateway)
+let model = OpenRouterModel::from_env("anthropic/claude-3.5-sonnet")?;
+
+// HuggingFace
+let model = HuggingFaceModel::from_env("meta-llama/Llama-3.1-70B-Instruct")?;
+
+// Cohere
+let model = CohereModel::from_env("command-r-plus")?;
+
+// Antigravity
+let model = AntigravityModel::from_env("antigravity-model")?;
 ```
 
 ## 🎯 Feature Flags
@@ -250,21 +268,30 @@ let model = BedrockModel::new("anthropic.claude-3-sonnet-20240229-v1:0")?;
 serdes-ai = { version = "0.1", features = ["full"] }
 ```
 
-| Feature | Description | Default |
-|---------|-------------|--------|
-| `openai` | OpenAI GPT models | ✅ |
-| `anthropic` | Anthropic Claude models | ✅ |
-| `google` | Google Gemini models | ✅ |
-| `groq` | Groq fast inference | |
-| `mistral` | Mistral AI models | |
-| `ollama` | Ollama local models | |
-| `azure` | Azure OpenAI | |
-| `bedrock` | AWS Bedrock | |
-| `mcp` | Model Context Protocol | |
-| `graph` | Graph workflows | ✅ |
-| `evals` | Evaluation framework | ✅ |
-| `macros` | Procedural macros | ✅ |
-| `full` | All features | |
+| Feature               | Description               | Default |
+| --------------------- | ------------------------- | ------- |
+| `openai`              | OpenAI GPT models         | ✅       |
+| `anthropic`           | Anthropic Claude models   |         |
+| `gemini`              | Google Gemini models      |         |
+| `groq`                | Groq fast inference       |         |
+| `mistral`             | Mistral AI models         |         |
+| `ollama`              | Ollama local models       |         |
+| `azure`               | Azure OpenAI              |         |
+| `bedrock`             | AWS Bedrock               |         |
+| `openrouter`          | OpenRouter multi-provider |         |
+| `huggingface`         | HuggingFace Inference API |         |
+| `cohere`              | Cohere models             |         |
+| `chatgpt-oauth`       | ChatGPT via OAuth         |         |
+| `claude-code-oauth`   | Claude Code via OAuth     |         |
+| `antigravity`         | Antigravity models        |         |
+| `mcp`                 | Model Context Protocol    |         |
+| `embeddings`          | Embedding models          |         |
+| `graph`               | Graph workflows           |         |
+| `evals`               | Evaluation framework      |         |
+| `macros`              | Procedural macros         | ✅       |
+| `tracing-integration` | Tracing support           |         |
+| `otel`                | OpenTelemetry support     |         |
+| `full`                | All features              |         |
 
 ## 📖 Documentation
 
@@ -274,17 +301,17 @@ serdes-ai = { version = "0.1", features = ["full"] }
 
 ## ⚖️ Comparison with pydantic-ai
 
-| Feature | pydantic-ai | serdes-ai |
-|---------|-------------|----------|
-| Language | Python | Rust |
-| Type Safety | Runtime (Pydantic) | Compile-time |
-| Async Runtime | asyncio | tokio |
-| Validation | Pydantic v2 | serde + custom |
-| Performance | Good | Excellent |
-| Memory Safety | Garbage Collected | Ownership system |
-| Binary Size | Large (Python runtime) | Minimal |
-| Startup Time | Slow | Instant |
-| Thread Safety | GIL limitations | Fully concurrent |
+| Feature       | pydantic-ai            | serdes-ai        |
+| ------------- | ---------------------- | ---------------- |
+| Language      | Python                 | Rust             |
+| Type Safety   | Runtime (Pydantic)     | Compile-time     |
+| Async Runtime | asyncio                | tokio            |
+| Validation    | Pydantic v2            | serde + custom   |
+| Performance   | Good                   | Excellent        |
+| Memory Safety | Garbage Collected      | Ownership system |
+| Binary Size   | Large (Python runtime) | Minimal          |
+| Startup Time  | Slow                   | Instant          |
+| Thread Safety | GIL limitations        | Fully concurrent |
 
 ## 🏗️ Architecture
 
