@@ -32,6 +32,7 @@
 //! let response = model.request(&messages, &settings, &params).await?;
 //! ```
 
+mod error;
 pub mod model;
 pub mod stream;
 pub mod types;

@@ -44,12 +44,8 @@ impl RetryOn {
     pub fn should_retry(&self, error: &ModelError) -> bool {
         match self {
             RetryOn::AnyError => true,
-            RetryOn::RateLimits => matches!(error, ModelError::RateLimited { .. }),
-            RetryOn::Transient => match error {
-                ModelError::Timeout(_) | ModelError::Connection(_) | ModelError::Network(_) => true,
-                ModelError::Http { status, .. } => *status >= 500,
-                _ => false,
-            },
+            RetryOn::RateLimits => error.is_rate_limited(),
+            RetryOn::Transient => error.is_transient(),
         }
     }
 }
@@ -300,6 +296,7 @@ impl Model for FallbackModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProviderErrorKind;
     use crate::mock::MockModel;
     use serdes_ai_core::messages::TextPart;
     use serdes_ai_core::{FinishReason, ModelResponsePart};
@@ -360,6 +357,19 @@ mod tests {
                 ModelError::Timeout(d) => Err(ModelError::Timeout(*d)),
                 ModelError::Connection(msg) => Err(ModelError::Connection(msg.clone())),
                 ModelError::Authentication(msg) => Err(ModelError::Authentication(msg.clone())),
+                ModelError::Provider {
+                    provider,
+                    code,
+                    message,
+                    kind,
+                    retry_after,
+                } => Err(ModelError::Provider {
+                    provider: provider.clone(),
+                    code: code.clone(),
+                    message: message.clone(),
+                    kind: *kind,
+                    retry_after: *retry_after,
+                }),
                 ModelError::Http {
                     status,
                     body,
@@ -462,6 +472,14 @@ mod tests {
         assert!(RetryOn::RateLimits.should_retry(&ModelError::rate_limited(None)));
         assert!(!RetryOn::RateLimits.should_retry(&ModelError::api("test")));
         assert!(!RetryOn::RateLimits.should_retry(&ModelError::Timeout(Duration::from_secs(30))));
+        let provider_rate_limit = ModelError::provider(
+            "anthropic",
+            "rate_limit_error",
+            "slow down",
+            ProviderErrorKind::RateLimited,
+            None,
+        );
+        assert!(RetryOn::RateLimits.should_retry(&provider_rate_limit));
 
         // Transient retries on timeout, connection, network, and 5xx errors
         assert!(RetryOn::Transient.should_retry(&ModelError::Timeout(Duration::from_secs(30))));
@@ -471,6 +489,14 @@ mod tests {
         assert!(RetryOn::Transient.should_retry(&ModelError::http(502, "Bad gateway")));
         assert!(!RetryOn::Transient.should_retry(&ModelError::http(400, "Bad request")));
         assert!(!RetryOn::Transient.should_retry(&ModelError::api("test")));
+        let provider_overload = ModelError::provider(
+            "anthropic",
+            "overloaded_error",
+            "busy",
+            ProviderErrorKind::Overloaded,
+            None,
+        );
+        assert!(RetryOn::Transient.should_retry(&provider_overload));
         assert!(!RetryOn::Transient.should_retry(&ModelError::rate_limited(None)));
     }
 
@@ -771,6 +797,64 @@ mod tests {
         } else {
             panic!("Expected text response");
         }
+    }
+
+    #[tokio::test]
+    async fn test_fallback_rate_limit_policy_accepts_provider_classification() {
+        let primary = FailingMockModel::new(
+            "primary",
+            ModelError::provider(
+                "anthropic",
+                "rate_limit_error",
+                "slow down",
+                ProviderErrorKind::RateLimited,
+                Some(Duration::from_secs(3)),
+            ),
+        );
+        let backup = SucceedingMockModel::new("backup", "ok");
+        let backup_calls = backup.call_count.clone();
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::RateLimits);
+
+        let result = fallback
+            .request(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_transient_policy_accepts_provider_overload() {
+        let primary = FailingMockModel::new(
+            "primary",
+            ModelError::provider(
+                "anthropic",
+                "overloaded_error",
+                "busy",
+                ProviderErrorKind::Overloaded,
+                None,
+            ),
+        );
+        let backup = SucceedingMockModel::new("backup", "ok");
+        let backup_calls = backup.call_count.clone();
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let result = fallback
+            .request(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

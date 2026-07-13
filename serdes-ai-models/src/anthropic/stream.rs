@@ -2,6 +2,7 @@
 //!
 //! This module provides streaming support for Anthropic's Messages API.
 
+use super::error::map_anthropic_error;
 use super::types::{ContentBlockDelta, ContentBlockStart, StreamEvent};
 use crate::error::ModelError;
 use bytes::Bytes;
@@ -537,9 +538,11 @@ fn process_event(
 
         StreamEvent::Ping => None,
 
-        StreamEvent::Error { error } => Some(Err(ModelError::api_with_code(
-            error.message,
+        StreamEvent::Error { error } => Some(Err(map_anthropic_error(
             error.error_type,
+            error.message,
+            None,
+            None,
         ))),
     }
 }
@@ -689,18 +692,48 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_parse_error() {
+    async fn parse_stream_error(code: &str, message: &str) -> ModelError {
         let error =
-            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}"#;
-        let bytes = vec![Ok(make_sse_bytes("error", error))];
-        let stream = stream::iter(bytes);
+            format!(r#"{{"type":"error","error":{{"type":"{code}","message":"{message}"}}}}"#);
+        let stream = stream::iter(vec![Ok(make_sse_bytes("error", &error))]);
         let mut parser = AnthropicStreamParser::new(stream);
+        parser.next().await.unwrap().unwrap_err()
+    }
 
-        let event = parser.next().await.unwrap();
-        assert!(event.is_err());
-        let err = event.unwrap_err();
-        assert!(err.to_string().contains("Rate limited"));
+    #[tokio::test]
+    async fn test_parse_rate_limit_error() {
+        let err = parse_stream_error("rate_limit_error", "Rate limited").await;
+
+        assert!(err.is_rate_limited());
+        assert!(err.is_retryable());
+        match err {
+            ModelError::Provider {
+                code,
+                message,
+                kind,
+                ..
+            } => {
+                assert_eq!(code, "rate_limit_error");
+                assert_eq!(message, "Rate limited");
+                assert_eq!(kind, crate::ProviderErrorKind::RateLimited);
+            }
+            other => panic!("expected provider error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_overloaded_error() {
+        let err = parse_stream_error("overloaded_error", "Overloaded").await;
+        assert!(err.is_transient());
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_parse_permanent_errors() {
+        for code in ["authentication_error", "invalid_request_error"] {
+            let err = parse_stream_error(code, "Permanent").await;
+            assert!(!err.is_retryable(), "{code} must not be retryable");
+        }
     }
 
     #[tokio::test]
