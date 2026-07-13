@@ -42,6 +42,24 @@ async fn main() -> anyhow::Result<()> {
 - 🔄 **Smart Retries** - Configurable retry strategies
 - 🔀 **Graph Workflows** - Complex multi-agent orchestration
 
+## Configuring retries
+
+```rust,ignore
+use serdes_ai::prelude::*;
+use std::time::Duration;
+
+let model = OpenAIChatModel::from_env("gpt-4o")?.with_retries(
+    RetryPolicy::for_model_requests()
+        .max_attempts(3)
+        .total_timeout(Some(Duration::from_secs(30))),
+);
+let agent = AgentBuilder::new(model).build();
+```
+
+Retries are opt-in and repeat the same model. `FallbackModel` remains the
+separate mechanism for selecting another model. Streaming acquisition can retry
+before its first visible event; errors after that boundary are never replayed.
+
 ## Part of SerdesAI
 
 This crate is part of the [SerdesAI](https://github.com/janfeddersen-wq/serdesAI) workspace.

@@ -26,12 +26,24 @@ serdes-ai-models = "0.1"
 
 ## Usage
 
-```rust
-use serdes_ai_models::{OpenAIChatModel, Model};
+```rust,ignore
+use serdes_ai_models::{Model, ModelRetryExt, OpenAIChatModel, RetryPolicy};
+use std::time::Duration;
 
-let model = OpenAIChatModel::from_env("gpt-4o")?;
-let response = model.chat(messages, options).await?;
+let model = OpenAIChatModel::from_env("gpt-4o")?.with_retries(
+    RetryPolicy::for_model_requests()
+        .max_attempts(3)
+        .total_timeout(Some(Duration::from_secs(30))),
+);
+
+let response = model.request(&messages, &settings, &params).await?;
 ```
+
+Retries are opt-in. `RetryPolicy::disabled()` performs exactly one attempt. The
+policy retries the same model; `FallbackModel` remains responsible for selecting
+a different model. Streaming requests may be retried only while acquiring the
+stream and before the first caller-visible event. Once an event is returned, later
+stream errors pass through without replaying or concatenating another response.
 
 ## Part of SerdesAI
 

@@ -63,17 +63,20 @@ pub mod transport;
 
 // Re-exports
 pub use backoff::{ExponentialBackoff, ExponentialBackoffBuilder, FixedDelay, LinearBackoff};
-pub use config::{RetryCondition, RetryConfig, WaitStrategy};
-pub use error::{RetryResult, RetryableError};
-pub use executor::{with_retry, with_retry_state, AttemptInfo, Retry, RetryState};
+pub use config::{RetryCondition, RetryConfig, RetryPolicy, WaitStrategy};
+pub use error::{RetryFailure, RetryResult, RetryableError};
+pub use executor::{
+    with_retry, with_retry_policy, with_retry_state, AttemptInfo, Retry, RetryDecision, RetryState,
+};
 pub use strategy::{NoRetry, RetryStrategy};
 pub use transport::{RetryClient, RetryClientBuilder};
 
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        with_retry, ExponentialBackoff, Retry, RetryClient, RetryConfig, RetryResult,
-        RetryStrategy, RetryableError, WaitStrategy,
+        with_retry, with_retry_policy, ExponentialBackoff, Retry, RetryClient, RetryConfig,
+        RetryDecision, RetryFailure, RetryPolicy, RetryResult, RetryStrategy, RetryableError,
+        WaitStrategy,
     };
 }
 

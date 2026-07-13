@@ -360,8 +360,10 @@ pub use serdes_ai_output::{
 pub use serdes_ai_streaming::{ResponseDelta, ResponseStream};
 
 // Retries
+pub use serdes_ai_models::{ModelRetryExt, RetryingModel};
 pub use serdes_ai_retries::{
-    ExponentialBackoff, FixedDelay, LinearBackoff, RetryConfig, RetryStrategy,
+    ExponentialBackoff, FixedDelay, LinearBackoff, RetryConfig, RetryDecision, RetryFailure,
+    RetryPolicy, RetryStrategy, WaitStrategy,
 };
 
 // Direct model access
@@ -428,7 +430,7 @@ pub mod prelude {
     };
 
     // Models
-    pub use crate::models::Model;
+    pub use crate::models::{Model, ModelRetryExt, RetryingModel};
 
     #[cfg(feature = "openai")]
     pub use crate::models::openai::OpenAIChatModel;
@@ -453,7 +455,10 @@ pub mod prelude {
     pub use crate::streaming::{ResponseDelta, ResponseStream};
 
     // Retries
-    pub use crate::retries::{ExponentialBackoff, RetryConfig, RetryStrategy};
+    pub use crate::retries::{
+        ExponentialBackoff, RetryConfig, RetryDecision, RetryFailure, RetryPolicy, RetryStrategy,
+        WaitStrategy,
+    };
 
     // Direct model access
     pub use crate::direct::{model_request, model_request_stream, DirectError, ModelSpec};

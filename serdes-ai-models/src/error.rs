@@ -63,6 +63,8 @@ pub enum ModelError {
         message: String,
         /// Semantic classification used by retry and fallback policies.
         kind: ProviderErrorKind,
+        /// HTTP status for transport-reported errors.
+        status: Option<u16>,
         /// Suggested retry delay, when supplied by the provider.
         retry_after: Option<Duration>,
     },
@@ -131,6 +133,30 @@ pub enum ModelError {
     #[error("Network error: {0}")]
     Network(String),
 
+    /// Retry attempts against the same model were exhausted.
+    #[error("Model request failed after {attempts} attempts over {elapsed:?}: {last_error}")]
+    RetryExhausted {
+        /// Number of attempts made.
+        attempts: u32,
+        /// Total time spent under the retry policy.
+        elapsed: Duration,
+        /// Final classified model error.
+        #[source]
+        last_error: Box<ModelError>,
+    },
+
+    /// The total retry deadline expired.
+    #[error("Model request deadline expired after {attempts} attempts over {elapsed:?}")]
+    RetryDeadlineExceeded {
+        /// Number of attempts started.
+        attempts: u32,
+        /// Total time spent under the retry policy.
+        elapsed: Duration,
+        /// Most recent classified model error, if any.
+        #[source]
+        last_error: Option<Box<ModelError>>,
+    },
+
     /// Other error.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -146,14 +172,20 @@ impl ModelError {
     /// Check if this error represents rate limiting.
     #[must_use]
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, ModelError::RateLimited { .. })
-            || matches!(
-                self,
-                ModelError::Provider {
-                    kind: ProviderErrorKind::RateLimited,
-                    ..
-                }
-            )
+        match self {
+            ModelError::RateLimited { .. } => true,
+            ModelError::Http { status: 429, .. } => true,
+            ModelError::Provider {
+                kind: ProviderErrorKind::RateLimited,
+                ..
+            } => true,
+            ModelError::RetryExhausted { last_error, .. } => last_error.is_rate_limited(),
+            ModelError::RetryDeadlineExceeded {
+                last_error: Some(last_error),
+                ..
+            } => last_error.is_rate_limited(),
+            _ => false,
+        }
     }
 
     /// Check if this error is transient, excluding rate limits.
@@ -164,13 +196,18 @@ impl ModelError {
             | ModelError::Connection(_)
             | ModelError::Network(_)
             | ModelError::IncompleteStream(_) => true,
-            ModelError::Http { status, .. } => *status >= 500,
+            ModelError::Http { status, .. } => (500..=599).contains(status),
             ModelError::Provider { kind, .. } => {
                 matches!(
                     kind,
                     ProviderErrorKind::Overloaded | ProviderErrorKind::Server
                 )
             }
+            ModelError::RetryExhausted { last_error, .. } => last_error.is_transient(),
+            ModelError::RetryDeadlineExceeded {
+                last_error: Some(last_error),
+                ..
+            } => last_error.is_transient(),
             _ => false,
         }
     }
@@ -181,6 +218,16 @@ impl ModelError {
         match self {
             ModelError::RateLimited { retry_after } => *retry_after,
             ModelError::Provider { retry_after, .. } => *retry_after,
+            ModelError::Http { headers, .. } => headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                .map(Duration::from_secs),
+            ModelError::RetryExhausted { last_error, .. } => last_error.retry_after(),
+            ModelError::RetryDeadlineExceeded {
+                last_error: Some(last_error),
+                ..
+            } => last_error.retry_after(),
             _ => None,
         }
     }
@@ -214,11 +261,24 @@ impl ModelError {
         kind: ProviderErrorKind,
         retry_after: Option<Duration>,
     ) -> Self {
+        Self::provider_with_status(provider, code, message, kind, None, retry_after)
+    }
+
+    /// Create a structured provider error with HTTP status metadata.
+    pub fn provider_with_status(
+        provider: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+        status: Option<u16>,
+        retry_after: Option<Duration>,
+    ) -> Self {
         Self::Provider {
             provider: provider.into(),
             code: code.into(),
             message: message.into(),
             kind,
+            status,
             retry_after,
         }
     }

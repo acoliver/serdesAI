@@ -362,12 +362,14 @@ mod tests {
                     code,
                     message,
                     kind,
+                    status,
                     retry_after,
                 } => Err(ModelError::Provider {
                     provider: provider.clone(),
                     code: code.clone(),
                     message: message.clone(),
                     kind: *kind,
+                    status: *status,
                     retry_after: *retry_after,
                 }),
                 ModelError::Http {
