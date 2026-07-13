@@ -162,7 +162,7 @@ pub use antigravity::AntigravityModel;
 pub mod mock;
 
 // Re-exports
-pub use error::{ModelError, ModelResult};
+pub use error::{ModelError, ModelResult, ProviderErrorKind};
 pub use fallback::{FallbackModel, RetryOn};
 pub use mock::{FunctionModel, MockModel, TestModel};
 pub use model::{

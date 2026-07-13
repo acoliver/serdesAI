@@ -4,6 +4,31 @@ use std::collections::HashMap;
 use std::time::Duration;
 use thiserror::Error;
 
+/// Semantic classification for a provider-reported API error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderErrorKind {
+    /// The provider rate-limited the request.
+    RateLimited,
+    /// The provider is temporarily overloaded.
+    Overloaded,
+    /// The provider reported a transient server failure.
+    Server,
+    /// Authentication failed.
+    Authentication,
+    /// The request was invalid.
+    InvalidRequest,
+    /// The requested resource was not found.
+    NotFound,
+    /// The caller lacks permission for the request.
+    PermissionDenied,
+    /// The account cannot make the request for billing reasons.
+    Billing,
+    /// The request exceeded the provider's size limit.
+    RequestTooLarge,
+    /// An unclassified provider error.
+    Other,
+}
+
 /// Model-related errors.
 #[derive(Debug, Error)]
 pub enum ModelError {
@@ -25,6 +50,21 @@ pub enum ModelError {
         message: String,
         /// Error code.
         code: Option<String>,
+    },
+
+    /// Structured error reported by a model provider.
+    #[error("{provider} API error ({code}): {message}")]
+    Provider {
+        /// Provider name.
+        provider: String,
+        /// Provider-specific error type or code.
+        code: String,
+        /// Provider-supplied error message.
+        message: String,
+        /// Semantic classification used by retry and fallback policies.
+        kind: ProviderErrorKind,
+        /// Suggested retry delay, when supplied by the provider.
+        retry_after: Option<Duration>,
     },
 
     /// Request timeout.
@@ -96,11 +136,34 @@ impl ModelError {
     /// Check if this error is retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
+        self.is_rate_limited() || self.is_transient()
+    }
+
+    /// Check if this error represents rate limiting.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, ModelError::RateLimited { .. })
+            || matches!(
+                self,
+                ModelError::Provider {
+                    kind: ProviderErrorKind::RateLimited,
+                    ..
+                }
+            )
+    }
+
+    /// Check if this error is transient, excluding rate limits.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
         match self {
-            ModelError::Timeout(_) => true,
-            ModelError::RateLimited { .. } => true,
-            ModelError::Connection(_) => true,
+            ModelError::Timeout(_) | ModelError::Connection(_) | ModelError::Network(_) => true,
             ModelError::Http { status, .. } => *status >= 500,
+            ModelError::Provider { kind, .. } => {
+                matches!(
+                    kind,
+                    ProviderErrorKind::Overloaded | ProviderErrorKind::Server
+                )
+            }
             _ => false,
         }
     }
@@ -110,6 +173,7 @@ impl ModelError {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             ModelError::RateLimited { retry_after } => *retry_after,
+            ModelError::Provider { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -133,6 +197,23 @@ impl ModelError {
     /// Create a rate limited error.
     pub fn rate_limited(retry_after: Option<Duration>) -> Self {
         Self::RateLimited { retry_after }
+    }
+
+    /// Create a structured provider error.
+    pub fn provider(
+        provider: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::Provider {
+            provider: provider.into(),
+            code: code.into(),
+            message: message.into(),
+            kind,
+            retry_after,
+        }
     }
 
     /// Create an HTTP error.

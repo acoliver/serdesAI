@@ -1,5 +1,6 @@
 //! Anthropic Claude model implementation.
 
+use super::error::map_anthropic_error;
 use super::stream::AnthropicStreamParser;
 use super::types::*;
 use crate::error::ModelError;
@@ -551,32 +552,19 @@ impl AnthropicModel {
 
     /// Handle API error response.
     fn handle_error_response(&self, status: u16, body: &str, headers: &HeaderMap) -> ModelError {
+        let retry_after = Self::parse_retry_after(headers);
+
         if let Ok(err) = serde_json::from_str::<AnthropicError>(body) {
-            let code = err.error.error_type.clone();
-
-            match status {
-                401 => return ModelError::auth(err.error.message),
-                429 => return ModelError::rate_limited(Self::parse_retry_after(headers)),
-                404 => return ModelError::NotFound(err.error.message),
-                400 => {
-                    if code == "invalid_request_error" {
-                        return ModelError::Api {
-                            message: err.error.message,
-                            code: Some(code),
-                        };
-                    }
-                }
-                _ => {}
-            }
-
-            return ModelError::Api {
-                message: err.error.message,
-                code: Some(code),
-            };
+            return map_anthropic_error(
+                err.error.error_type,
+                err.error.message,
+                retry_after,
+                Some(status),
+            );
         }
 
         if status == 429 {
-            return ModelError::rate_limited(Self::parse_retry_after(headers));
+            return ModelError::rate_limited(retry_after);
         }
 
         ModelError::http(status, body)
@@ -687,6 +675,35 @@ impl Model for AnthropicModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_handle_error_response_uses_provider_semantics() {
+        let model = AnthropicModel::new("claude-3-5-sonnet-20241022", "key");
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+
+        let rate_limit = model.handle_error_response(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            &headers,
+        );
+        assert!(rate_limit.is_rate_limited());
+        assert_eq!(rate_limit.retry_after(), Some(Duration::from_secs(7)));
+
+        let overloaded = model.handle_error_response(
+            529,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#,
+            &HeaderMap::new(),
+        );
+        assert!(overloaded.is_transient());
+
+        let auth = model.handle_error_response(
+            401,
+            r#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#,
+            &HeaderMap::new(),
+        );
+        assert!(!auth.is_retryable());
+    }
 
     #[test]
     fn test_anthropic_model_new() {
