@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use super::parts::{
     BuiltinToolCallPart, FilePart, TextPart, ThinkingPart, ToolCallArgs, ToolCallPart,
 };
-use super::response::ModelResponsePart;
+use super::response::{FinishReason, ModelResponsePart};
 
 /// Stream event for model responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,6 +21,13 @@ pub enum ModelResponseStreamEvent {
     PartDelta(PartDeltaEvent),
     /// A part has ended.
     PartEnd(PartEndEvent),
+    /// The stream completed successfully with provider terminal metadata.
+    ///
+    /// This event is emitted **only** when the provider has confirmed
+    /// successful completion (e.g. Anthropic `message_stop`).  It carries
+    /// the provider-reported finish reason and usage so consumers do not
+    /// need to infer them from stream exhaustion.
+    StreamComplete(StreamCompleteEvent),
 }
 
 impl ModelResponseStreamEvent {
@@ -102,6 +109,7 @@ impl ModelResponseStreamEvent {
             Self::PartStart(e) => e.index,
             Self::PartDelta(e) => e.index,
             Self::PartEnd(e) => e.index,
+            Self::StreamComplete(_) => 0,
         }
     }
 
@@ -121,6 +129,12 @@ impl ModelResponseStreamEvent {
     #[must_use]
     pub fn is_end(&self) -> bool {
         matches!(self, Self::PartEnd(_))
+    }
+
+    /// Check if this is a stream-complete (terminal) event.
+    #[must_use]
+    pub fn is_stream_complete(&self) -> bool {
+        matches!(self, Self::StreamComplete(_))
     }
 }
 
@@ -650,6 +664,45 @@ impl PartEndEvent {
     #[must_use]
     pub fn new(index: usize) -> Self {
         Self { index }
+    }
+}
+
+/// Event indicating the stream completed successfully with provider terminal metadata.
+///
+/// Only emitted when the provider confirms successful completion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamCompleteEvent {
+    /// Provider-reported finish reason (mapped to [`FinishReason`]).
+    pub finish_reason: FinishReason,
+    /// Input tokens reported by the provider (if any).
+    pub input_tokens: Option<u64>,
+    /// Output tokens reported by the provider (if any).
+    pub output_tokens: Option<u64>,
+}
+
+impl StreamCompleteEvent {
+    /// Create a new stream-complete event.
+    #[must_use]
+    pub fn new(finish_reason: FinishReason) -> Self {
+        Self {
+            finish_reason,
+            input_tokens: None,
+            output_tokens: None,
+        }
+    }
+
+    /// Set input tokens.
+    #[must_use]
+    pub fn with_input_tokens(mut self, tokens: u64) -> Self {
+        self.input_tokens = Some(tokens);
+        self
+    }
+
+    /// Set output tokens.
+    #[must_use]
+    pub fn with_output_tokens(mut self, tokens: u64) -> Self {
+        self.output_tokens = Some(tokens);
+        self
     }
 }
 

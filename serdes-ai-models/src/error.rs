@@ -83,6 +83,10 @@ pub enum ModelError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    /// Stream ended prematurely (e.g. transport EOF before a terminal event).
+    #[error("Incomplete stream: {0}")]
+    IncompleteStream(String),
+
     /// Network error.
     #[error("Network error: {0}")]
     Network(String),
@@ -100,6 +104,7 @@ impl ModelError {
             ModelError::Timeout(_) => true,
             ModelError::RateLimited { .. } => true,
             ModelError::Connection(_) => true,
+            ModelError::IncompleteStream(_) => true,
             ModelError::Http { status, .. } => *status >= 500,
             _ => false,
         }
@@ -165,6 +170,11 @@ impl ModelError {
     /// Create an invalid response error.
     pub fn invalid_response(message: impl Into<String>) -> Self {
         Self::InvalidResponse(message.into())
+    }
+
+    /// Create an incomplete-stream error.
+    pub fn incomplete_stream(message: impl Into<String>) -> Self {
+        Self::IncompleteStream(message.into())
     }
 
     /// Create a not supported error.
