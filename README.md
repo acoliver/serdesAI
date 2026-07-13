@@ -180,6 +180,29 @@ let graph = Graph::new()
 let result = graph.run(WorkflowState::default(), ()).await?;
 ```
 
+## 🔄 Model Retries
+
+Same-model retries are explicit and provider-neutral:
+
+```rust,ignore
+use serdes_ai::prelude::*;
+use std::time::Duration;
+
+let model = OpenAIChatModel::from_env("gpt-4o")?.with_retries(
+    RetryPolicy::for_model_requests()
+        .max_attempts(3)
+        .total_timeout(Some(Duration::from_secs(30))),
+);
+let agent = AgentBuilder::new(model).build();
+```
+
+Retries honor classified rate limits, transient server failures, connection
+errors, timeouts, and `Retry-After`. Authentication and invalid requests are not
+retried. Dropping the request future cancels backoff. Streaming retries stop at
+the first caller-visible event, so partial responses are never replayed. Use
+`RetryPolicy::disabled()` for one explicit attempt. Same-model retry is separate
+from `FallbackModel`, which selects another model.
+
 ## 📦 Crates
 
 SerdesAI is organized as a workspace of focused crates:

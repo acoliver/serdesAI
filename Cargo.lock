@@ -3128,6 +3128,7 @@ dependencies = [
  "serde_json",
  "serdes-ai-core",
  "serdes-ai-output",
+ "serdes-ai-retries",
  "serdes-ai-tools",
  "thiserror 1.0.69",
  "tokio",

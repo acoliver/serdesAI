@@ -3,6 +3,37 @@
 use std::time::Duration;
 use thiserror::Error;
 
+/// Reason an operation governed by a [`crate::RetryPolicy`] did not succeed.
+#[derive(Debug)]
+pub enum RetryFailure<E> {
+    /// The error was classified as permanent.
+    Permanent {
+        /// Original error, preserved without conversion.
+        error: E,
+        /// Number of attempts made.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+    /// The maximum number of attempts was reached.
+    Exhausted {
+        /// Final error, preserved without conversion.
+        error: E,
+        /// Number of attempts made.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+    /// The total time budget expired.
+    DeadlineExceeded {
+        /// Most recent error, if an attempt failed before the deadline.
+        last_error: Option<E>,
+        /// Number of attempts started.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+}
 /// Errors that can be retried.
 #[derive(Debug, Error)]
 pub enum RetryableError {

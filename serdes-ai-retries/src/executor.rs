@@ -1,11 +1,109 @@
 //! Retry executor for running operations with retries.
 
-use crate::config::RetryConfig;
-use crate::error::{RetryResult, RetryableError};
+use crate::config::{RetryConfig, RetryPolicy};
+use crate::error::{RetryFailure, RetryResult, RetryableError};
 use std::future::Future;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, sleep_until, timeout_at, Instant};
 use tracing::{debug, warn};
+
+/// Classification returned to the generic retry executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Retry the operation, optionally honoring a provider-supplied delay.
+    Retry {
+        /// Provider-supplied minimum delay.
+        retry_after: Option<Duration>,
+    },
+    /// Return the original error without another attempt.
+    DoNotRetry,
+}
+
+/// Execute an operation under a provider-neutral retry policy.
+///
+/// The original error type is retained. Dropping this future cancels an
+/// in-flight attempt or backoff because no background task is spawned.
+pub async fn with_retry_policy<F, Fut, T, E, C>(
+    policy: &RetryPolicy,
+    mut operation: F,
+    classify: C,
+) -> Result<T, RetryFailure<E>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    C: Fn(&E) -> RetryDecision,
+{
+    let started = Instant::now();
+    let deadline = policy.total_time_budget().map(|budget| started + budget);
+    let mut attempts = 0;
+    let mut last_error = None;
+
+    loop {
+        attempts += 1;
+        let result = if let Some(deadline) = deadline {
+            match timeout_at(deadline, operation()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(RetryFailure::DeadlineExceeded {
+                        last_error,
+                        attempts,
+                        elapsed: started.elapsed(),
+                    });
+                }
+            }
+        } else {
+            operation().await
+        };
+
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => match classify(&error) {
+                RetryDecision::DoNotRetry => {
+                    return Err(RetryFailure::Permanent {
+                        error,
+                        attempts,
+                        elapsed: started.elapsed(),
+                    });
+                }
+                RetryDecision::Retry { retry_after } => {
+                    if attempts >= policy.maximum_attempts() {
+                        return Err(RetryFailure::Exhausted {
+                            error,
+                            attempts,
+                            elapsed: started.elapsed(),
+                        });
+                    }
+
+                    let wait = policy.wait_strategy().calculate(attempts, retry_after);
+                    if let Some(deadline) = deadline {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(RetryFailure::DeadlineExceeded {
+                                last_error: Some(error),
+                                attempts,
+                                elapsed: started.elapsed(),
+                            });
+                        }
+
+                        let wake_at = now.checked_add(wait).unwrap_or(deadline);
+                        if wake_at >= deadline {
+                            last_error = Some(error);
+                            sleep_until(deadline).await;
+                            return Err(RetryFailure::DeadlineExceeded {
+                                last_error,
+                                attempts,
+                                elapsed: started.elapsed(),
+                            });
+                        }
+                    }
+
+                    last_error = Some(error);
+                    sleep(wait).await;
+                }
+            },
+        }
+    }
+}
 
 /// State of a retry attempt.
 #[derive(Debug, Clone)]
@@ -285,6 +383,111 @@ mod tests {
 
         assert!(result.is_err());
         // Should only try once since 400 is not retryable
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generic_policy_honors_retry_after() {
+        let policy = RetryPolicy::for_model_requests()
+            .max_attempts(2)
+            .wait(crate::WaitStrategy::RetryAfter {
+                fallback: Box::new(crate::WaitStrategy::None),
+                max_wait: Duration::from_secs(60),
+            })
+            .total_timeout(Some(Duration::from_secs(30)));
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = attempts.clone();
+
+        let task = tokio::spawn(async move {
+            with_retry_policy(
+                &policy,
+                || {
+                    let counter = counter.clone();
+                    async move {
+                        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Err::<u32, &'static str>("rate limited")
+                        } else {
+                            Ok(42)
+                        }
+                    }
+                },
+                |_| RetryDecision::Retry {
+                    retry_after: Some(Duration::from_secs(5)),
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(task.await.unwrap().unwrap(), 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_prevents_another_attempt() {
+        let policy = RetryPolicy::for_model_requests()
+            .max_attempts(3)
+            .wait(crate::WaitStrategy::Fixed(Duration::from_secs(10)))
+            .total_timeout(Some(Duration::from_secs(3)));
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = attempts.clone();
+
+        let task = tokio::spawn(async move {
+            with_retry_policy(
+                &policy,
+                || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), &'static str>("transient")
+                    }
+                },
+                |_| RetryDecision::Retry { retry_after: None },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(RetryFailure::DeadlineExceeded { attempts: 1, .. })
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_future_cancels_backoff() {
+        let policy = RetryPolicy::for_model_requests()
+            .max_attempts(3)
+            .wait(crate::WaitStrategy::Fixed(Duration::from_secs(10)))
+            .total_timeout(None);
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = attempts.clone();
+
+        let task = tokio::spawn(async move {
+            with_retry_policy(
+                &policy,
+                || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), &'static str>("transient")
+                    }
+                },
+                |_| RetryDecision::Retry { retry_after: None },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        task.abort();
+        tokio::time::advance(Duration::from_secs(20)).await;
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 

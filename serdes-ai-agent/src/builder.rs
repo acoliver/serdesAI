@@ -100,6 +100,8 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     /// Optional request timeout
     pub timeout: Option<Duration>,
+    /// Optional same-model retry policy. Retries are disabled when omitted.
+    pub retry_policy: Option<serdes_ai_models::RetryPolicy>,
 }
 
 impl ModelConfig {
@@ -119,6 +121,7 @@ impl ModelConfig {
             api_key: None,
             base_url: None,
             timeout: None,
+            retry_policy: None,
         }
     }
 
@@ -140,6 +143,20 @@ impl ModelConfig {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Enable same-model retries with the supplied policy.
+    #[must_use]
+    pub fn with_retries(mut self, policy: serdes_ai_models::RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    /// Explicitly disable same-model retries.
+    #[must_use]
+    pub fn without_retries(mut self) -> Self {
+        self.retry_policy = None;
         self
     }
 
@@ -172,18 +189,17 @@ impl ModelConfig {
     /// - `ollama` - Local Ollama models
     /// - `google` - Google/Gemini models
     pub fn build_model(&self) -> Result<Arc<dyn Model>, ModelError> {
-        // If no custom config, use infer_model which handles feature flags
-        if self.api_key.is_none() && self.base_url.is_none() && self.timeout.is_none() {
-            return serdes_ai_models::infer_model(&self.spec);
-        }
+        let model = if self.api_key.is_none() && self.base_url.is_none() && self.timeout.is_none() {
+            serdes_ai_models::infer_model(&self.spec)?
+        } else {
+            let (provider, model_name) = self.parse_spec();
+            self.build_model_with_config(provider, model_name)?
+        };
 
-        // Custom config requires building the model directly
-        let (provider, model_name) = self.parse_spec();
-
-        // We need to build the model with custom settings
-        // This requires the concrete model types which are behind feature flags
-        // in serdes-ai-models. We use a helper function pattern.
-        self.build_model_with_config(provider, model_name)
+        Ok(match self.retry_policy.clone() {
+            Some(policy) => Arc::new(serdes_ai_models::RetryingModel::from_arc(model, policy)),
+            None => model,
+        })
     }
 
     fn build_model_with_config(
@@ -362,6 +378,15 @@ where
     #[must_use]
     pub fn model_settings(mut self, settings: ModelSettings) -> Self {
         self.model_settings = settings;
+        self
+    }
+
+    /// Enable same-model retries for this agent's model.
+    #[must_use]
+    pub fn model_retries(mut self, policy: serdes_ai_models::RetryPolicy) -> Self {
+        self.model = Arc::new(serdes_ai_models::RetryingModel::from_arc(
+            self.model, policy,
+        ));
         self
     }
 

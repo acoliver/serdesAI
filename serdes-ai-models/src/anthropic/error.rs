@@ -26,7 +26,7 @@ pub(super) fn map_anthropic_error(
         _ => ProviderErrorKind::Other,
     };
 
-    ModelError::provider("anthropic", code, message, kind, retry_after)
+    ModelError::provider_with_status("anthropic", code, message, kind, http_status, retry_after)
 }
 
 #[cfg(test)]
@@ -44,6 +44,13 @@ mod tests {
         assert!(rate_limit.is_rate_limited());
         assert!(rate_limit.is_retryable());
         assert_eq!(rate_limit.retry_after(), Some(Duration::from_secs(12)));
+        assert!(matches!(
+            rate_limit,
+            ModelError::Provider {
+                status: Some(429),
+                ..
+            }
+        ));
 
         let overloaded = map_anthropic_error("overloaded_error", "try again", None, Some(529));
         assert!(overloaded.is_transient());
@@ -68,12 +75,14 @@ mod tests {
                 code,
                 message,
                 kind,
+                status,
                 retry_after,
             } => {
                 assert_eq!(provider, "anthropic");
                 assert_eq!(code, "overloaded_error");
                 assert_eq!(message, "capacity exhausted");
                 assert_eq!(kind, ProviderErrorKind::Overloaded);
+                assert_eq!(status, None);
                 assert_eq!(retry_after, None);
             }
             other => panic!("expected provider error, got {other:?}"),

@@ -3,6 +3,91 @@
 use crate::error::RetryableError;
 use std::time::Duration;
 
+/// Provider-neutral retry policy for operations that preserve their error type.
+///
+/// Unlike [`RetryConfig`], this policy counts total attempts. One attempt
+/// therefore disables retries while still executing the operation once.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    max_attempts: u32,
+    wait: WaitStrategy,
+    total_timeout: Option<Duration>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::for_model_requests()
+    }
+}
+
+impl RetryPolicy {
+    /// Create a policy with model-request defaults.
+    #[must_use]
+    pub fn for_model_requests() -> Self {
+        Self {
+            max_attempts: 3,
+            wait: WaitStrategy::RetryAfter {
+                fallback: Box::new(WaitStrategy::ExponentialJitter {
+                    initial: Duration::from_millis(500),
+                    max: Duration::from_secs(30),
+                    multiplier: 2.0,
+                    jitter: 0.1,
+                }),
+                max_wait: Duration::from_secs(60),
+            },
+            total_timeout: Some(Duration::from_secs(120)),
+        }
+    }
+
+    /// Create a policy that executes exactly one attempt.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            max_attempts: 1,
+            wait: WaitStrategy::None,
+            total_timeout: None,
+        }
+    }
+
+    /// Set the maximum number of attempts, clamped to at least one.
+    #[must_use]
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts.max(1);
+        self
+    }
+
+    /// Set the wait strategy between attempts.
+    #[must_use]
+    pub fn wait(mut self, wait: WaitStrategy) -> Self {
+        self.wait = wait;
+        self
+    }
+
+    /// Set the total time budget for attempts and backoff.
+    #[must_use]
+    pub fn total_timeout(mut self, total_timeout: Option<Duration>) -> Self {
+        self.total_timeout = total_timeout;
+        self
+    }
+
+    /// Return the maximum number of attempts.
+    #[must_use]
+    pub fn maximum_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// Return the configured wait strategy.
+    #[must_use]
+    pub fn wait_strategy(&self) -> &WaitStrategy {
+        &self.wait
+    }
+
+    /// Return the total time budget.
+    #[must_use]
+    pub fn total_time_budget(&self) -> Option<Duration> {
+        self.total_timeout
+    }
+}
 /// Configuration for retry behavior.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {

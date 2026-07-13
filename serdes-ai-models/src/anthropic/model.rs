@@ -705,6 +705,68 @@ mod tests {
         assert!(!auth.is_retryable());
     }
 
+    #[tokio::test]
+    async fn retrying_model_retries_concrete_anthropic_transport() {
+        use crate::{RetryPolicy, RetryingModel, WaitStrategy};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use wiremock::{Request, Respond, ResponseTemplate};
+
+        #[derive(Clone)]
+        struct RateLimitThenSuccess {
+            calls: Arc<AtomicU32>,
+        }
+
+        impl Respond for RateLimitThenSuccess {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(429)
+                        .insert_header("retry-after", "0")
+                        .set_body_raw(
+                            r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+                            "application/json",
+                        )
+                } else {
+                    ResponseTemplate::new(200).set_body_raw(
+                        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-test","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#,
+                        "application/json",
+                    )
+                }
+            }
+        }
+
+        let server = wiremock::MockServer::start().await;
+        let calls = Arc::new(AtomicU32::new(0));
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/messages"))
+            .respond_with(RateLimitThenSuccess {
+                calls: calls.clone(),
+            })
+            .mount(&server)
+            .await;
+
+        let inner = AnthropicModel::new("claude-test", "key").with_base_url(server.uri());
+        let model = RetryingModel::new(
+            inner,
+            RetryPolicy::for_model_requests()
+                .max_attempts(2)
+                .wait(WaitStrategy::None)
+                .total_timeout(Some(Duration::from_secs(5))),
+        );
+
+        let response = model
+            .request(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.parts.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn test_anthropic_model_new() {
         let model = AnthropicModel::new("claude-3-5-sonnet-20241022", "sk-test-key");
