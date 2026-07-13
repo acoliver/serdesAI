@@ -8,8 +8,8 @@ use bytes::Bytes;
 use futures::Stream;
 use pin_project_lite::pin_project;
 use serdes_ai_core::messages::{
-    ModelResponsePartDelta, ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent, PartStartEvent,
-    TextPart, ThinkingPart, ThinkingPartDelta, ToolCallPart,
+    FinishReason, ModelResponsePartDelta, ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent,
+    PartStartEvent, StreamCompleteEvent, TextPart, ThinkingPart, ThinkingPartDelta, ToolCallPart,
 };
 use serdes_ai_core::ModelResponsePart;
 use std::collections::HashMap;
@@ -32,6 +32,10 @@ pin_project! {
         output_tokens: u64,
         cache_creation_tokens: Option<u64>,
         cache_read_tokens: Option<u64>,
+        // Provider-reported stop reason from message_delta
+        stop_reason: Option<String>,
+        // Whether message_stop was observed
+        message_stop_seen: bool,
         // Finished
         done: bool,
     }
@@ -77,8 +81,33 @@ where
             output_tokens: 0,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            stop_reason: None,
+            message_stop_seen: false,
             done: false,
         }
+    }
+
+    /// The provider-reported stop reason (from `message_delta`), if any.
+    ///
+    /// This is only reliable after the stream has completed successfully
+    /// (i.e. `message_stop` was observed).
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.stop_reason.as_deref()
+    }
+
+    /// Whether `message_stop` was observed before the stream ended.
+    pub fn message_stop_seen(&self) -> bool {
+        self.message_stop_seen
+    }
+
+    /// Input tokens reported by the provider.
+    pub fn input_tokens(&self) -> u64 {
+        self.input_tokens
+    }
+
+    /// Output tokens reported by the provider.
+    pub fn output_tokens(&self) -> u64 {
+        self.output_tokens
     }
 }
 
@@ -91,6 +120,7 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
+        // After StreamComplete has been emitted the stream is done.
         if *this.done {
             return Poll::Ready(None);
         }
@@ -111,15 +141,30 @@ where
                             this.output_tokens,
                             this.cache_creation_tokens,
                             this.cache_read_tokens,
+                            this.stop_reason,
+                            this.message_stop_seen,
                             this.done,
                         ) {
+                            // If the result is StreamComplete, mark done so the
+                            // next poll returns None without re-checking EOF.
+                            if let Ok(ModelResponseStreamEvent::StreamComplete(_)) = &result {
+                                *this.done = true;
+                            }
                             return Poll::Ready(Some(result));
                         }
                     }
                     Err(e) => {
+                        *this.done = true;
                         return Poll::Ready(Some(Err(e)));
                     }
                 }
+            }
+
+            // If message_stop was already seen and all buffered events consumed,
+            // we should not poll the inner stream further — just end.
+            if *this.message_stop_seen {
+                *this.done = true;
+                return Poll::Ready(None);
             }
 
             // Need more data
@@ -130,9 +175,20 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
+                    *this.done = true;
                     return Poll::Ready(Some(Err(ModelError::Other(e.into()))));
                 }
                 Poll::Ready(None) => {
+                    // Inner stream reached EOF. If we haven't seen message_stop,
+                    // this is a premature EOF — emit a typed error.
+                    if !*this.message_stop_seen {
+                        *this.done = true;
+                        return Poll::Ready(Some(Err(ModelError::incomplete_stream(
+                            "stream ended before message_stop was received",
+                        ))));
+                    }
+                    // message_stop was seen but done wasn't set (shouldn't happen
+                    // since StreamComplete sets done, but guard anyway).
                     *this.done = true;
                     return Poll::Ready(None);
                 }
@@ -194,14 +250,18 @@ fn process_event(
     output_tokens: &mut u64,
     cache_creation_tokens: &mut Option<u64>,
     cache_read_tokens: &mut Option<u64>,
+    stop_reason: &mut Option<String>,
+    message_stop_seen: &mut bool,
     done: &mut bool,
 ) -> Option<Result<ModelResponseStreamEvent, ModelError>> {
-    // Parse the JSON data
+    // Parse the JSON data — reject malformed events rather than silently dropping them
     let event: StreamEvent = match serde_json::from_str(data) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!("Failed to parse stream event: {} - data: {}", e, data);
-            return None;
+            return Some(Err(ModelError::invalid_response(format!(
+                "Failed to parse stream event: {} - data: {}",
+                e, data
+            ))));
         }
     };
 
@@ -271,7 +331,14 @@ fn process_event(
                 }
                 ContentBlockDelta::InputJsonDelta { partial_json } => {
                     if let BlockState::ToolUse { input_json, .. } = state {
-                        input_json.push_str(&partial_json);
+                        // If the accumulated JSON is still just the initial empty
+                        // object, replace it with the first real delta.
+                        if input_json == "{}" {
+                            input_json.clear();
+                            input_json.push_str(&partial_json);
+                        } else {
+                            input_json.push_str(&partial_json);
+                        }
                     }
                     Some(Ok(ModelResponseStreamEvent::PartDelta(
                         PartDeltaEvent::tool_call_args(index, partial_json),
@@ -304,23 +371,58 @@ fn process_event(
         }
 
         StreamEvent::ContentBlockStop { index } => {
+            // Validate tool input JSON before accepting the block as complete.
+            // Skip validation when the input is the default empty object (no
+            // deltas were received).
+            if let Some(BlockState::ToolUse { input_json, .. }) = blocks.get(&index) {
+                if !input_json.is_empty() && input_json != "{}" {
+                    if serde_json::from_str::<serde_json::Value>(input_json).is_err() {
+                        return Some(Err(ModelError::invalid_response(format!(
+                            "content_block_stop for tool at index {} has incomplete JSON input: {}",
+                            index, input_json
+                        ))));
+                    }
+                }
+            }
             blocks.remove(&index);
             Some(Ok(ModelResponseStreamEvent::PartEnd(PartEndEvent {
                 index,
             })))
         }
 
-        StreamEvent::MessageDelta { delta: _, usage } => {
+        StreamEvent::MessageDelta { delta, usage } => {
+            if let Some(reason) = &delta.stop_reason {
+                *stop_reason = Some(reason.clone());
+            }
             if let Some(u) = usage {
                 *output_tokens = u.output_tokens;
             }
-            // We don't emit finish reason as event since core doesn't have it
             None
         }
 
         StreamEvent::MessageStop => {
-            *done = true;
-            None
+            // Atomically validate terminal state before accepting message_stop.
+            if !blocks.is_empty() {
+                let open_indices: Vec<usize> = blocks.keys().copied().collect();
+                *done = true;
+                return Some(Err(ModelError::incomplete_stream(format!(
+                    "message_stop received with open content block(s) at index/indices: {:?}",
+                    open_indices
+                ))));
+            }
+
+            *message_stop_seen = true;
+
+            // Map the Anthropic stop reason to FinishReason
+            let finish_reason = map_stop_reason(stop_reason.as_deref());
+
+            // Emit StreamComplete with provider terminal metadata
+            let mut event = StreamCompleteEvent::new(finish_reason);
+            event = event
+                .with_input_tokens(*input_tokens)
+                .with_output_tokens(*output_tokens);
+
+            Some(Ok(ModelResponseStreamEvent::StreamComplete(event)))
         }
 
         StreamEvent::Ping => None,
@@ -329,6 +431,17 @@ fn process_event(
             error.message,
             error.error_type,
         ))),
+    }
+}
+
+/// Map an Anthropic stop reason string to a [`FinishReason`].
+fn map_stop_reason(reason: Option<&str>) -> FinishReason {
+    match reason {
+        Some("end_turn") => FinishReason::EndTurn,
+        Some("stop_sequence") => FinishReason::StopSequence,
+        Some("max_tokens") => FinishReason::Length,
+        Some("tool_use") => FinishReason::ToolCall,
+        _ => FinishReason::Stop,
     }
 }
 
@@ -345,13 +458,26 @@ mod tests {
     #[tokio::test]
     async fn test_parse_message_start() {
         let data = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
-        let bytes = vec![Ok(make_sse_bytes("message_start", data))];
+        let msg_stop = r#"{"type":"message_stop"}"#;
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", data)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
+        ];
         let stream = stream::iter(bytes);
         let mut parser = AnthropicStreamParser::new(stream);
 
-        // Message start doesn't emit an event
+        // Message start emits nothing; message_stop emits StreamComplete
         let event = parser.next().await;
-        assert!(event.is_none());
+        assert!(event.is_some());
+        assert!(
+            matches!(
+                event.unwrap().unwrap(),
+                ModelResponseStreamEvent::StreamComplete(_)
+            ),
+            "expected StreamComplete"
+        );
+        // Next poll should be None (done)
+        assert!(parser.next().await.is_none());
     }
 
     #[tokio::test]
@@ -361,12 +487,16 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let msg_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#;
+        let msg_stop = r#"{"type":"message_stop"}"#;
 
         let bytes = vec![
             Ok(make_sse_bytes("message_start", msg_start)),
             Ok(make_sse_bytes("content_block_start", block_start)),
             Ok(make_sse_bytes("content_block_delta", delta)),
             Ok(make_sse_bytes("content_block_stop", block_stop)),
+            Ok(make_sse_bytes("message_delta", msg_delta)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
         ];
 
         let stream = stream::iter(bytes);
@@ -378,8 +508,8 @@ mod tests {
             events.push(result.unwrap());
         }
 
-        // Should have: PartStart, PartDelta, PartEnd
-        assert_eq!(events.len(), 3, "Expected 3 events, got {:?}", events);
+        // Should have: PartStart, PartDelta, PartEnd, StreamComplete
+        assert_eq!(events.len(), 4, "Expected 4 events, got {:?}", events);
 
         assert!(
             matches!(&events[0], ModelResponseStreamEvent::PartStart(_)),
@@ -393,6 +523,15 @@ mod tests {
             matches!(&events[2], ModelResponseStreamEvent::PartEnd(_)),
             "Third should be PartEnd"
         );
+        assert!(
+            matches!(&events[3], ModelResponseStreamEvent::StreamComplete(_)),
+            "Fourth should be StreamComplete"
+        );
+
+        // Provider terminal metadata should survive
+        assert_eq!(parser.stop_reason(), Some("end_turn"));
+        assert!(parser.message_stop_seen());
+        assert_eq!(parser.output_tokens(), 5);
     }
 
     #[tokio::test]
@@ -402,6 +541,7 @@ mod tests {
         let delta1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}"#;
         let delta2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#;
         let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let msg_stop = r#"{"type":"message_stop"}"#;
 
         let bytes = vec![
             Ok(make_sse_bytes("message_start", msg_start)),
@@ -409,6 +549,7 @@ mod tests {
             Ok(make_sse_bytes("content_block_delta", delta1)),
             Ok(make_sse_bytes("content_block_delta", delta2)),
             Ok(make_sse_bytes("content_block_stop", block_stop)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
         ];
 
         let stream = stream::iter(bytes);
@@ -419,8 +560,8 @@ mod tests {
             events.push(result.unwrap());
         }
 
-        // Should have: PartStart, PartDelta, PartDelta, PartEnd
-        assert_eq!(events.len(), 4, "Expected 4 events, got {:?}", events);
+        // Should have: PartStart, PartDelta, PartDelta, PartEnd, StreamComplete
+        assert_eq!(events.len(), 5, "Expected 5 events, got {:?}", events);
 
         // First should be PartStart with tool_use
         if let ModelResponseStreamEvent::PartStart(start) = &events[0] {
@@ -431,6 +572,11 @@ mod tests {
         } else {
             panic!("Expected PartStart");
         }
+        // Last should be StreamComplete
+        assert!(
+            matches!(&events[4], ModelResponseStreamEvent::StreamComplete(_)),
+            "Last should be StreamComplete"
+        );
     }
 
     #[tokio::test]
@@ -450,12 +596,351 @@ mod tests {
     #[tokio::test]
     async fn test_parse_ping() {
         let ping = r#"{"type":"ping"}"#;
-        let bytes = vec![Ok(make_sse_bytes("ping", ping))];
+        let msg_stop = r#"{"type":"message_stop"}"#;
+        let bytes = vec![
+            Ok(make_sse_bytes("ping", ping)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
+        ];
         let stream = stream::iter(bytes);
         let mut parser = AnthropicStreamParser::new(stream);
 
-        // Ping shouldn't emit an event
+        // Ping emits nothing; message_stop emits StreamComplete
         let event = parser.next().await;
-        assert!(event.is_none());
+        assert!(event.is_some());
+        assert!(
+            matches!(
+                event.unwrap().unwrap(),
+                ModelResponseStreamEvent::StreamComplete(_)
+            ),
+            "expected StreamComplete"
+        );
+        // Done
+        assert!(parser.next().await.is_none());
+    }
+
+    // ========================================================================
+    // Regression tests for issue #39: premature EOF must not be treated as
+    // successful completion.
+    // ========================================================================
+
+    /// Helper: build a partial (incomplete) SSE frame as bytes.
+    fn make_partial_sse_bytes(event_type: &str, partial_data: &str) -> Bytes {
+        // Intentionally missing the trailing blank line so the frame is incomplete
+        Bytes::from(format!(
+            "event: {}
+data: {}",
+            event_type, partial_data
+        ))
+    }
+
+    /// Test 1: EOF before any `message_stop`.
+    #[tokio::test]
+    async fn test_eof_before_message_stop() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+            Ok(make_sse_bytes("content_block_stop", block_stop)),
+            // NO message_delta, NO message_stop — stream just ends
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(had_error, "expected an IncompleteStream error");
+        assert!(!parser.message_stop_seen());
+    }
+
+    /// Test 2: EOF with a partial final SSE record in the buffer.
+    #[tokio::test]
+    async fn test_eof_with_partial_sse_frame() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+            Ok(make_sse_bytes("content_block_stop", block_stop)),
+            // A partial frame that will never be completed — inner stream ends
+            Ok(make_partial_sse_bytes(
+                "message_delta",
+                r#"{"type":"message_delta","#,
+            )),
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream for partial frame, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(
+            had_error,
+            "expected IncompleteStream error for partial SSE frame"
+        );
+    }
+
+    /// Test 3: EOF with an open text block.
+    #[tokio::test]
+    async fn test_eof_with_open_text_block() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        // NO content_block_stop, NO message_stop
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream for open text block, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(
+            had_error,
+            "expected IncompleteStream error for open text block"
+        );
+    }
+
+    /// Test 4: EOF with an open thinking block.
+    #[tokio::test]
+    async fn test_eof_with_open_thinking_block() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Hmm"}}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream for open thinking block, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(
+            had_error,
+            "expected IncompleteStream error for open thinking block"
+        );
+    }
+
+    /// Test 5: EOF with an open tool-use block (incomplete tool JSON).
+    #[tokio::test]
+    async fn test_eof_with_open_tool_use_block() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"search","input":{}}}"#;
+        let delta1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}"#;
+        // Second delta makes the JSON incomplete (missing closing brace)
+        let delta2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\""}}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta1)),
+            Ok(make_sse_bytes("content_block_delta", delta2)),
+            // NO content_block_stop, NO message_stop
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream for open tool block, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(
+            had_error,
+            "expected IncompleteStream error for open tool-use block"
+        );
+    }
+
+    /// Test 6: `content_block_stop` followed by EOF without `message_stop`.
+    #[tokio::test]
+    async fn test_content_block_stop_then_eof_without_message_stop() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+            Ok(make_sse_bytes("content_block_stop", block_stop)),
+            // block is closed but no message_stop
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut had_error = false;
+        while let Some(result) = parser.next().await {
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, ModelError::IncompleteStream(_)),
+                    "expected IncompleteStream without message_stop, got: {:?}",
+                    e
+                );
+                had_error = true;
+            }
+        }
+        assert!(had_error, "expected IncompleteStream error");
+        assert!(!parser.message_stop_seen());
+    }
+
+    /// Test 7: A valid sequence ending in `message_stop` produces no error.
+    #[tokio::test]
+    async fn test_valid_stream_with_message_stop() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let msg_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#;
+        let msg_stop = r#"{"type":"message_stop"}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+            Ok(make_sse_bytes("content_block_stop", block_stop)),
+            Ok(make_sse_bytes("message_delta", msg_delta)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut saw_stream_complete = false;
+        while let Some(result) = parser.next().await {
+            match result {
+                Ok(ModelResponseStreamEvent::StreamComplete(sc)) => {
+                    saw_stream_complete = true;
+                    assert_eq!(sc.finish_reason, FinishReason::EndTurn);
+                    assert_eq!(sc.input_tokens, Some(10));
+                    assert_eq!(sc.output_tokens, Some(5));
+                }
+                Ok(_) => {}
+                Err(e) => panic!("valid stream should not produce error: {:?}", e),
+            }
+        }
+        assert!(
+            saw_stream_complete,
+            "valid stream should emit StreamComplete"
+        );
+        assert!(parser.message_stop_seen());
+        assert_eq!(parser.stop_reason(), Some("end_turn"));
+        assert_eq!(parser.output_tokens(), 5);
+        assert_eq!(parser.input_tokens(), 10);
+    }
+
+    /// Test 8: Premature EOF after visible text produces an error and no
+    /// further successful events.
+    #[tokio::test]
+    async fn test_premature_eof_after_text_produces_error() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let delta2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta1)),
+            Ok(make_sse_bytes("content_block_delta", delta2)),
+            // Stream ends here — open text block, no message_stop
+        ];
+
+        let stream = stream::iter(bytes);
+        let mut parser = AnthropicStreamParser::new(stream);
+
+        let mut text_deltas_seen = 0;
+        let mut error_seen = false;
+        while let Some(result) = parser.next().await {
+            match result {
+                Ok(ModelResponseStreamEvent::PartDelta(PartDeltaEvent {
+                    delta: ModelResponsePartDelta::Text(_),
+                    ..
+                })) => {
+                    text_deltas_seen += 1;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    assert!(
+                        matches!(e, ModelError::IncompleteStream(_)),
+                        "expected IncompleteStream, got: {:?}",
+                        e
+                    );
+                    error_seen = true;
+                }
+            }
+        }
+        assert!(text_deltas_seen >= 2, "should have seen text deltas");
+        assert!(error_seen, "must see IncompleteStream error");
+        assert!(!parser.message_stop_seen());
     }
 }

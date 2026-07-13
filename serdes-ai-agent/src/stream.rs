@@ -507,6 +507,9 @@ impl AgentStream {
                 let mut response_parts: Vec<ModelResponsePart> = Vec::new();
                 // Track stream events (used by tracing when enabled)
                 let mut stream_event_count = 0u32;
+                // Provider-reported finish reason (set by StreamComplete event)
+                let mut stream_finish_reason: Option<FinishReason> = None;
+                let mut stream_usage: Option<(u64, u64)> = None;
 
                 // Process stream events
                 debug!("AgentStream: starting to process model stream events");
@@ -621,6 +624,14 @@ impl AgentStream {
                                 ModelResponseStreamEvent::PartEnd(_) => {
                                     // Part finished
                                 }
+                                ModelResponseStreamEvent::StreamComplete(sc) => {
+                                    stream_finish_reason = Some(sc.finish_reason);
+                                    if let (Some(inp), Some(out)) =
+                                        (sc.input_tokens, sc.output_tokens)
+                                    {
+                                        stream_usage = Some((inp, out));
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -641,13 +652,54 @@ impl AgentStream {
                     "AgentStream: finished processing model stream"
                 );
 
-                // Build the complete response
+                // If the stream did not produce a terminal StreamComplete event,
+                // this is a premature EOF — emit an error and abort.
+                let stream_finish_reason = match stream_finish_reason {
+                    Some(reason) => reason,
+                    None => {
+                        let _ = tx
+                            .send(Ok(AgentStreamEvent::Error {
+                                message:
+                                    "model stream ended without a terminal StreamComplete event"
+                                        .to_string(),
+                            }))
+                            .await;
+                        let _ = tx
+                            .send(Err(AgentRunError::Model(
+                                serdes_ai_models::ModelError::incomplete_stream(
+                                    "model stream ended without a terminal StreamComplete event",
+                                ),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+
+                // If the stream produced no parts at all, treat it as an error
+                if response_parts.is_empty() {
+                    let _ = tx
+                        .send(Ok(AgentStreamEvent::Error {
+                            message: "model stream ended without producing any content".to_string(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Err(AgentRunError::Model(
+                            serdes_ai_models::ModelError::incomplete_stream(
+                                "model stream ended without producing any content",
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+
+                // Build the complete response using the provider-reported finish reason
                 let mut response = ModelResponse {
                     parts: response_parts.clone(),
                     model_name: Some(model.name().to_string()),
                     timestamp: Utc::now(),
-                    finish_reason: Some(FinishReason::Stop),
-                    usage: None,
+                    finish_reason: Some(stream_finish_reason),
+                    usage: stream_usage
+                        .map(|(req, res)| serdes_ai_core::RequestUsage::with_tokens(req, res)),
                     vendor_id: None,
                     vendor_details: None,
                     kind: "response".to_string(),
@@ -1018,6 +1070,10 @@ impl AgentStream {
 
                 let mut response_parts: Vec<ModelResponsePart> = Vec::new();
 
+                // Provider-reported finish reason (set by StreamComplete event)
+                let mut stream_finish_reason: Option<FinishReason> = None;
+                let mut stream_usage: Option<(u64, u64)> = None;
+
                 // Process stream events with cancellation check
                 loop {
                     tokio::select! {
@@ -1149,6 +1205,14 @@ impl AgentStream {
                                             }
                                         }
                                         ModelResponseStreamEvent::PartEnd(_) => {}
+                                        ModelResponseStreamEvent::StreamComplete(sc) => {
+                                            stream_finish_reason = Some(sc.finish_reason);
+                                            if let (Some(inp), Some(out)) =
+                                                (sc.input_tokens, sc.output_tokens)
+                                            {
+                                                stream_usage = Some((inp, out));
+                                            }
+                                        }
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -1169,13 +1233,54 @@ impl AgentStream {
                     }
                 }
 
-                // Build the complete response
+                // If the stream did not produce a terminal StreamComplete event,
+                // this is a premature EOF — emit an error and abort.
+                let stream_finish_reason = match stream_finish_reason {
+                    Some(reason) => reason,
+                    None => {
+                        let _ = tx
+                            .send(Ok(AgentStreamEvent::Error {
+                                message:
+                                    "model stream ended without a terminal StreamComplete event"
+                                        .to_string(),
+                            }))
+                            .await;
+                        let _ = tx
+                            .send(Err(AgentRunError::Model(
+                                serdes_ai_models::ModelError::incomplete_stream(
+                                    "model stream ended without a terminal StreamComplete event",
+                                ),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+
+                // If the stream produced no parts at all, treat it as an error
+                if response_parts.is_empty() {
+                    let _ = tx
+                        .send(Ok(AgentStreamEvent::Error {
+                            message: "model stream ended without producing any content".to_string(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Err(AgentRunError::Model(
+                            serdes_ai_models::ModelError::incomplete_stream(
+                                "model stream ended without producing any content",
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+
+                // Build the complete response using the provider-reported finish reason
                 let mut response = ModelResponse {
                     parts: response_parts.clone(),
                     model_name: Some(model.name().to_string()),
                     timestamp: Utc::now(),
-                    finish_reason: Some(FinishReason::Stop),
-                    usage: None,
+                    finish_reason: Some(stream_finish_reason),
+                    usage: stream_usage
+                        .map(|(req, res)| serdes_ai_core::RequestUsage::with_tokens(req, res)),
                     vendor_id: None,
                     vendor_details: None,
                     kind: "response".to_string(),
@@ -1400,7 +1505,9 @@ mod tests {
     use super::*;
     use crate::builder::agent;
     use futures::{stream, StreamExt};
-    use serdes_ai_core::messages::{ModelRequestPart, TextPart, ToolCallPart};
+    use serdes_ai_core::messages::{
+        FinishReason, ModelRequestPart, StreamCompleteEvent, TextPart, ToolCallPart,
+    };
     use serdes_ai_models::FunctionModel;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1519,6 +1626,9 @@ mod tests {
                             ),
                         )),
                         Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::ToolCall),
+                        )),
                     ]
                 } else {
                     vec![
@@ -1527,6 +1637,9 @@ mod tests {
                             ModelResponsePart::Text(TextPart::new("done")),
                         )),
                         Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::Stop),
+                        )),
                     ]
                 };
 
@@ -1577,6 +1690,257 @@ mod tests {
         assert!(
             saw_tool_call,
             "expected at least one tool call in persisted RunComplete messages"
+        );
+    }
+
+    // ========================================================================
+    // Regression tests for issue #39: premature EOF must not produce
+    // successful OutputReady, committed history, fabricated Stop, or
+    // successful RunComplete.
+    //
+    // The Anthropic parser now emits `ModelError::IncompleteStream` on
+    // premature EOF. These agent tests verify that when the model stream
+    // produces such an error — after partial content — the agent does not
+    // emit success events or commit the response.
+    // ========================================================================
+
+    /// Helper: collect all events from a stream and check that no
+    /// `OutputReady`, `RunComplete`, or `ResponseComplete` event was emitted,
+    /// and that an error was produced.
+    async fn assert_stream_error_no_success(
+        model: FunctionModel,
+        use_cancel: bool,
+    ) -> Vec<AgentStreamEvent> {
+        let agentic = agent(model).build();
+
+        let mut stream = if use_cancel {
+            let token = CancellationToken::new();
+            AgentStream::new_with_cancel(&agentic, "Hello".into(), (), RunOptions::default(), token)
+                .await
+                .expect("stream should start")
+        } else {
+            agentic
+                .run_stream("Hello", ())
+                .await
+                .expect("stream should start")
+        };
+
+        let mut events = Vec::new();
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(event) => {
+                    assert!(
+                        !matches!(event, AgentStreamEvent::OutputReady),
+                        "must NOT emit OutputReady on stream error"
+                    );
+                    assert!(
+                        !matches!(event, AgentStreamEvent::RunComplete { .. }),
+                        "must NOT emit RunComplete on stream error"
+                    );
+                    assert!(
+                        !matches!(event, AgentStreamEvent::ResponseComplete { .. }),
+                        "must NOT emit ResponseComplete on stream error"
+                    );
+                    events.push(event);
+                }
+                Err(e) => {
+                    saw_error = true;
+                    events.push(AgentStreamEvent::Error {
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
+        assert!(saw_error, "expected an error event");
+        events
+    }
+
+    /// Test: stream error after partial text (simulating Anthropic
+    /// IncompleteStream) produces an error and no success events.
+    /// Non-cancellable path.
+    #[tokio::test]
+    async fn test_premature_eof_non_cancellable() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("Partial response")),
+                )),
+                Err(serdes_ai_models::ModelError::incomplete_stream(
+                    "stream ended before message_stop was received",
+                )),
+            ]))
+        });
+
+        let events = assert_stream_error_no_success(model, false).await;
+
+        let saw_text = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::TextDelta { .. }));
+        assert!(saw_text, "should have seen partial text");
+    }
+
+    /// Test: stream error after partial text — cancellable path.
+    #[tokio::test]
+    async fn test_premature_eof_cancellable() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("Partial response")),
+                )),
+                Err(serdes_ai_models::ModelError::incomplete_stream(
+                    "stream ended before message_stop was received",
+                )),
+            ]))
+        });
+
+        let events = assert_stream_error_no_success(model, true).await;
+
+        let saw_text = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::TextDelta { .. }));
+        assert!(saw_text, "should have seen partial text");
+    }
+
+    /// Test: empty stream (no parts at all) produces an error.
+    /// Non-cancellable path.
+    #[tokio::test]
+    async fn test_premature_eof_empty_stream_non_cancellable() {
+        let model =
+            FunctionModel::with_stream(|_messages, _settings| Box::pin(stream::iter(vec![])));
+
+        let events = assert_stream_error_no_success(model, false).await;
+
+        let saw_text = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::TextDelta { .. }));
+        assert!(!saw_text, "should NOT have seen any text from empty stream");
+    }
+
+    /// Test: stream error after incomplete tool call — must not execute
+    /// the tool or commit it.
+    #[tokio::test]
+    async fn test_premature_eof_incomplete_tool_call() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::ToolCall(
+                        ToolCallPart::new("search", serde_json::json!({}))
+                            .with_tool_call_id("call_1"),
+                    ),
+                )),
+                Err(serdes_ai_models::ModelError::incomplete_stream(
+                    "stream ended with open content block",
+                )),
+            ]))
+        });
+
+        let events = assert_stream_error_no_success(model, false).await;
+
+        // Should NOT have seen ToolCallComplete
+        let saw_tool_complete = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::ToolCallComplete { .. }));
+        assert!(
+            !saw_tool_complete,
+            "must NOT emit ToolCallComplete on incomplete tool call"
+        );
+
+        // Should NOT have seen ToolExecuted
+        let saw_tool_executed = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::ToolExecuted { .. }));
+        assert!(!saw_tool_executed, "must NOT execute tool on premature EOF");
+    }
+
+    /// Test: a valid stream (PartStart + PartEnd + StreamComplete) produces
+    /// OutputReady and RunComplete. This verifies the happy path is not broken.
+    #[tokio::test]
+    async fn test_valid_stream_produces_success() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("Hello!")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(FinishReason::Stop),
+                )),
+            ]))
+        });
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("Hi", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_output_ready = false;
+        let mut saw_run_complete = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::OutputReady) => saw_output_ready = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(_) => {}
+                Err(e) => panic!("valid stream should not error: {:?}", e),
+            }
+        }
+        assert!(saw_output_ready, "valid stream should emit OutputReady");
+        assert!(saw_run_complete, "valid stream should emit RunComplete");
+    }
+
+    /// Test: premature EOF — empty stream, cancellable path.
+    #[tokio::test]
+    async fn test_premature_eof_empty_stream_cancellable() {
+        let model =
+            FunctionModel::with_stream(|_messages, _settings| Box::pin(stream::iter(vec![])));
+
+        let events = assert_stream_error_no_success(model, true).await;
+
+        let saw_text = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::TextDelta { .. }));
+        assert!(!saw_text, "should NOT have seen any text from empty stream");
+    }
+
+    /// Test: premature EOF — incomplete tool call, cancellable path.
+    #[tokio::test]
+    async fn test_premature_eof_incomplete_tool_call_cancellable() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::ToolCall(
+                        ToolCallPart::new("search", serde_json::json!({}))
+                            .with_tool_call_id("call_1"),
+                    ),
+                )),
+                Err(serdes_ai_models::ModelError::incomplete_stream(
+                    "stream ended with open content block",
+                )),
+            ]))
+        });
+
+        let events = assert_stream_error_no_success(model, true).await;
+
+        let saw_tool_complete = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::ToolCallComplete { .. }));
+        assert!(
+            !saw_tool_complete,
+            "must NOT emit ToolCallComplete on incomplete tool call (cancellable)"
+        );
+
+        let saw_tool_executed = events
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::ToolExecuted { .. }));
+        assert!(
+            !saw_tool_executed,
+            "must NOT execute tool on premature EOF (cancellable)"
         );
     }
 }
