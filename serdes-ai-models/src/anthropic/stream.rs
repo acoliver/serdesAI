@@ -156,10 +156,7 @@ where
                             this.done,
                         ) {
                             if result.is_err()
-                                || matches!(
-                                    result,
-                                    Ok(ModelResponseStreamEvent::StreamComplete(_))
-                                )
+                                || matches!(result, Ok(ModelResponseStreamEvent::StreamComplete(_)))
                             {
                                 *this.done = true;
                             }
@@ -200,7 +197,7 @@ where
                     }
 
                     if !this.buffer.is_empty() {
-                        return Poll::Ready(Some(Err(ModelError::invalid_response(format!(
+                        return Poll::Ready(Some(Err(ModelError::incomplete_stream(format!(
                             "stream ended with {} bytes of unparsed SSE data remaining in buffer",
                             this.buffer.len()
                         )))));
@@ -1119,8 +1116,8 @@ data: {}",
 
             assert_eq!(
                 events.len(),
-                3,
-                "chunk_size {}: expected 3 events (PartStart, PartDelta, PartEnd), got {}",
+                4,
+                "chunk_size {}: expected 4 events (PartStart, PartDelta, PartEnd), got {}",
                 chunk_size,
                 events.len()
             );
@@ -1165,8 +1162,8 @@ data: {}",
 
             assert_eq!(
                 events.len(),
-                3,
-                "split_point {}: expected 3 events",
+                4,
+                "split_point {}: expected 4 events",
                 split_point
             );
         }
@@ -1360,8 +1357,8 @@ data: {}",
 
             assert_eq!(
                 events.len(),
-                3,
-                "split_offset {}: expected 3 events",
+                4,
+                "split_offset {}: expected 4 events",
                 split_offset
             );
         }
