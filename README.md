@@ -1,13 +1,13 @@
 # SerdesAI 🦀
 
-> **A complete Rust port of pydantic-ai for building production-ready AI agents**
+> **A type-safe Rust AI agent framework inspired by pydantic-ai**
 
 [![Crates.io](https://img.shields.io/crates/v/serdes-ai.svg)](https://crates.io/crates/serdes-ai)
 [![Documentation](https://docs.rs/serdes-ai/badge.svg)](https://docs.rs/serdes-ai)
 [![CI](https://github.com/janfeddersen-wq/serdesAI/workflows/CI/badge.svg)](https://github.com/janfeddersen-wq/serdesAI/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-SerdesAI is a comprehensive, type-safe Rust framework for building AI agents that interact with large language models. It is a complete port of [pydantic-ai](https://github.com/pydantic/pydantic-ai) to pure Rust, providing ergonomic async APIs with compile-time safety guarantees.
+SerdesAI is a type-safe Rust framework for building AI agents that interact with large language models. It follows many architectural ideas from [pydantic-ai](https://github.com/pydantic/pydantic-ai), while parity work remains ongoing and Rust-specific APIs may differ. Evaluate the capabilities and provider paths you need before production deployment.
 
 ## ✨ Features
 
@@ -322,19 +322,28 @@ serdes-ai = { version = "0.1", features = ["full"] }
 - [Examples](./examples/)
 - [Migration from pydantic-ai](./docs/migration.md)
 
-## ⚖️ Comparison with pydantic-ai
+## ⚖️ Capability and parity status
 
-| Feature       | pydantic-ai            | serdes-ai        |
-| ------------- | ---------------------- | ---------------- |
-| Language      | Python                 | Rust             |
-| Type Safety   | Runtime (Pydantic)     | Compile-time     |
-| Async Runtime | asyncio                | tokio            |
-| Validation    | Pydantic v2            | serde + custom   |
-| Performance   | Good                   | Excellent        |
-| Memory Safety | Garbage Collected      | Ownership system |
-| Binary Size   | Large (Python runtime) | Minimal          |
-| Startup Time  | Slow                   | Instant          |
-| Thread Safety | GIL limitations        | Fully concurrent |
+The current audit baseline is pydantic-ai at the SerdesAI upstream revision
+`be5774b5c618a71fe899ac5b8c6a5e958ea42a5d` (2026-07-13). This is a capability
+comparison, not a claim of API or behavioral parity.
+
+| Capability | SerdesAI status | Notes |
+| --- | --- | --- |
+| Typed agents and dependencies | Implemented | Rust generics and serde-based output validation |
+| Model providers | Implemented, provider-specific | Verify the selected model/profile capability flags |
+| Tool calling and structured output | Implemented | Provider behavior and schema support vary |
+| Streaming terminal integrity | Implemented for the audited Anthropic path | Requires provider terminal metadata; premature EOF is an error |
+| Same-model smart retries | Implemented, opt-in | `RetryingModel` / `with_retries`; total deadline and `Retry-After` supported |
+| Cross-model streaming fallback | Implemented with a strict boundary | May switch before the first event only; every event, including metadata, locks the attempt |
+| Shared SSE framing | Implemented and used by Anthropic | Strict UTF-8, bounded buffering, incomplete-EOF rejection |
+| Graphs, MCP, embeddings, evaluations | Implemented as separate crates | APIs are Rust-native and are not asserted to match every pydantic-ai feature |
+| Full pydantic-ai API/behavior parity | Ongoing | No unconditional full-port or production-readiness claim |
+
+Retries and fallback are separate. Retries repeat the same model and are enabled
+explicitly. Fallback selects another model. For streaming fallback, an acquisition
+failure or retryable error before the first event can select a backup. Once any
+event escapes, later errors propagate without replaying or concatenating output.
 
 ## 🏗️ Architecture
 

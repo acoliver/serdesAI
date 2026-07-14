@@ -1,7 +1,7 @@
 //! # SerdesAI - Type-Safe AI Agent Framework for Rust
 //!
 //! SerdesAI is a comprehensive Rust library for building AI agents that interact with
-//! large language models (LLMs). It is a complete port of [pydantic-ai](https://github.com/pydantic/pydantic-ai)
+//! large language models (LLMs). It is inspired by [pydantic-ai](https://github.com/pydantic/pydantic-ai), with parity work ongoing,
 //! to Rust, providing type-safe, ergonomic APIs for creating intelligent agents.
 //!
 //! ## Quick Start

@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/serdes-ai/badge.svg)](https://docs.rs/serdes-ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/janfeddersen-wq/serdesAI/blob/main/LICENSE)
 
-> Type-safe, production-ready AI agent framework for Rust - a full port of pydantic-ai
+> Type-safe Rust AI agent framework inspired by pydantic-ai; parity is ongoing
 
 This is the main facade crate that re-exports all SerdesAI functionality for convenient use.
 
@@ -57,8 +57,19 @@ let agent = AgentBuilder::new(model).build();
 ```
 
 Retries are opt-in and repeat the same model. `FallbackModel` remains the
-separate mechanism for selecting another model. Streaming acquisition can retry
-before its first visible event; errors after that boundary are never replayed.
+separate mechanism for selecting another model. A streaming retry or fallback
+can occur only before its first event; metadata also counts as exposure. Errors
+after that boundary are propagated without replay or concatenation.
+
+## Parity and readiness
+
+SerdesAI provides Rust-native typed agents, tools, streaming, retries, fallback,
+graphs, MCP, embeddings, and evaluation crates. It does not currently claim full
+API or behavioral parity with pydantic-ai. The capability audit is tied to this
+repository's upstream revision
+`be5774b5c618a71fe899ac5b8c6a5e958ea42a5d` (2026-07-13); consult the root
+README capability matrix and test the exact providers and features required by
+your deployment before treating a configuration as production-ready.
 
 ## Part of SerdesAI
 
