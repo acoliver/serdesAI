@@ -62,11 +62,23 @@ impl SseEvent {
 }
 
 /// Parser for Server-Sent Events streams.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
     events: VecDeque<SseEvent>,
     last_event_id: Option<String>,
+    max_buffer_size: usize,
+}
+
+impl Default for SseParser {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            events: VecDeque::new(),
+            last_event_id: None,
+            max_buffer_size: MAX_BUFFER_SIZE,
+        }
+    }
 }
 
 impl SseParser {
@@ -76,40 +88,34 @@ impl SseParser {
         Self::default()
     }
 
+    /// Set the maximum number of unframed bytes retained by the parser.
+    #[must_use]
+    pub fn with_max_buffer_size(mut self, max_buffer_size: usize) -> Self {
+        self.max_buffer_size = max_buffer_size;
+        self
+    }
+
     /// Feed bytes into the parser.
     pub fn feed(&mut self, bytes: &Bytes) -> StreamResult<Vec<SseEvent>> {
-        let chunk = String::from_utf8_lossy(bytes);
-        self.feed_str(&chunk)
+        self.buffer.extend_from_slice(bytes);
+        self.validate_buffer()?;
+        self.parse_buffer()
     }
 
     /// Feed a string into the parser.
     pub fn feed_str(&mut self, s: &str) -> StreamResult<Vec<SseEvent>> {
-        self.buffer.push_str(s);
-
-        if self.buffer.len() > MAX_BUFFER_SIZE {
-            return Err(StreamError::BufferOverflow);
-        }
-
-        self.parse_buffer()
+        self.feed(&Bytes::copy_from_slice(s.as_bytes()))
     }
 
-    /// Call when stream ends to flush any remaining event.
+    /// Validate that EOF occurred at an SSE record boundary.
     pub fn finish(&mut self) -> StreamResult<Vec<SseEvent>> {
-        let mut events = self.parse_buffer()?;
-
-        if !self.buffer.trim().is_empty() {
-            if let Some(event) = self.parse_event(self.buffer.trim_end_matches(['\n', '\r'])) {
-                if let Some(id) = &event.id {
-                    self.last_event_id = Some(id.clone());
-                }
-                self.events.push_back(event.clone());
-                events.push(event);
-            }
+        let events = self.parse_buffer()?;
+        if self.buffer.is_empty() {
+            Ok(events)
+        } else {
+            self.validate_buffer()?;
+            Err(StreamError::IncompleteSse)
         }
-
-        self.buffer.clear();
-
-        Ok(events)
     }
 
     /// Get the next parsed event.
@@ -133,16 +139,27 @@ impl SseParser {
         self.events.clear();
     }
 
+    fn validate_buffer(&self) -> StreamResult<()> {
+        if self.buffer.len() > self.max_buffer_size {
+            return Err(StreamError::BufferOverflow);
+        }
+        if let Err(error) = std::str::from_utf8(&self.buffer) {
+            if error.error_len().is_some() {
+                return Err(StreamError::InvalidUtf8);
+            }
+        }
+        Ok(())
+    }
+
     fn parse_buffer(&mut self) -> StreamResult<Vec<SseEvent>> {
         let mut parsed_events = Vec::new();
 
-        // Split by double newlines (event boundaries)
-        while let Some((pos, delimiter_len)) = self.find_event_boundary() {
-            let event_str = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + delimiter_len..].to_string();
-            self.buffer = self.buffer.trim_start_matches(['\n', '\r']).to_string();
+        while let Some((pos, delimiter_len)) = find_event_boundary(&self.buffer) {
+            let frame = self.buffer[..pos].to_vec();
+            self.buffer.drain(..pos + delimiter_len);
+            let event_str = std::str::from_utf8(&frame).map_err(|_| StreamError::InvalidUtf8)?;
 
-            if let Some(event) = self.parse_event(&event_str) {
+            if let Some(event) = self.parse_event(event_str) {
                 if let Some(id) = &event.id {
                     self.last_event_id = Some(id.clone());
                 }
@@ -151,19 +168,8 @@ impl SseParser {
             }
         }
 
+        self.validate_buffer()?;
         Ok(parsed_events)
-    }
-
-    fn find_event_boundary(&self) -> Option<(usize, usize)> {
-        let newline = self.buffer.find("\n\n").map(|pos| (pos, 2));
-        let carriage = self.buffer.find("\r\n\r\n").map(|pos| (pos, 4));
-
-        match (newline, carriage) {
-            (Some(nl), Some(cr)) => Some(if cr.0 < nl.0 { cr } else { nl }),
-            (Some(nl), None) => Some(nl),
-            (None, Some(cr)) => Some(cr),
-            (None, None) => None,
-        }
     }
 
     fn parse_event(&self, s: &str) -> Option<SseEvent> {
@@ -171,24 +177,24 @@ impl SseParser {
         let mut data_lines = Vec::new();
         let mut id = None;
         let mut retry = None;
+        let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
 
-        for line in s.lines() {
+        for line in normalized.split('\n') {
             if line.is_empty() || line.starts_with(':') {
-                // Comment or empty line
                 continue;
             }
 
-            if let Some(value) = line.strip_prefix("event:") {
-                event = Some(value.trim().to_string());
-            } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim_start().to_string());
-            } else if let Some(value) = line.strip_prefix("id:") {
-                id = Some(value.trim().to_string());
-            } else if let Some(value) = line.strip_prefix("retry:") {
-                retry = value.trim().parse().ok();
-            } else if line.starts_with("data") {
-                // "data" without colon means empty data line
-                data_lines.push(String::new());
+            let (field, value) = match line.split_once(':') {
+                Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
+                None => (line, ""),
+            };
+
+            match field {
+                "event" => event = Some(value.to_string()),
+                "data" => data_lines.push(value.to_string()),
+                "id" if !value.contains('\0') => id = Some(value.to_string()),
+                "retry" => retry = value.parse().ok(),
+                _ => {}
             }
         }
 
@@ -205,11 +211,25 @@ impl SseParser {
     }
 }
 
+fn find_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    const DELIMITERS: [&[u8]; 3] = [b"\r\n\r\n", b"\n\n", b"\r\r"];
+    DELIMITERS
+        .iter()
+        .filter_map(|delimiter| {
+            buffer
+                .windows(delimiter.len())
+                .position(|window| window == *delimiter)
+                .map(|position| (position, delimiter.len()))
+        })
+        .min_by_key(|(position, _)| *position)
+}
+
 pin_project! {
     /// Stream adapter that parses SSE from a byte stream.
     pub struct SseStream<S> {
         #[pin]
         inner: S,
+
         parser: SseParser,
         finished: bool,
     }
@@ -441,12 +461,10 @@ mod tests {
 
     #[test]
     fn test_sse_to_response_delta() {
-        // Test [DONE] event
         let done_event = SseEvent::data("[DONE]");
         let delta = done_event.to_response_delta().unwrap();
         assert!(matches!(delta, ResponseDelta::Finish { .. }));
 
-        // Test OpenAI format
         let openai_event = SseEvent::data(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#);
         let delta = openai_event.to_response_delta().unwrap();
         if let ResponseDelta::Text { content, .. } = delta {
@@ -454,5 +472,64 @@ mod tests {
         } else {
             panic!("Expected text delta");
         }
+    }
+
+    #[test]
+    fn strict_framing_corpus() {
+        for input in ["data: no-space\n\n", "data:no-space\r\n\r\n"] {
+            let mut parser = SseParser::new();
+            parser.feed_str(input).unwrap();
+            assert_eq!(parser.next_event().unwrap().data, "no-space");
+        }
+
+        let mut parser = SseParser::new();
+        parser
+            .feed_str(": comment\r\nevent: update\r\nid: 7\r\nretry: 100\r\ndata: one\r\ndata:two\r\n\r\n")
+            .unwrap();
+        let event = parser.next_event().unwrap();
+        assert_eq!(event.event.as_deref(), Some("update"));
+        assert_eq!(event.id.as_deref(), Some("7"));
+        assert_eq!(event.retry, Some(100));
+        assert_eq!(event.data, "one\ntwo");
+
+        let mut parser = SseParser::new();
+        parser.feed_str(": comment only\n\n").unwrap();
+        assert!(parser.next_event().is_none());
+    }
+
+    #[test]
+    fn framing_is_invariant_at_every_byte_boundary() {
+        let input = "event: message\ndata: héllo\n\n".as_bytes();
+        for split in 0..=input.len() {
+            let mut parser = SseParser::new();
+            parser
+                .feed(&Bytes::copy_from_slice(&input[..split]))
+                .unwrap();
+            parser
+                .feed(&Bytes::copy_from_slice(&input[split..]))
+                .unwrap();
+            let event = parser.next_event().unwrap();
+            assert_eq!(event.event.as_deref(), Some("message"));
+            assert_eq!(event.data, "héllo");
+        }
+    }
+
+    #[test]
+    fn strict_parser_rejects_invalid_utf8_incomplete_eof_and_overflow() {
+        let mut parser = SseParser::new();
+        assert!(matches!(
+            parser.feed(&Bytes::from_static(b"data: \xff\n\n")),
+            Err(StreamError::InvalidUtf8)
+        ));
+
+        let mut parser = SseParser::new();
+        parser.feed_str("data: partial").unwrap();
+        assert!(matches!(parser.finish(), Err(StreamError::IncompleteSse)));
+
+        let mut parser = SseParser::new().with_max_buffer_size(4);
+        assert!(matches!(
+            parser.feed_str("data:"),
+            Err(StreamError::BufferOverflow)
+        ));
     }
 }

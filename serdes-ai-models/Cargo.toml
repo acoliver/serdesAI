@@ -37,6 +37,7 @@ serdes-ai-core = { workspace = true }
 serdes-ai-tools = { workspace = true }
 serdes-ai-output = { workspace = true }
 serdes-ai-retries = { workspace = true }
+serdes-ai-streaming = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

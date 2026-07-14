@@ -13,6 +13,7 @@ use serdes_ai_core::messages::{
     PartStartEvent, StreamCompleteEvent, TextPart, ThinkingPart, ThinkingPartDelta, ToolCallPart,
 };
 use serdes_ai_core::ModelResponsePart;
+use serdes_ai_streaming::{SseParser, StreamError};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -22,7 +23,7 @@ pin_project! {
     pub struct AnthropicStreamParser<S> {
         #[pin]
         inner: S,
-        buffer: Vec<u8>,
+        sse: SseParser,
         // Track content blocks in progress
         blocks: HashMap<usize, BlockState>,
         // Message metadata
@@ -74,7 +75,7 @@ where
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            buffer: Vec::new(),
+            sse: SseParser::new(),
             blocks: HashMap::new(),
             message_id: None,
             model: None,
@@ -127,47 +128,27 @@ where
         }
 
         loop {
-            // Check for irrecoverably invalid UTF-8 in the buffer before
-            // attempting to parse events. Incomplete multibyte sequences at
-            // the tail are held until the next chunk arrives.
-            if let Err(e) = decode_utf8_prefix(&this.buffer) {
-                *this.done = true;
-                return Poll::Ready(Some(Err(ModelError::invalid_response(format!(
-                    "invalid UTF-8 in stream data: {}",
-                    e
-                )))));
-            }
-
-            // Process complete SSE events from the byte buffer.
-            while let Some(event_result) = parse_next_event(&mut this.buffer) {
-                match event_result {
-                    Ok((event_type, data)) => {
-                        if let Some(result) = process_event(
-                            &event_type,
-                            &data,
-                            this.blocks,
-                            this.message_id,
-                            this.model,
-                            this.input_tokens,
-                            this.output_tokens,
-                            this.cache_creation_tokens,
-                            this.cache_read_tokens,
-                            this.stop_reason,
-                            this.message_stop_seen,
-                            this.done,
-                        ) {
-                            if result.is_err()
-                                || matches!(result, Ok(ModelResponseStreamEvent::StreamComplete(_)))
-                            {
-                                *this.done = true;
-                            }
-                            return Poll::Ready(Some(result));
-                        }
-                    }
-                    Err(e) => {
+            while let Some(event) = this.sse.next_event() {
+                if let Some(result) = process_event(
+                    event.event.as_deref().unwrap_or("message"),
+                    &event.data,
+                    this.blocks,
+                    this.message_id,
+                    this.model,
+                    this.input_tokens,
+                    this.output_tokens,
+                    this.cache_creation_tokens,
+                    this.cache_read_tokens,
+                    this.stop_reason,
+                    this.message_stop_seen,
+                    this.done,
+                ) {
+                    if result.is_err()
+                        || matches!(result, Ok(ModelResponseStreamEvent::StreamComplete(_)))
+                    {
                         *this.done = true;
-                        return Poll::Ready(Some(Err(e)));
                     }
+                    return Poll::Ready(Some(result));
                 }
             }
 
@@ -181,7 +162,10 @@ where
             // Need more data
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    this.buffer.extend_from_slice(&bytes);
+                    if let Err(error) = this.sse.feed(&bytes) {
+                        *this.done = true;
+                        return Poll::Ready(Some(Err(map_sse_error(error))));
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     *this.done = true;
@@ -190,18 +174,8 @@ where
                 Poll::Ready(None) => {
                     *this.done = true;
 
-                    if let Err(e) = std::str::from_utf8(&this.buffer) {
-                        return Poll::Ready(Some(Err(ModelError::invalid_response(format!(
-                            "stream ended with incomplete or invalid UTF-8 in buffer: {}",
-                            e
-                        )))));
-                    }
-
-                    if !this.buffer.is_empty() {
-                        return Poll::Ready(Some(Err(ModelError::incomplete_stream(format!(
-                            "stream ended with {} bytes of unparsed SSE data remaining in buffer",
-                            this.buffer.len()
-                        )))));
+                    if let Err(error) = this.sse.finish() {
+                        return Poll::Ready(Some(Err(map_sse_error(error))));
                     }
 
                     if !*this.message_stop_seen {
@@ -218,135 +192,17 @@ where
     }
 }
 
-/// Decode the longest valid UTF-8 prefix from the byte buffer.
-/// Returns `Ok` if the buffer is valid UTF-8 or ends with an incomplete
-/// multibyte sequence (which will be completed by the next chunk).
-/// Returns `Err` for irrecoverably invalid UTF-8.
-fn decode_utf8_prefix(buffer: &[u8]) -> Result<(), std::str::Utf8Error> {
-    match std::str::from_utf8(buffer) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let valid_up_to = e.valid_up_to();
-            if valid_up_to < buffer.len() {
-                let remaining = &buffer[valid_up_to..];
-                // If the remaining bytes are a valid (but incomplete) multibyte
-                // prefix, wait for more data.
-                if is_incomplete_multibyte_prefix(remaining) {
-                    return Ok(());
-                }
-            }
-            Err(e)
+fn map_sse_error(error: StreamError) -> ModelError {
+    match error {
+        StreamError::IncompleteSse => {
+            ModelError::incomplete_stream("stream ended with an incomplete SSE record")
         }
+        StreamError::InvalidUtf8 => ModelError::invalid_response("invalid UTF-8 in SSE stream"),
+        StreamError::BufferOverflow => {
+            ModelError::invalid_response("SSE record exceeded buffer limit")
+        }
+        other => ModelError::invalid_response(other.to_string()),
     }
-}
-
-/// Check if the given bytes are a valid (incomplete) prefix of a UTF-8
-/// multibyte sequence.
-fn is_incomplete_multibyte_prefix(bytes: &[u8]) -> bool {
-    if bytes.is_empty() {
-        return false;
-    }
-    let first = bytes[0];
-    let expected_len = if first < 0x80 {
-        1
-    } else if first >> 5 == 0b110 {
-        2
-    } else if first >> 4 == 0b1110 {
-        3
-    } else if first >> 3 == 0b11110 {
-        4
-    } else {
-        // Invalid leading byte
-        return false;
-    };
-
-    // Check that all continuation bytes so far are valid
-    for &b in &bytes[1..] {
-        if b >> 6 != 0b10 {
-            // Not a continuation byte — invalid
-            return false;
-        }
-    }
-
-    bytes.len() < expected_len
-}
-
-/// Parse the next complete SSE event from the byte buffer.
-///
-/// Scans the buffer for an `event:` / `data:` pair terminated by a blank line.
-/// On success, drains the consumed bytes from `buffer` and returns the event.
-/// Returns `None` if no complete event is found yet.
-fn parse_next_event(buffer: &mut Vec<u8>) -> Option<Result<(String, String), ModelError>> {
-    let (blank_pos, term_len) = find_blank_line(buffer)?;
-    let consume = blank_pos + term_len;
-
-    // Extract the event bytes up to (but not including) the blank line
-    let event_bytes = &buffer[..blank_pos];
-
-    let event_str = match std::str::from_utf8(event_bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            buffer.drain(..consume);
-            return Some(Err(ModelError::invalid_response(format!(
-                "invalid UTF-8 in SSE event: {}",
-                e
-            ))));
-        }
-    };
-
-    // Parse event_type and data from the lines
-    let mut event_type = None;
-    let mut data = None;
-
-    for line in event_str.lines() {
-        if let Some(stripped) = line.strip_prefix("event: ") {
-            event_type = Some(stripped.to_string());
-        } else if let Some(stripped) = line.strip_prefix("data: ") {
-            data = Some(stripped.to_string());
-        }
-    }
-
-    // Drain processed bytes from buffer (in-place, no allocation)
-    buffer.drain(..consume);
-
-    match (event_type, data) {
-        (Some(et), Some(d)) => Some(Ok((et, d))),
-        (None, Some(d)) => Some(Ok(("message".to_string(), d))),
-        _ => None,
-    }
-}
-
-/// Find the position of the first blank line (two consecutive newlines) in
-/// the buffer. Returns the byte index of the first newline of the pair, or
-/// `None`.
-/// Find the first blank line terminator in the buffer. Returns the byte
-/// index of the start of the terminator and its length (2 for LF+LF,
-/// 4 for CRLF+CRLF, 3 for mixed).
-fn find_blank_line(buffer: &[u8]) -> Option<(usize, usize)> {
-    for i in 0..buffer.len().saturating_sub(1) {
-        // LF LF
-        if buffer[i] == 0x0a && buffer[i + 1] == 0x0a {
-            return Some((i, 2));
-        }
-        // CRLF CRLF
-        if i + 3 < buffer.len()
-            && buffer[i] == 0x0d
-            && buffer[i + 1] == 0x0a
-            && buffer[i + 2] == 0x0d
-            && buffer[i + 3] == 0x0a
-        {
-            return Some((i, 4));
-        }
-        // Mixed LF + CRLF
-        if i + 2 < buffer.len()
-            && buffer[i] == 0x0a
-            && buffer[i + 1] == 0x0d
-            && buffer[i + 2] == 0x0a
-        {
-            return Some((i, 3));
-        }
-    }
-    None
 }
 
 /// Process a parsed event into a stream event.
