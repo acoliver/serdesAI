@@ -385,10 +385,15 @@ fn process_event(
             let finish_reason = map_stop_reason(stop_reason.as_deref());
 
             // Emit StreamComplete with provider terminal metadata
-            let mut event = StreamCompleteEvent::new(finish_reason);
-            event = event
+            let mut event = StreamCompleteEvent::new(finish_reason)
                 .with_input_tokens(*input_tokens)
                 .with_output_tokens(*output_tokens);
+            if let Some(tokens) = *cache_creation_tokens {
+                event = event.with_cache_creation_tokens(tokens);
+            }
+            if let Some(tokens) = *cache_read_tokens {
+                event = event.with_cache_read_tokens(tokens);
+            }
 
             Some(Ok(ModelResponseStreamEvent::StreamComplete(event)))
         }
@@ -854,7 +859,7 @@ data: {}",
     /// Test 7: A valid sequence ending in `message_stop` produces no error.
     #[tokio::test]
     async fn test_valid_stream_with_message_stop() {
-        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0}}}"#;
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":3,"cache_read_input_tokens":7}}}"#;
         let block_start =
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
@@ -882,6 +887,8 @@ data: {}",
                     assert_eq!(sc.finish_reason, FinishReason::EndTurn);
                     assert_eq!(sc.input_tokens, Some(10));
                     assert_eq!(sc.output_tokens, Some(5));
+                    assert_eq!(sc.cache_creation_tokens, Some(3));
+                    assert_eq!(sc.cache_read_tokens, Some(7));
                 }
                 Ok(_) => {}
                 Err(e) => panic!("valid stream should not produce error: {:?}", e),

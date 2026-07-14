@@ -98,8 +98,13 @@ impl SseParser {
     /// Feed bytes into the parser.
     pub fn feed(&mut self, bytes: &Bytes) -> StreamResult<Vec<SseEvent>> {
         self.buffer.extend_from_slice(bytes);
-        self.validate_buffer()?;
-        self.parse_buffer()
+        match self.parse_buffer() {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                self.clear();
+                Err(error)
+            }
+        }
     }
 
     /// Feed a string into the parser.
@@ -109,11 +114,17 @@ impl SseParser {
 
     /// Validate that EOF occurred at an SSE record boundary.
     pub fn finish(&mut self) -> StreamResult<Vec<SseEvent>> {
-        let events = self.parse_buffer()?;
+        let events = match self.parse_buffer() {
+            Ok(events) => events,
+            Err(error) => {
+                self.clear();
+                return Err(error);
+            }
+        };
         if self.buffer.is_empty() {
             Ok(events)
         } else {
-            self.validate_buffer()?;
+            self.clear();
             Err(StreamError::IncompleteSse)
         }
     }
@@ -137,6 +148,7 @@ impl SseParser {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.events.clear();
+        self.last_event_id = None;
     }
 
     fn validate_buffer(&self) -> StreamResult<()> {
@@ -155,6 +167,9 @@ impl SseParser {
         let mut parsed_events = Vec::new();
 
         while let Some((pos, delimiter_len)) = find_event_boundary(&self.buffer) {
+            if pos > self.max_buffer_size {
+                return Err(StreamError::BufferOverflow);
+            }
             let frame = self.buffer[..pos].to_vec();
             self.buffer.drain(..pos + delimiter_len);
             let event_str = std::str::from_utf8(&frame).map_err(|_| StreamError::InvalidUtf8)?;
@@ -271,6 +286,7 @@ where
         match this.inner.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 if let Err(error) = this.parser.feed(&bytes) {
+                    *this.finished = true;
                     return Poll::Ready(Some(Err(error)));
                 }
 
@@ -281,7 +297,11 @@ where
                     Poll::Pending
                 }
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(StreamError::Io(e)))),
+            Poll::Ready(Some(Err(e))) => {
+                *this.finished = true;
+                this.parser.clear();
+                Poll::Ready(Some(Err(StreamError::Io(e))))
+            }
             Poll::Ready(None) => {
                 *this.finished = true;
 
@@ -521,15 +541,45 @@ mod tests {
             parser.feed(&Bytes::from_static(b"data: \xff\n\n")),
             Err(StreamError::InvalidUtf8)
         ));
+        assert!(!parser.has_events());
 
         let mut parser = SseParser::new();
         parser.feed_str("data: partial").unwrap();
         assert!(matches!(parser.finish(), Err(StreamError::IncompleteSse)));
+        assert!(!parser.has_events());
 
         let mut parser = SseParser::new().with_max_buffer_size(4);
         assert!(matches!(
             parser.feed_str("data:"),
             Err(StreamError::BufferOverflow)
         ));
+
+        let mut parser = SseParser::new().with_max_buffer_size(4);
+        assert!(matches!(
+            parser.feed_str("data: oversized\n\n"),
+            Err(StreamError::BufferOverflow)
+        ));
+    }
+
+    #[test]
+    fn buffer_limit_applies_per_frame_and_residual_not_aggregate_chunk() {
+        let mut parser = SseParser::new().with_max_buffer_size(8);
+        let input = "data: a\n\n".repeat(32);
+
+        let events = parser.feed_str(&input).unwrap();
+
+        assert_eq!(events.len(), 32);
+        assert!(events.iter().all(|event| event.data == "a"));
+    }
+
+    #[test]
+    fn parse_error_discards_events_parsed_from_the_same_chunk() {
+        let mut parser = SseParser::new().with_max_buffer_size(8);
+
+        assert!(matches!(
+            parser.feed_str("data: a\n\ndata: oversized\n\n"),
+            Err(StreamError::BufferOverflow)
+        ));
+        assert!(!parser.has_events());
     }
 }

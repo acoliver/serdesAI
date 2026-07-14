@@ -65,11 +65,12 @@ after that boundary are propagated without replay or concatenation.
 
 SerdesAI provides Rust-native typed agents, tools, streaming, retries, fallback,
 graphs, MCP, embeddings, and evaluation crates. It does not currently claim full
-API or behavioral parity with pydantic-ai. The capability audit is tied to this
-repository's upstream revision
-`be5774b5c618a71fe899ac5b8c6a5e958ea42a5d` (2026-07-13); consult the root
-README capability matrix and test the exact providers and features required by
-your deployment before treating a configuration as production-ready.
+API or behavioral parity with pydantic-ai. The capability matrix uses pydantic-ai
+v2.9.1 (`bf9a2435de41aaf269fc6bc72fe641f2fa0465c6`) as its comparison target and
+SerdesAI upstream revision `be5774b5c618a71fe899ac5b8c6a5e958ea42a5d` as the
+implementation audit baseline. Consult the root README matrix and test the exact
+providers and features required by your deployment before treating a
+configuration as production-ready.
 
 ## Part of SerdesAI
 

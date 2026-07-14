@@ -678,6 +678,12 @@ pub struct StreamCompleteEvent {
     pub input_tokens: Option<u64>,
     /// Output tokens reported by the provider (if any).
     pub output_tokens: Option<u64>,
+    /// Tokens used to create cache entries (if reported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+    /// Tokens read from cache (if reported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
 }
 
 impl StreamCompleteEvent {
@@ -688,6 +694,8 @@ impl StreamCompleteEvent {
             finish_reason,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
         }
     }
 
@@ -702,6 +710,20 @@ impl StreamCompleteEvent {
     #[must_use]
     pub fn with_output_tokens(mut self, tokens: u64) -> Self {
         self.output_tokens = Some(tokens);
+        self
+    }
+
+    /// Set cache creation tokens.
+    #[must_use]
+    pub fn with_cache_creation_tokens(mut self, tokens: u64) -> Self {
+        self.cache_creation_tokens = Some(tokens);
+        self
+    }
+
+    /// Set cache read tokens.
+    #[must_use]
+    pub fn with_cache_read_tokens(mut self, tokens: u64) -> Self {
+        self.cache_read_tokens = Some(tokens);
         self
     }
 }

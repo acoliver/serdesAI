@@ -10,10 +10,10 @@ use crate::run::{CompressionStrategy, RunOptions};
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serdes_ai_core::messages::{
-    ModelResponseStreamEvent, ToolCallArgs, ToolReturnPart, UserContent,
+    ModelResponseStreamEvent, StreamCompleteEvent, ToolCallArgs, ToolReturnPart, UserContent,
 };
 use serdes_ai_core::{
-    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart,
+    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, RequestUsage,
 };
 use serdes_ai_models::ModelRequestParameters;
 use std::pin::Pin;
@@ -148,6 +148,31 @@ fn canonicalize_tool_call_args_in_response(response: &mut ModelResponse) {
             tc.args = ToolCallArgs::Json(repaired);
         }
     }
+}
+
+fn usage_from_stream_complete(event: &StreamCompleteEvent) -> Option<RequestUsage> {
+    if event.input_tokens.is_none()
+        && event.output_tokens.is_none()
+        && event.cache_creation_tokens.is_none()
+        && event.cache_read_tokens.is_none()
+    {
+        return None;
+    }
+
+    let mut usage = RequestUsage::new();
+    if let Some(tokens) = event.input_tokens {
+        usage = usage.request_tokens(tokens);
+    }
+    if let Some(tokens) = event.output_tokens {
+        usage = usage.response_tokens(tokens);
+    }
+    if let Some(tokens) = event.cache_creation_tokens {
+        usage = usage.cache_creation_tokens(tokens);
+    }
+    if let Some(tokens) = event.cache_read_tokens {
+        usage = usage.cache_read_tokens(tokens);
+    }
+    Some(usage)
 }
 
 impl AgentStream {
@@ -509,7 +534,7 @@ impl AgentStream {
                 let mut stream_event_count = 0u32;
                 // Provider-reported finish reason (set by StreamComplete event)
                 let mut stream_finish_reason: Option<FinishReason> = None;
-                let mut stream_usage: Option<(u64, u64)> = None;
+                let mut stream_usage: Option<RequestUsage> = None;
 
                 // Process stream events
                 debug!("AgentStream: starting to process model stream events");
@@ -624,11 +649,7 @@ impl AgentStream {
                                 }
                                 ModelResponseStreamEvent::StreamComplete(sc) => {
                                     stream_finish_reason = Some(sc.finish_reason);
-                                    if let (Some(inp), Some(out)) =
-                                        (sc.input_tokens, sc.output_tokens)
-                                    {
-                                        stream_usage = Some((inp, out));
-                                    }
+                                    stream_usage = usage_from_stream_complete(&sc);
                                 }
                             }
                         }
@@ -696,8 +717,7 @@ impl AgentStream {
                     model_name: Some(model.name().to_string()),
                     timestamp: Utc::now(),
                     finish_reason: Some(stream_finish_reason),
-                    usage: stream_usage
-                        .map(|(req, res)| serdes_ai_core::RequestUsage::with_tokens(req, res)),
+                    usage: stream_usage,
                     vendor_id: None,
                     vendor_details: None,
                     kind: "response".to_string(),
@@ -1070,7 +1090,7 @@ impl AgentStream {
 
                 // Provider-reported finish reason (set by StreamComplete event)
                 let mut stream_finish_reason: Option<FinishReason> = None;
-                let mut stream_usage: Option<(u64, u64)> = None;
+                let mut stream_usage: Option<RequestUsage> = None;
 
                 // Process stream events with cancellation check
                 loop {
@@ -1205,11 +1225,7 @@ impl AgentStream {
                                         ModelResponseStreamEvent::PartEnd(_) => {}
                                         ModelResponseStreamEvent::StreamComplete(sc) => {
                                             stream_finish_reason = Some(sc.finish_reason);
-                                            if let (Some(inp), Some(out)) =
-                                                (sc.input_tokens, sc.output_tokens)
-                                            {
-                                                stream_usage = Some((inp, out));
-                                            }
+                                            stream_usage = usage_from_stream_complete(&sc);
                                         }
                                     }
                                 }
@@ -1277,8 +1293,7 @@ impl AgentStream {
                     model_name: Some(model.name().to_string()),
                     timestamp: Utc::now(),
                     finish_reason: Some(stream_finish_reason),
-                    usage: stream_usage
-                        .map(|(req, res)| serdes_ai_core::RequestUsage::with_tokens(req, res)),
+                    usage: stream_usage,
                     vendor_id: None,
                     vendor_details: None,
                     kind: "response".to_string(),
@@ -1584,6 +1599,23 @@ mod tests {
         } else {
             panic!("Expected Cancelled event");
         }
+    }
+
+    #[test]
+    fn test_stream_complete_usage_preserves_all_provider_token_fields() {
+        let event = StreamCompleteEvent::new(FinishReason::Stop)
+            .with_input_tokens(10)
+            .with_output_tokens(5)
+            .with_cache_creation_tokens(3)
+            .with_cache_read_tokens(7);
+
+        let usage = usage_from_stream_complete(&event).expect("usage should be present");
+
+        assert_eq!(usage.request_tokens, Some(10));
+        assert_eq!(usage.response_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+        assert_eq!(usage.cache_creation_tokens, Some(3));
+        assert_eq!(usage.cache_read_tokens, Some(7));
     }
 
     #[test]

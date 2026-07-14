@@ -324,9 +324,12 @@ serdes-ai = { version = "0.1", features = ["full"] }
 
 ## ⚖️ Capability and parity status
 
-The current audit baseline is pydantic-ai at the SerdesAI upstream revision
-`be5774b5c618a71fe899ac5b8c6a5e958ea42a5d` (2026-07-13). This is a capability
-comparison, not a claim of API or behavioral parity.
+The comparison target for this capability matrix is pydantic-ai v2.9.1
+(`bf9a2435de41aaf269fc6bc72fe641f2fa0465c6`, released 2026-07-13). The
+SerdesAI implementation was audited from upstream revision
+`be5774b5c618a71fe899ac5b8c6a5e958ea42a5d`. This matrix records SerdesAI's
+status for the listed capabilities; it is not an exhaustive claim of API or
+behavioral parity.
 
 | Capability | SerdesAI status | Notes |
 | --- | --- | --- |
