@@ -342,13 +342,14 @@ fn process_event(
             // Skip validation when the input is the default empty object (no
             // deltas were received).
             if let Some(BlockState::ToolUse { input_json, .. }) = blocks.get(&index) {
-                if !input_json.is_empty() && input_json != "{}" {
-                    if serde_json::from_str::<serde_json::Value>(input_json).is_err() {
-                        return Some(Err(ModelError::invalid_response(format!(
-                            "content_block_stop for tool at index {} has incomplete JSON input: {}",
-                            index, input_json
-                        ))));
-                    }
+                if !input_json.is_empty()
+                    && input_json != "{}"
+                    && serde_json::from_str::<serde_json::Value>(input_json).is_err()
+                {
+                    return Some(Err(ModelError::invalid_response(format!(
+                        "content_block_stop for tool at index {} has incomplete JSON input: {}",
+                        index, input_json
+                    ))));
                 }
             }
             blocks.remove(&index);

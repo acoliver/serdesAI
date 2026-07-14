@@ -149,15 +149,27 @@ pub enum ModelError {
 
     /// Legacy core API error retained as the source during migration.
     #[error("Core model API error: {0}")]
-    CoreApi(#[from] ModelApiError),
+    CoreApi(#[source] Box<ModelApiError>),
 
     /// Legacy core HTTP error retained as the source during migration.
     #[error("Core model HTTP error: {0}")]
-    CoreHttp(#[from] ModelHttpError),
+    CoreHttp(#[source] Box<ModelHttpError>),
 
     /// Other error.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl From<ModelApiError> for ModelError {
+    fn from(error: ModelApiError) -> Self {
+        Self::CoreApi(Box::new(error))
+    }
+}
+
+impl From<ModelHttpError> for ModelError {
+    fn from(error: ModelHttpError) -> Self {
+        Self::CoreHttp(Box::new(error))
+    }
 }
 
 impl ModelError {

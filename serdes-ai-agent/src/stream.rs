@@ -552,14 +552,12 @@ impl AgentStream {
                                                 }
                                             }
                                         }
-                                        ModelResponsePart::Thinking(t) => {
-                                            if !t.content.is_empty() {
-                                                let _ = tx
-                                                    .send(Ok(AgentStreamEvent::ThinkingDelta {
-                                                        text: t.content.clone(),
-                                                    }))
-                                                    .await;
-                                            }
+                                        ModelResponsePart::Thinking(t) if !t.content.is_empty() => {
+                                            let _ = tx
+                                                .send(Ok(AgentStreamEvent::ThinkingDelta {
+                                                    text: t.content.clone(),
+                                                }))
+                                                .await;
                                         }
                                         _ => {}
                                     }
@@ -1135,15 +1133,15 @@ impl AgentStream {
                                                         }
                                                     }
                                                 }
-                                                ModelResponsePart::Thinking(t) => {
-                                                    if !t.content.is_empty() {
-                                                        accumulated_thinking.push_str(&t.content);
-                                                        let _ = tx
-                                                            .send(Ok(AgentStreamEvent::ThinkingDelta {
-                                                                text: t.content.clone(),
-                                                            }))
-                                                            .await;
-                                                    }
+                                                ModelResponsePart::Thinking(t)
+                                                    if !t.content.is_empty() =>
+                                                {
+                                                    accumulated_thinking.push_str(&t.content);
+                                                    let _ = tx
+                                                        .send(Ok(AgentStreamEvent::ThinkingDelta {
+                                                            text: t.content.clone(),
+                                                        }))
+                                                        .await;
                                                 }
                                                 _ => {}
                                             }
