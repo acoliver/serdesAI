@@ -41,6 +41,27 @@ let response = model.request(&messages, &settings, &params).await?;
 
 Retries are opt-in. `RetryPolicy::disabled()` performs exactly one attempt. The
 policy retries the same model; `FallbackModel` remains responsible for selecting
+## Model failure contract
+
+`serdes_ai_core::ModelFailure` is the authoritative, serializable classification
+used by direct model calls, same-model retries, fallback selection, and agent
+wrappers. It preserves the semantic kind, HTTP status, provider code,
+`Retry-After`, and available provider/model/attempt context. `ModelError` remains
+the concrete source-bearing error and implements `ClassifyModelFailure`.
+
+Migration guidance:
+
+- Use `ClassifyModelFailure::model_failure()` instead of matching retryability in
+  each crate.
+- `ProviderErrorKind` remains a compatibility alias for `ModelFailureKind`.
+- Core `ModelApiError` and `ModelHttpError` convert into `ModelError` while
+  remaining the source of the converted error.
+- `serdes-ai-providers::ProviderError` is limited to provider discovery and
+  configuration; model-call failures use `ModelError`.
+- `serdes-ai-retries::RetryableError` remains limited to the legacy standalone
+  HTTP retry client. Tool, user, cancellation, and output-validation failures
+  retain their distinct semantics.
+
 a different model. Streaming requests may be retried only while acquiring the
 stream and before the first caller-visible event. Once an event is returned, later
 stream errors pass through without replaying or concatenating another response.

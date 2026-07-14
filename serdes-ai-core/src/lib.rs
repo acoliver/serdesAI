@@ -58,7 +58,7 @@ pub mod settings;
 pub mod usage;
 
 // Re-exports for convenience
-pub use errors::{Result, SerdesAiError};
+pub use errors::{ClassifyModelFailure, ModelFailure, ModelFailureKind, Result, SerdesAiError};
 pub use format::{format_as_xml, format_as_xml_with_options, XmlFormatError, XmlFormatOptions};
 pub use identifier::{now_utc, ConversationId, RunId, ToolCallId};
 pub use messages::{

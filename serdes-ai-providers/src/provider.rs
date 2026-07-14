@@ -151,7 +151,10 @@ impl ProviderConfig {
     }
 }
 
-/// Provider error types.
+/// Provider discovery and configuration errors.
+///
+/// Model-call transport/API failures use `serdes_ai_models::ModelError` and its
+/// canonical `serdes_ai_core::ModelFailure` classification instead.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// Missing API key.

@@ -7,6 +7,141 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
+/// Authoritative semantic category for a model-call failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFailureKind {
+    /// The provider rate-limited the request.
+    RateLimited,
+    /// The provider is temporarily overloaded.
+    Overloaded,
+    /// The provider reported a transient server failure.
+    Server,
+    /// The request timed out.
+    Timeout,
+    /// The connection failed before a complete response was received.
+    Connection,
+    /// A streamed response ended before provider-level completion.
+    IncompleteStream,
+    /// Authentication failed.
+    Authentication,
+    /// The request was invalid.
+    InvalidRequest,
+    /// The requested resource was not found.
+    NotFound,
+    /// The caller lacks permission.
+    PermissionDenied,
+    /// The account cannot make the request for billing reasons.
+    Billing,
+    /// The request exceeded the provider's size limit.
+    RequestTooLarge,
+    /// The provider returned malformed or invalid response data.
+    InvalidResponse,
+    /// The operation was cancelled.
+    Cancelled,
+    /// Model or provider configuration is invalid.
+    Configuration,
+    /// An otherwise unclassified model-call failure.
+    Other,
+}
+
+impl ModelFailureKind {
+    /// Whether this category is rate limiting.
+    #[must_use]
+    pub fn is_rate_limited(self) -> bool {
+        matches!(self, Self::RateLimited)
+    }
+
+    /// Whether this category is transient, excluding rate limiting.
+    #[must_use]
+    pub fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::Overloaded
+                | Self::Server
+                | Self::Timeout
+                | Self::Connection
+                | Self::IncompleteStream
+        )
+    }
+
+    /// Whether a same-model retry is safe by default.
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        self.is_rate_limited() || self.is_transient()
+    }
+}
+
+/// Normalized metadata shared by direct model calls, retries, fallback, and agents.
+///
+/// Provider adapters should retain their concrete error as the Rust error source
+/// where possible and expose this value for policy decisions and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelFailure {
+    /// Semantic failure category.
+    pub kind: ModelFailureKind,
+    /// Human-readable failure message.
+    pub message: String,
+    /// HTTP status, when present.
+    pub status: Option<u16>,
+    /// Provider-specific error code or type.
+    pub provider_code: Option<String>,
+    /// Provider-requested minimum retry delay.
+    pub retry_after: Option<Duration>,
+    /// Provider identifier, when known.
+    pub provider: Option<String>,
+    /// Model identifier, when known.
+    pub model: Option<String>,
+    /// One-based attempt number, when known.
+    pub attempt: Option<u32>,
+    /// String representation of the original cause for serializable diagnostics.
+    pub cause: Option<String>,
+}
+
+impl ModelFailure {
+    /// Create normalized failure metadata.
+    #[must_use]
+    pub fn new(kind: ModelFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            status: None,
+            provider_code: None,
+            retry_after: None,
+            provider: None,
+            model: None,
+            attempt: None,
+            cause: None,
+        }
+    }
+
+    /// Whether this failure is retryable by the canonical policy.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.kind.is_retryable()
+    }
+
+    /// Add provider, model, and attempt context without changing classification.
+    #[must_use]
+    pub fn with_context(
+        mut self,
+        provider: Option<String>,
+        model: Option<String>,
+        attempt: Option<u32>,
+    ) -> Self {
+        self.provider = provider;
+        self.model = model;
+        self.attempt = attempt;
+        self
+    }
+}
+
+/// A model-call error that can expose the canonical cross-crate classification.
+pub trait ClassifyModelFailure {
+    /// Return normalized model-call failure metadata.
+    fn model_failure(&self) -> ModelFailure;
+}
+
 use thiserror::Error;
 
 /// The main error type for serdes-ai operations.
@@ -215,10 +350,11 @@ impl ModelApiError {
     /// Set headers.
     pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.headers = headers;
-        // Parse retry-after if present
-        if let Some(retry_after) = self.headers.get("retry-after") {
-            self.retry_after = retry_after.parse().ok();
-        }
+        self.retry_after = self
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+            .and_then(|(_, value)| value.parse().ok());
         self
     }
 
@@ -586,6 +722,55 @@ impl CallDeferred {
     pub fn with_tool_call_id(mut self, id: impl Into<String>) -> Self {
         self.tool_call_id = Some(id.into());
         self
+    }
+}
+impl ClassifyModelFailure for ModelApiError {
+    fn model_failure(&self) -> ModelFailure {
+        let kind = match self.status_code {
+            429 => ModelFailureKind::RateLimited,
+            500..=599 => ModelFailureKind::Server,
+            400 => ModelFailureKind::InvalidRequest,
+            401 => ModelFailureKind::Authentication,
+            403 => ModelFailureKind::PermissionDenied,
+            404 => ModelFailureKind::NotFound,
+            _ => ModelFailureKind::Other,
+        };
+        let mut failure = ModelFailure::new(
+            kind,
+            self.message.clone().unwrap_or_else(|| self.body.clone()),
+        );
+        failure.status = Some(self.status_code);
+        failure.provider_code = self.error_code.clone();
+        failure.retry_after = self.retry_after.map(Duration::from_secs);
+        failure.cause = Some(self.to_string());
+        failure
+    }
+}
+
+impl ClassifyModelFailure for ModelHttpError {
+    fn model_failure(&self) -> ModelFailure {
+        let (kind, status) = match self.kind {
+            HttpErrorKind::Timeout => (ModelFailureKind::Timeout, None),
+            HttpErrorKind::Connection => (ModelFailureKind::Connection, None),
+            HttpErrorKind::Request => (ModelFailureKind::InvalidRequest, None),
+            HttpErrorKind::Response { status } => {
+                let kind = match status {
+                    Some(429) => ModelFailureKind::RateLimited,
+                    Some(500..=599) => ModelFailureKind::Server,
+                    Some(400) => ModelFailureKind::InvalidRequest,
+                    Some(401) => ModelFailureKind::Authentication,
+                    Some(403) => ModelFailureKind::PermissionDenied,
+                    Some(404) => ModelFailureKind::NotFound,
+                    _ => ModelFailureKind::Other,
+                };
+                (kind, status)
+            }
+        };
+        let mut failure = ModelFailure::new(kind, self.message.clone());
+        failure.status = status;
+        failure.retry_after = self.retry_after;
+        failure.cause = Some(self.to_string());
+        failure
     }
 }
 

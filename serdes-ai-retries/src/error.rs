@@ -34,7 +34,10 @@ pub enum RetryFailure<E> {
         elapsed: Duration,
     },
 }
-/// Errors that can be retried.
+/// Legacy transport-level retry errors.
+///
+/// Model-call failures use `serdes_ai_core::ModelFailure`; this type remains
+/// scoped to the standalone HTTP retry client for backward compatibility.
 #[derive(Debug, Error)]
 pub enum RetryableError {
     /// HTTP error with status code.

@@ -2,6 +2,7 @@
 //!
 //! This module defines all errors that can occur during agent execution.
 
+use serdes_ai_core::{ClassifyModelFailure, ModelFailure};
 use serdes_ai_models::ModelError;
 use serdes_ai_tools::ToolError;
 use thiserror::Error;
@@ -93,13 +94,22 @@ impl AgentRunError {
     /// Check if this error is retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Model(e) => e.is_retryable(),
+            Self::Model(e) => e.model_failure().is_retryable(),
             Self::Tool(e) => e.is_retryable(),
             Self::UsageLimitExceeded(_) => false,
             Self::Cancelled => false,
             Self::Timeout { .. } => false,
             Self::MaxRetriesExceeded { .. } => false,
             _ => true,
+        }
+    }
+
+    /// Return canonical model-call failure metadata when this error came from a model.
+    #[must_use]
+    pub fn model_failure(&self) -> Option<ModelFailure> {
+        match self {
+            Self::Model(error) => Some(error.model_failure()),
+            _ => None,
         }
     }
 }
