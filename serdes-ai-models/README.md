@@ -41,6 +41,18 @@ let response = model.request(&messages, &settings, &params).await?;
 
 Retries are opt-in. `RetryPolicy::disabled()` performs exactly one attempt. The
 policy retries the same model; `FallbackModel` remains responsible for selecting
+## Streaming fallback boundary
+
+`FallbackModel` can select another model for acquisition errors or retryable
+errors yielded before the first stream event. It polls and buffers at most one
+event while selecting an attempt. Every event counts as caller-visible exposure,
+including terminal/provider metadata. Once an event is returned, later errors
+are propagated from that model and fallback never replays or concatenates
+another model's output. Dropping the initial request future closes the current
+stream and prevents another fallback attempt.
+
+Same-model retries remain a separate opt-in layer through `RetryingModel`.
+
 ## Model failure contract
 
 `serdes_ai_core::ModelFailure` is the authoritative, serializable classification

@@ -113,6 +113,16 @@ pub enum ModelError {
     #[error("Network error: {0}")]
     Network(String),
 
+    /// Every eligible model in a fallback chain failed before producing output.
+    #[error("All fallback models failed after {attempts_len} attempts: {last_error}", attempts_len = .attempts.len())]
+    FallbackExhausted {
+        /// Normalized failure metadata for each attempted model.
+        attempts: Vec<ModelFailure>,
+        /// Final concrete error retained as the source.
+        #[source]
+        last_error: Box<ModelError>,
+    },
+
     /// Retry attempts against the same model were exhausted.
     #[error("Model request failed after {attempts} attempts over {elapsed:?}: {last_error}")]
     RetryExhausted {
@@ -180,7 +190,8 @@ impl ModelError {
                 .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
                 .and_then(|(_, value)| value.parse::<u64>().ok())
                 .map(Duration::from_secs),
-            ModelError::RetryExhausted { last_error, .. } => last_error.retry_after(),
+            ModelError::FallbackExhausted { last_error, .. }
+            | ModelError::RetryExhausted { last_error, .. } => last_error.retry_after(),
             ModelError::RetryDeadlineExceeded {
                 last_error: Some(last_error),
                 ..
@@ -383,6 +394,14 @@ impl ClassifyModelFailure for ModelError {
             }
             Self::Serialization(error) => {
                 ModelFailure::new(ModelFailureKind::InvalidResponse, error.to_string())
+            }
+            Self::FallbackExhausted {
+                attempts,
+                last_error,
+            } => {
+                let mut failure = last_error.model_failure();
+                failure.attempt = Some(attempts.len() as u32);
+                return failure;
             }
             Self::RetryExhausted {
                 attempts,

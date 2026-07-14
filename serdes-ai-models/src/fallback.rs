@@ -23,7 +23,10 @@ use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::ModelProfile;
 use async_trait::async_trait;
-use serdes_ai_core::{ModelRequest, ModelResponse, ModelSettings};
+use futures::{stream, StreamExt};
+use serdes_ai_core::{
+    ClassifyModelFailure, ModelFailure, ModelRequest, ModelResponse, ModelSettings,
+};
 use tracing::{debug, warn};
 
 /// Policy for determining when to retry with the next model.
@@ -42,10 +45,11 @@ impl RetryOn {
     /// Check if the given error should trigger a retry.
     #[must_use]
     pub fn should_retry(&self, error: &ModelError) -> bool {
+        let failure = error.model_failure();
         match self {
             RetryOn::AnyError => true,
-            RetryOn::RateLimits => error.is_rate_limited(),
-            RetryOn::Transient => error.is_transient(),
+            RetryOn::RateLimits => failure.kind.is_rate_limited(),
+            RetryOn::Transient => failure.kind.is_transient(),
         }
     }
 }
@@ -56,6 +60,13 @@ impl RetryOn {
 /// - Implementing fallback strategies (e.g., try Claude first, fall back to GPT-4)
 /// - Handling rate limits by falling back to alternative models
 /// - Testing model behavior with mock fallbacks
+///
+/// Streaming fallback is allowed only before the caller observes any stream
+/// event. Every event, including metadata and terminal events, establishes the
+/// selected attempt. Errors after that boundary are propagated from that model
+/// and never trigger output replay or concatenation. The wrapper polls at most
+/// one event before returning, so buffering and backpressure remain bounded; a
+/// losing stream is dropped before the next model is attempted.
 pub struct FallbackModel {
     models: Vec<Box<dyn Model>>,
     retry_on: RetryOn,
@@ -141,6 +152,33 @@ impl FallbackModel {
         self.models.is_empty()
     }
 
+    fn contextual_failure(error: &ModelError, model: &dyn Model, attempt: usize) -> ModelFailure {
+        let mut failure = error.model_failure();
+        if failure.provider.is_none() {
+            failure.provider = Some(model.system().to_string());
+        }
+        failure.model = Some(model.identifier());
+        failure.attempt = Some(attempt as u32);
+        failure
+    }
+
+    fn finish_failure(
+        mut attempts: Vec<ModelFailure>,
+        error: ModelError,
+        model: &dyn Model,
+        attempt: usize,
+    ) -> ModelError {
+        attempts.push(Self::contextual_failure(&error, model, attempt));
+        if attempts.len() == 1 {
+            error
+        } else {
+            ModelError::FallbackExhausted {
+                attempts,
+                last_error: Box::new(error),
+            }
+        }
+    }
+
     /// Check if we should retry with the next model for the given error.
     fn should_retry(&self, error: &ModelError) -> bool {
         self.retry_on.should_retry(error)
@@ -176,59 +214,44 @@ impl Model for FallbackModel {
             return Err(ModelError::configuration("No models in fallback chain"));
         }
 
-        let mut last_error: Option<ModelError> = None;
+        let mut attempts = Vec::new();
 
         for (i, model) in self.models.iter().enumerate() {
-            let is_last = i == self.models.len() - 1;
+            let attempt = i + 1;
+            let is_last = attempt == self.models.len();
 
             debug!(
                 model = %model.identifier(),
-                attempt = i + 1,
+                attempt,
                 total = self.models.len(),
                 "Trying model in fallback chain"
             );
 
             match model.request(messages, settings, params).await {
-                Ok(response) => {
-                    if i > 0 {
-                        debug!(
-                            model = %model.identifier(),
-                            "Fallback model succeeded after {} previous attempts",
-                            i
-                        );
-                    }
-                    return Ok(response);
-                }
-                Err(e) => {
+                Ok(response) => return Ok(response),
+                Err(error) => {
                     warn!(
                         model = %model.identifier(),
-                        error = %e,
+                        error = %error,
                         "Model request failed"
                     );
 
-                    if is_last {
-                        // No more models to try
-                        return Err(e);
-                    }
-
-                    if self.should_retry(&e) {
-                        debug!(
-                            error_type = ?std::mem::discriminant(&e),
-                            "Error is retryable, trying next model"
-                        );
-                        last_error = Some(e);
+                    if !is_last && self.should_retry(&error) {
+                        attempts.push(Self::contextual_failure(&error, model.as_ref(), attempt));
                         continue;
                     }
 
-                    // Non-retryable error, propagate immediately
-                    return Err(e);
+                    return Err(Self::finish_failure(
+                        attempts,
+                        error,
+                        model.as_ref(),
+                        attempt,
+                    ));
                 }
             }
         }
 
-        // This shouldn't be reached due to the is_last check above,
-        // but handle it gracefully just in case
-        Err(last_error.unwrap_or_else(|| ModelError::configuration("No models in fallback chain")))
+        Err(ModelError::configuration("No models in fallback chain"))
     }
 
     async fn request_stream(
@@ -241,55 +264,57 @@ impl Model for FallbackModel {
             return Err(ModelError::configuration("No models in fallback chain"));
         }
 
-        let mut last_error: Option<ModelError> = None;
+        let mut attempts = Vec::new();
 
         for (i, model) in self.models.iter().enumerate() {
-            let is_last = i == self.models.len() - 1;
+            let attempt = i + 1;
+            let is_last = attempt == self.models.len();
 
             debug!(
                 model = %model.identifier(),
-                attempt = i + 1,
+                attempt,
                 total = self.models.len(),
                 "Trying model in fallback chain (streaming)"
             );
 
-            match model.request_stream(messages, settings, params).await {
-                Ok(stream) => {
-                    if i > 0 {
-                        debug!(
-                            model = %model.identifier(),
-                            "Fallback model succeeded after {} previous attempts",
-                            i
-                        );
-                    }
-                    return Ok(stream);
-                }
-                Err(e) => {
-                    warn!(
-                        model = %model.identifier(),
-                        error = %e,
-                        "Model stream request failed"
-                    );
-
-                    if is_last {
-                        return Err(e);
-                    }
-
-                    if self.should_retry(&e) {
-                        debug!(
-                            error_type = ?std::mem::discriminant(&e),
-                            "Error is retryable, trying next model"
-                        );
-                        last_error = Some(e);
+            let stream = match model.request_stream(messages, settings, params).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    if !is_last && self.should_retry(&error) {
+                        attempts.push(Self::contextual_failure(&error, model.as_ref(), attempt));
                         continue;
                     }
-
-                    return Err(e);
+                    return Err(Self::finish_failure(
+                        attempts,
+                        error,
+                        model.as_ref(),
+                        attempt,
+                    ));
                 }
+            };
+
+            let mut stream = stream;
+            match stream.next().await {
+                Some(Ok(event)) => {
+                    return Ok(stream::once(async move { Ok(event) }).chain(stream).boxed());
+                }
+                Some(Err(error)) => {
+                    if !is_last && self.should_retry(&error) {
+                        attempts.push(Self::contextual_failure(&error, model.as_ref(), attempt));
+                        continue;
+                    }
+                    return Err(Self::finish_failure(
+                        attempts,
+                        error,
+                        model.as_ref(),
+                        attempt,
+                    ));
+                }
+                None => return Ok(stream),
             }
         }
 
-        Err(last_error.unwrap_or_else(|| ModelError::configuration("No models in fallback chain")))
+        Err(ModelError::configuration("No models in fallback chain"))
     }
 }
 
@@ -298,7 +323,7 @@ mod tests {
     use super::*;
     use crate::error::ProviderErrorKind;
     use crate::mock::MockModel;
-    use serdes_ai_core::messages::TextPart;
+    use serdes_ai_core::messages::{ModelResponseStreamEvent, StreamCompleteEvent, TextPart};
     use serdes_ai_core::{FinishReason, ModelResponsePart};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -624,12 +649,15 @@ mod tests {
         assert_eq!(call_count1.load(Ordering::SeqCst), 1);
         assert_eq!(call_count2.load(Ordering::SeqCst), 1);
 
-        // Should return error
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ModelError::RateLimited { .. }
-        ));
+        // Preserve both failed model attempts and the final concrete source.
+        match result.unwrap_err() {
+            ModelError::FallbackExhausted { attempts, .. } => {
+                assert_eq!(attempts.len(), 2);
+                assert_eq!(attempts[0].model.as_deref(), Some("failing-mock:model1"));
+                assert_eq!(attempts[1].model.as_deref(), Some("failing-mock:model2"));
+            }
+            other => panic!("expected fallback context, got {other}"),
+        }
     }
 
     #[tokio::test]
@@ -882,5 +910,311 @@ mod tests {
             }
             _ => panic!("Expected Configuration error"),
         }
+    }
+
+    struct StreamingMockModel {
+        name: String,
+        events: std::sync::Mutex<Option<Vec<Result<ModelResponseStreamEvent, ModelError>>>>,
+        calls: Arc<AtomicUsize>,
+        profile: ModelProfile,
+    }
+
+    impl StreamingMockModel {
+        fn new(
+            name: impl Into<String>,
+            events: Vec<Result<ModelResponseStreamEvent, ModelError>>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                events: std::sync::Mutex::new(Some(events)),
+                calls: Arc::new(AtomicUsize::new(0)),
+                profile: ModelProfile::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Model for StreamingMockModel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn system(&self) -> &str {
+            "streaming-mock"
+        }
+
+        fn profile(&self) -> &ModelProfile {
+            &self.profile
+        }
+
+        async fn request(
+            &self,
+            _messages: &[ModelRequest],
+            _settings: &ModelSettings,
+            _params: &ModelRequestParameters,
+        ) -> Result<ModelResponse, ModelError> {
+            Err(ModelError::not_supported("non-streaming request"))
+        }
+
+        async fn request_stream(
+            &self,
+            _messages: &[ModelRequest],
+            _settings: &ModelSettings,
+            _params: &ModelRequestParameters,
+        ) -> Result<StreamedResponse, ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = self.events.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_falls_back_after_retryable_error_before_first_event() {
+        let primary =
+            StreamingMockModel::new("primary", vec![Err(ModelError::Connection("reset".into()))]);
+        let backup = StreamingMockModel::new(
+            "backup",
+            vec![Ok(ModelResponseStreamEvent::part_start(
+                0,
+                ModelResponsePart::Text(TextPart::new("backup")),
+            ))],
+        );
+        let backup_calls = Arc::clone(&backup.calls);
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let mut stream = fallback
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Ok(ModelResponseStreamEvent::PartStart(_)))
+        ));
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_does_not_fallback_after_any_event_is_exposed() {
+        let primary = StreamingMockModel::new(
+            "primary",
+            vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("primary")),
+                )),
+                Err(ModelError::Connection("late reset".into())),
+            ],
+        );
+        let backup = StreamingMockModel::new(
+            "backup",
+            vec![Ok(ModelResponseStreamEvent::part_start(
+                0,
+                ModelResponsePart::Text(TextPart::new("backup")),
+            ))],
+        );
+        let backup_calls = Arc::clone(&backup.calls);
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let mut stream = fallback
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(ModelError::Connection(message))) if message == "late reset"
+        ));
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn terminal_metadata_event_also_prevents_fallback() {
+        let primary = StreamingMockModel::new(
+            "primary",
+            vec![
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(FinishReason::Stop),
+                )),
+                Err(ModelError::Connection("after metadata".into())),
+            ],
+        );
+        let backup = StreamingMockModel::new("backup", vec![]);
+        let backup_calls = Arc::clone(&backup.calls);
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let mut stream = fallback
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Ok(ModelResponseStreamEvent::StreamComplete(_)))
+        ));
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(ModelError::Connection(message))) if message == "after metadata"
+        ));
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_pre_output_error_does_not_try_backup() {
+        let primary = StreamingMockModel::new(
+            "primary",
+            vec![Err(ModelError::Authentication("bad key".into()))],
+        );
+        let backup = StreamingMockModel::new("backup", vec![]);
+        let backup_calls = Arc::clone(&backup.calls);
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let result = fallback
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ModelError::Authentication(_))));
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn all_pre_output_failures_preserve_model_attempt_context() {
+        let primary = StreamingMockModel::new(
+            "primary",
+            vec![Err(ModelError::Connection("primary reset".into()))],
+        );
+        let backup = StreamingMockModel::new(
+            "backup",
+            vec![Err(ModelError::Timeout(Duration::from_secs(1)))],
+        );
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)])
+            .with_retry_on(RetryOn::Transient);
+
+        let error = match fallback
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("all candidates should fail"),
+        };
+
+        match error {
+            ModelError::FallbackExhausted { attempts, .. } => {
+                assert_eq!(attempts.len(), 2);
+                assert_eq!(attempts[0].model.as_deref(), Some("streaming-mock:primary"));
+                assert_eq!(attempts[0].attempt, Some(1));
+                assert_eq!(attempts[1].model.as_deref(), Some("streaming-mock:backup"));
+                assert_eq!(attempts[1].attempt, Some(2));
+            }
+            other => panic!("expected fallback context, got {other}"),
+        }
+    }
+
+    struct PendingStreamingModel {
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        profile: ModelProfile,
+    }
+
+    struct StreamDropGuard(Arc<AtomicUsize>);
+
+    impl Drop for StreamDropGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl Model for PendingStreamingModel {
+        fn name(&self) -> &str {
+            "pending"
+        }
+
+        fn system(&self) -> &str {
+            "streaming-mock"
+        }
+
+        fn profile(&self) -> &ModelProfile {
+            &self.profile
+        }
+
+        async fn request(
+            &self,
+            _messages: &[ModelRequest],
+            _settings: &ModelSettings,
+            _params: &ModelRequestParameters,
+        ) -> Result<ModelResponse, ModelError> {
+            unreachable!()
+        }
+
+        async fn request_stream(
+            &self,
+            _messages: &[ModelRequest],
+            _settings: &ModelSettings,
+            _params: &ModelRequestParameters,
+        ) -> Result<StreamedResponse, ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let guard = StreamDropGuard(Arc::clone(&self.drops));
+            Ok(Box::pin(futures::stream::unfold(
+                guard,
+                |guard| async move {
+                    futures::future::pending::<()>().await;
+                    Some((Err(ModelError::Connection("unreachable".into())), guard))
+                },
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_initial_poll_closes_stream_without_trying_backup() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let primary_drops = Arc::new(AtomicUsize::new(0));
+        let primary = PendingStreamingModel {
+            calls: Arc::clone(&primary_calls),
+            drops: Arc::clone(&primary_drops),
+            profile: ModelProfile::default(),
+        };
+        let backup = StreamingMockModel::new("backup", vec![]);
+        let backup_calls = Arc::clone(&backup.calls);
+        let fallback = FallbackModel::new(vec![Box::new(primary), Box::new(backup)]);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            fallback.request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            ),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(primary_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(backup_calls.load(Ordering::SeqCst), 0);
     }
 }
