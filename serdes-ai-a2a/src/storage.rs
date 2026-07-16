@@ -135,7 +135,7 @@ impl Storage for InMemoryStorage {
         let mut all_tasks: Vec<Task> = tasks.values().cloned().collect();
 
         // Sort by created_at descending (newest first)
-        all_tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all_tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
 
         if let Some(limit) = limit {
             all_tasks.truncate(limit);

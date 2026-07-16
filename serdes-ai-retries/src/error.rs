@@ -3,7 +3,41 @@
 use std::time::Duration;
 use thiserror::Error;
 
-/// Errors that can be retried.
+/// Reason an operation governed by a [`crate::RetryPolicy`] did not succeed.
+#[derive(Debug)]
+pub enum RetryFailure<E> {
+    /// The error was classified as permanent.
+    Permanent {
+        /// Original error, preserved without conversion.
+        error: E,
+        /// Number of attempts made.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+    /// The maximum number of attempts was reached.
+    Exhausted {
+        /// Final error, preserved without conversion.
+        error: E,
+        /// Number of attempts made.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+    /// The total time budget expired.
+    DeadlineExceeded {
+        /// Most recent error, if an attempt failed before the deadline.
+        last_error: Option<E>,
+        /// Number of attempts started.
+        attempts: u32,
+        /// Time elapsed under the policy.
+        elapsed: Duration,
+    },
+}
+/// Legacy transport-level retry errors.
+///
+/// Model-call failures use `serdes_ai_core::ModelFailure`; this type remains
+/// scoped to the standalone HTTP retry client for backward compatibility.
 #[derive(Debug, Error)]
 pub enum RetryableError {
     /// HTTP error with status code.

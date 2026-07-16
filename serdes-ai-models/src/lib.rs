@@ -160,9 +160,11 @@ pub use antigravity::AntigravityModel;
 
 // Mock for testing
 pub mod mock;
+/// Provider-neutral same-model retry orchestration.
+pub mod retry;
 
 // Re-exports
-pub use error::{ModelError, ModelResult};
+pub use error::{ModelError, ModelResult, ProviderErrorKind};
 pub use fallback::{FallbackModel, RetryOn};
 pub use mock::{FunctionModel, MockModel, TestModel};
 pub use model::{
@@ -174,7 +176,9 @@ pub use profile::{
     openai_gpt4o_profile, openai_o1_profile, qwen_profile, ModelProfile, OutputMode,
     DEFAULT_PROFILE, DEFAULT_PROMPTED_OUTPUT_TEMPLATE,
 };
+pub use retry::{ModelRetryExt, RetryingModel};
 pub use schema_transformer::JsonSchemaTransformer;
+pub use serdes_ai_retries::{RetryDecision, RetryFailure, RetryPolicy, WaitStrategy};
 
 // Re-export provider types for convenience
 #[cfg(feature = "openai")]
@@ -205,8 +209,8 @@ pub use bedrock::BedrockModel;
 pub mod prelude {
     pub use crate::{
         BoxedModel, FallbackModel, FunctionModel, MockModel, Model, ModelCapability, ModelError,
-        ModelProfile, ModelRequestParameters, ModelResult, RetryOn, StreamedResponse, TestModel,
-        ToolChoice,
+        ModelProfile, ModelRequestParameters, ModelResult, ModelRetryExt, RetryOn, RetryPolicy,
+        RetryingModel, StreamedResponse, TestModel, ToolChoice, WaitStrategy,
     };
 
     #[cfg(feature = "openai")]
@@ -285,7 +289,7 @@ pub fn infer_model(identifier: &str) -> ModelResult<std::sync::Arc<dyn Model>> {
             #[cfg(feature = "openai")]
             {
                 let model = OpenAIChatModel::from_env(model_name)?;
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -298,7 +302,7 @@ pub fn infer_model(identifier: &str) -> ModelResult<std::sync::Arc<dyn Model>> {
             #[cfg(feature = "anthropic")]
             {
                 let model = AnthropicModel::from_env(model_name)?;
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "anthropic"))]
             {
@@ -310,37 +314,37 @@ pub fn infer_model(identifier: &str) -> ModelResult<std::sync::Arc<dyn Model>> {
         #[cfg(feature = "groq")]
         "groq" => {
             let model = GroqModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "mistral")]
         "mistral" => {
             let model = MistralModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "ollama")]
         "ollama" => {
             let model = OllamaModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "bedrock")]
         "bedrock" | "aws" => {
             let model = BedrockModel::new(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "openrouter")]
         "openrouter" | "or" => {
             let model = OpenRouterModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "huggingface")]
         "huggingface" | "hf" => {
             let model = HuggingFaceModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "cohere")]
         "cohere" | "co" => {
             let model = CohereModel::from_env(model_name)?;
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         _ => Err(ModelError::Configuration(format!(
             "Unknown provider: {}. Supported: openai, anthropic, groq, mistral, ollama, bedrock, openrouter, huggingface, cohere",
@@ -392,7 +396,7 @@ pub fn build_model_with_config(
                     model
                 };
 
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -423,7 +427,7 @@ pub fn build_model_with_config(
                     model
                 };
 
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "anthropic"))]
             {
@@ -444,7 +448,7 @@ pub fn build_model_with_config(
             // GroqModel doesn't have with_base_url/with_timeout
             let _ = (base_url, timeout);
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "mistral")]
         "mistral" => {
@@ -466,7 +470,7 @@ pub fn build_model_with_config(
                 model
             };
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "ollama")]
         "ollama" => {
@@ -481,7 +485,7 @@ pub fn build_model_with_config(
             // Ollama doesn't use API keys or timeouts in the same way
             let _ = (api_key, timeout);
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "google")]
         "google" | "gemini" => {
@@ -507,7 +511,7 @@ pub fn build_model_with_config(
 
             let _ = timeout; // Google model doesn't have with_timeout
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         _ => Err(ModelError::Configuration(format!(
             "Unknown or unsupported provider: '{}'. Supported providers depend on enabled features: \
@@ -555,6 +559,8 @@ pub struct ExtendedModelConfig {
     pub thinking_budget: Option<u64>,
     /// Reasoning effort (OpenAI o1/o3)
     pub reasoning_effort: Option<String>,
+    /// Optional same-model retry policy. Retries are disabled when omitted.
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 impl ExtendedModelConfig {
@@ -599,6 +605,18 @@ impl ExtendedModelConfig {
         self.reasoning_effort = Some(effort.into());
         self
     }
+
+    /// Enable same-model retries with the supplied policy.
+    pub fn with_retries(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    /// Explicitly disable same-model retries.
+    pub fn without_retries(mut self) -> Self {
+        self.retry_policy = None;
+        self
+    }
 }
 
 /// Build a model with extended configuration options.
@@ -630,7 +648,8 @@ pub fn build_model_extended(
 ) -> ModelResult<std::sync::Arc<dyn Model>> {
     use std::sync::Arc;
 
-    match provider {
+    let retry_policy = config.retry_policy.clone();
+    let model: Arc<dyn Model> = match provider {
         "openai" | "gpt" => {
             #[cfg(feature = "openai")]
             {
@@ -660,7 +679,7 @@ pub fn build_model_extended(
                     model
                 };
 
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -704,7 +723,7 @@ pub fn build_model_extended(
                     model
                 };
 
-                Ok(Arc::new(model))
+                Ok(Arc::new(model) as Arc<dyn Model>)
             }
             #[cfg(not(feature = "anthropic"))]
             {
@@ -728,7 +747,7 @@ pub fn build_model_extended(
                 model
             };
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "mistral")]
         "mistral" => {
@@ -756,7 +775,7 @@ pub fn build_model_extended(
                 model
             };
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "ollama")]
         "ollama" => {
@@ -774,7 +793,7 @@ pub fn build_model_extended(
                 model
             };
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         #[cfg(feature = "google")]
         "google" | "gemini" => {
@@ -802,11 +821,16 @@ pub fn build_model_extended(
                 model
             };
 
-            Ok(Arc::new(model))
+            Ok(Arc::new(model) as Arc<dyn Model>)
         }
         _ => Err(ModelError::Configuration(format!(
             "Unknown or unsupported provider: '{}'. Supported providers depend on enabled features.",
             provider
         ))),
-    }
+    }?;
+
+    Ok(match retry_policy {
+        Some(policy) => Arc::new(RetryingModel::from_arc(model, policy)),
+        None => model,
+    })
 }

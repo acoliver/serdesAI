@@ -1,6 +1,6 @@
 [package]
 name = "serdes-ai"
-description = "Type-safe, production-ready AI agent framework for Rust - a full port of pydantic-ai"
+description = "Type-safe Rust AI agent framework inspired by pydantic-ai"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

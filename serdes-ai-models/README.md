@@ -26,12 +26,57 @@ serdes-ai-models = "0.1"
 
 ## Usage
 
-```rust
-use serdes_ai_models::{OpenAIChatModel, Model};
+```rust,ignore
+use serdes_ai_models::{Model, ModelRetryExt, OpenAIChatModel, RetryPolicy};
+use std::time::Duration;
 
-let model = OpenAIChatModel::from_env("gpt-4o")?;
-let response = model.chat(messages, options).await?;
+let model = OpenAIChatModel::from_env("gpt-4o")?.with_retries(
+    RetryPolicy::for_model_requests()
+        .max_attempts(3)
+        .total_timeout(Some(Duration::from_secs(30))),
+);
+
+let response = model.request(&messages, &settings, &params).await?;
 ```
+
+Retries are opt-in. `RetryPolicy::disabled()` performs exactly one attempt. The
+policy retries the same model; `FallbackModel` remains responsible for selecting
+## Streaming fallback boundary
+
+`FallbackModel` can select another model for acquisition errors or retryable
+errors yielded before the first stream event. It polls and buffers at most one
+event while selecting an attempt. Every event counts as caller-visible exposure,
+including terminal/provider metadata. Once an event is returned, later errors
+are propagated from that model and fallback never replays or concatenates
+another model's output. Dropping the initial request future closes the current
+stream and prevents another fallback attempt.
+
+Same-model retries remain a separate opt-in layer through `RetryingModel`.
+
+## Model failure contract
+
+`serdes_ai_core::ModelFailure` is the authoritative, serializable classification
+used by direct model calls, same-model retries, fallback selection, and agent
+wrappers. It preserves the semantic kind, HTTP status, provider code,
+`Retry-After`, and available provider/model/attempt context. `ModelError` remains
+the concrete source-bearing error and implements `ClassifyModelFailure`.
+
+Migration guidance:
+
+- Use `ClassifyModelFailure::model_failure()` instead of matching retryability in
+  each crate.
+- `ProviderErrorKind` remains a compatibility alias for `ModelFailureKind`.
+- Core `ModelApiError` and `ModelHttpError` convert into `ModelError` while
+  remaining the source of the converted error.
+- `serdes-ai-providers::ProviderError` is limited to provider discovery and
+  configuration; model-call failures use `ModelError`.
+- `serdes-ai-retries::RetryableError` remains limited to the legacy standalone
+  HTTP retry client. Tool, user, cancellation, and output-validation failures
+  retain their distinct semantics.
+
+a different model. Streaming requests may be retried only while acquiring the
+stream and before the first caller-visible event. Once an event is returned, later
+stream errors pass through without replaying or concatenating another response.
 
 ## Part of SerdesAI
 

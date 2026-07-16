@@ -3,6 +3,8 @@
 [build]
 # Use all available CPU cores
 jobs = -1
+# Keep large all-feature workspace builds from retaining duplicate incremental artifacts.
+incremental = false
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [

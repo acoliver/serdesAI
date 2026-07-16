@@ -22,18 +22,39 @@ serdes-ai-retries = "0.1"
 
 ## Usage
 
-```rust
-use serdes_ai_retries::{RetryStrategy, ExponentialBackoff};
+The provider-neutral executor retains the operation's original error type. Policies
+count total attempts, include backoff in the total time budget, and honor
+`Retry-After` when the classifier supplies it.
 
-let strategy = ExponentialBackoff::new()
-    .max_retries(3)
-    .initial_delay(Duration::from_millis(100))
-    .max_delay(Duration::from_secs(10));
+```rust,no_run
+use serdes_ai_retries::{
+    with_retry_policy, RetryDecision, RetryPolicy, WaitStrategy,
+};
+use std::time::Duration;
 
-let agent = Agent::new(model)
-    .retry_strategy(strategy)
-    .build();
+# async fn example() {
+let policy = RetryPolicy::for_model_requests()
+    .max_attempts(3)
+    .wait(WaitStrategy::Fixed(Duration::from_millis(100)))
+    .total_timeout(Some(Duration::from_secs(10)));
+
+let result = with_retry_policy(
+    &policy,
+    || async { Ok::<_, std::io::Error>("success") },
+    |error| match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionReset => {
+            RetryDecision::Retry { retry_after: None }
+        }
+        _ => RetryDecision::DoNotRetry,
+    },
+).await;
+# assert_eq!(result.unwrap(), "success");
+# }
 ```
+
+Dropping the returned future cancels an in-flight attempt or backoff immediately;
+the executor does not spawn a background retry task. Use
+`RetryPolicy::disabled()` for an explicit one-attempt policy.
 
 ## Part of SerdesAI
 

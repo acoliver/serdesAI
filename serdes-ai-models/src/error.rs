@@ -1,8 +1,13 @@
 //! Model-related error types.
 
+use serdes_ai_core::errors::{ModelApiError, ModelHttpError};
+use serdes_ai_core::{ClassifyModelFailure, ModelFailure, ModelFailureKind};
 use std::collections::HashMap;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Backward-compatible name for the canonical model failure category.
+pub type ProviderErrorKind = ModelFailureKind;
 
 /// Model-related errors.
 #[derive(Debug, Error)]
@@ -25,6 +30,23 @@ pub enum ModelError {
         message: String,
         /// Error code.
         code: Option<String>,
+    },
+
+    /// Structured error reported by a model provider.
+    #[error("{provider} API error ({code}): {message}")]
+    Provider {
+        /// Provider name.
+        provider: String,
+        /// Provider-specific error type or code.
+        code: String,
+        /// Provider-supplied error message.
+        message: String,
+        /// Semantic classification used by retry and fallback policies.
+        kind: ProviderErrorKind,
+        /// HTTP status for transport-reported errors.
+        status: Option<u16>,
+        /// Suggested retry delay, when supplied by the provider.
+        retry_after: Option<Duration>,
     },
 
     /// Request timeout.
@@ -83,26 +105,90 @@ pub enum ModelError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    /// Stream ended prematurely (e.g. transport EOF before a terminal event).
+    #[error("Incomplete stream: {0}")]
+    IncompleteStream(String),
+
     /// Network error.
     #[error("Network error: {0}")]
     Network(String),
+
+    /// Every eligible model in a fallback chain failed before producing output.
+    #[error("All fallback models failed after {attempts_len} attempts: {last_error}", attempts_len = .attempts.len())]
+    FallbackExhausted {
+        /// Normalized failure metadata for each attempted model.
+        attempts: Vec<ModelFailure>,
+        /// Final concrete error retained as the source.
+        #[source]
+        last_error: Box<ModelError>,
+    },
+
+    /// Retry attempts against the same model were exhausted.
+    #[error("Model request failed after {attempts} attempts over {elapsed:?}: {last_error}")]
+    RetryExhausted {
+        /// Number of attempts made.
+        attempts: u32,
+        /// Total time spent under the retry policy.
+        elapsed: Duration,
+        /// Final classified model error.
+        #[source]
+        last_error: Box<ModelError>,
+    },
+
+    /// The total retry deadline expired.
+    #[error("Model request deadline expired after {attempts} attempts over {elapsed:?}")]
+    RetryDeadlineExceeded {
+        /// Number of attempts started.
+        attempts: u32,
+        /// Total time spent under the retry policy.
+        elapsed: Duration,
+        /// Most recent classified model error, if any.
+        #[source]
+        last_error: Option<Box<ModelError>>,
+    },
+
+    /// Legacy core API error retained as the source during migration.
+    #[error("Core model API error: {0}")]
+    CoreApi(#[source] Box<ModelApiError>),
+
+    /// Legacy core HTTP error retained as the source during migration.
+    #[error("Core model HTTP error: {0}")]
+    CoreHttp(#[source] Box<ModelHttpError>),
 
     /// Other error.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
+impl From<ModelApiError> for ModelError {
+    fn from(error: ModelApiError) -> Self {
+        Self::CoreApi(Box::new(error))
+    }
+}
+
+impl From<ModelHttpError> for ModelError {
+    fn from(error: ModelHttpError) -> Self {
+        Self::CoreHttp(Box::new(error))
+    }
+}
+
 impl ModelError {
     /// Check if this error is retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        match self {
-            ModelError::Timeout(_) => true,
-            ModelError::RateLimited { .. } => true,
-            ModelError::Connection(_) => true,
-            ModelError::Http { status, .. } => *status >= 500,
-            _ => false,
-        }
+        self.model_failure().is_retryable()
+    }
+
+    /// Check if this error represents rate limiting.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        self.model_failure().kind.is_rate_limited()
+    }
+
+    /// Check if this error is transient, excluding rate limits.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        self.model_failure().kind.is_transient()
     }
 
     /// Get the retry-after duration if applicable.
@@ -110,6 +196,18 @@ impl ModelError {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             ModelError::RateLimited { retry_after } => *retry_after,
+            ModelError::Provider { retry_after, .. } => *retry_after,
+            ModelError::Http { headers, .. } => headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                .map(Duration::from_secs),
+            ModelError::FallbackExhausted { last_error, .. }
+            | ModelError::RetryExhausted { last_error, .. } => last_error.retry_after(),
+            ModelError::RetryDeadlineExceeded {
+                last_error: Some(last_error),
+                ..
+            } => last_error.retry_after(),
             _ => None,
         }
     }
@@ -133,6 +231,36 @@ impl ModelError {
     /// Create a rate limited error.
     pub fn rate_limited(retry_after: Option<Duration>) -> Self {
         Self::RateLimited { retry_after }
+    }
+
+    /// Create a structured provider error.
+    pub fn provider(
+        provider: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::provider_with_status(provider, code, message, kind, None, retry_after)
+    }
+
+    /// Create a structured provider error with HTTP status metadata.
+    pub fn provider_with_status(
+        provider: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+        status: Option<u16>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::Provider {
+            provider: provider.into(),
+            code: code.into(),
+            message: message.into(),
+            kind,
+            status,
+            retry_after,
+        }
     }
 
     /// Create an HTTP error.
@@ -167,6 +295,11 @@ impl ModelError {
         Self::InvalidResponse(message.into())
     }
 
+    /// Create an incomplete-stream error.
+    pub fn incomplete_stream(message: impl Into<String>) -> Self {
+        Self::IncompleteStream(message.into())
+    }
+
     /// Create a not supported error.
     pub fn not_supported(message: impl Into<String>) -> Self {
         Self::NotSupported(message.into())
@@ -194,6 +327,127 @@ impl ModelError {
             body: message.into(),
             headers: std::collections::HashMap::new(),
         }
+    }
+}
+impl ClassifyModelFailure for ModelError {
+    fn model_failure(&self) -> ModelFailure {
+        let mut failure = match self {
+            Self::Http { status, body, .. } => {
+                let kind = match *status {
+                    429 => ModelFailureKind::RateLimited,
+                    500..=599 => ModelFailureKind::Server,
+                    400 => ModelFailureKind::InvalidRequest,
+                    401 => ModelFailureKind::Authentication,
+                    403 => ModelFailureKind::PermissionDenied,
+                    404 => ModelFailureKind::NotFound,
+                    _ => ModelFailureKind::Other,
+                };
+                let mut failure = ModelFailure::new(kind, body.clone());
+                failure.status = Some(*status);
+                failure
+            }
+            Self::Api { message, code } => {
+                let kind = match code.as_deref() {
+                    Some("rate_limit_error") => ModelFailureKind::RateLimited,
+                    Some("overloaded_error") => ModelFailureKind::Overloaded,
+                    Some("authentication_error") => ModelFailureKind::Authentication,
+                    Some("invalid_request_error") => ModelFailureKind::InvalidRequest,
+                    _ => ModelFailureKind::Other,
+                };
+                let mut failure = ModelFailure::new(kind, message.clone());
+                failure.provider_code = code.clone();
+                failure
+            }
+            Self::Provider {
+                provider,
+                code,
+                message,
+                kind,
+                status,
+                retry_after,
+            } => {
+                let mut failure = ModelFailure::new(*kind, message.clone());
+                failure.provider = Some(provider.clone());
+                failure.provider_code = Some(code.clone());
+                failure.status = *status;
+                failure.retry_after = *retry_after;
+                failure
+            }
+            Self::Timeout(duration) => ModelFailure::new(
+                ModelFailureKind::Timeout,
+                format!("request timeout after {duration:?}"),
+            ),
+            Self::RateLimited { retry_after } => {
+                let mut failure = ModelFailure::new(ModelFailureKind::RateLimited, "rate limited");
+                failure.retry_after = *retry_after;
+                failure
+            }
+            Self::Authentication(message) => {
+                ModelFailure::new(ModelFailureKind::Authentication, message.clone())
+            }
+            Self::InvalidResponse(message) => {
+                ModelFailure::new(ModelFailureKind::InvalidResponse, message.clone())
+            }
+            Self::NotFound(message) => {
+                ModelFailure::new(ModelFailureKind::NotFound, message.clone())
+            }
+            Self::Cancelled => ModelFailure::new(ModelFailureKind::Cancelled, "request cancelled"),
+            Self::Connection(message) | Self::Network(message) => {
+                ModelFailure::new(ModelFailureKind::Connection, message.clone())
+            }
+            Self::ContextLengthExceeded { .. } => {
+                ModelFailure::new(ModelFailureKind::InvalidRequest, self.to_string())
+            }
+            Self::Configuration(message) | Self::NotSupported(message) => {
+                ModelFailure::new(ModelFailureKind::Configuration, message.clone())
+            }
+            Self::IncompleteStream(message) => {
+                ModelFailure::new(ModelFailureKind::IncompleteStream, message.clone())
+            }
+            Self::Serialization(error) => {
+                ModelFailure::new(ModelFailureKind::InvalidResponse, error.to_string())
+            }
+            Self::FallbackExhausted {
+                attempts,
+                last_error,
+            } => {
+                let mut failure = last_error.model_failure();
+                failure.attempt = Some(attempts.len() as u32);
+                return failure;
+            }
+            Self::RetryExhausted {
+                attempts,
+                last_error,
+                ..
+            } => {
+                let mut failure = last_error.model_failure();
+                failure.attempt = Some(*attempts);
+                return failure;
+            }
+            Self::RetryDeadlineExceeded {
+                attempts,
+                last_error: Some(last_error),
+                ..
+            } => {
+                let mut failure = last_error.model_failure();
+                failure.attempt = Some(*attempts);
+                return failure;
+            }
+            Self::RetryDeadlineExceeded { attempts, .. } => {
+                let mut failure = ModelFailure::new(ModelFailureKind::Timeout, self.to_string());
+                failure.attempt = Some(*attempts);
+                failure
+            }
+            Self::ContentFiltered(message) => {
+                ModelFailure::new(ModelFailureKind::Other, message.clone())
+            }
+            Self::Other(error) => ModelFailure::new(ModelFailureKind::Other, error.to_string()),
+            Self::CoreApi(error) => return error.model_failure(),
+            Self::CoreHttp(error) => return error.model_failure(),
+        };
+        failure.retry_after = failure.retry_after.or_else(|| self.retry_after());
+        failure.cause = Some(self.to_string());
+        failure
     }
 }
 
@@ -255,5 +509,101 @@ mod tests {
 
         let err = ModelError::http(404, "Not found");
         assert!(err.to_string().contains("404"));
+    }
+
+    #[test]
+    fn canonical_classification_matrix() {
+        let cases = [
+            (
+                ModelError::http(429, "limited"),
+                ModelFailureKind::RateLimited,
+                true,
+            ),
+            (
+                ModelError::http(500, "server"),
+                ModelFailureKind::Server,
+                true,
+            ),
+            (
+                ModelError::http(503, "unavailable"),
+                ModelFailureKind::Server,
+                true,
+            ),
+            (
+                ModelError::http(400, "bad"),
+                ModelFailureKind::InvalidRequest,
+                false,
+            ),
+            (
+                ModelError::http(401, "auth"),
+                ModelFailureKind::Authentication,
+                false,
+            ),
+            (
+                ModelError::Timeout(Duration::from_secs(1)),
+                ModelFailureKind::Timeout,
+                true,
+            ),
+            (
+                ModelError::Connection("reset".into()),
+                ModelFailureKind::Connection,
+                true,
+            ),
+            (
+                ModelError::invalid_response("bad json"),
+                ModelFailureKind::InvalidResponse,
+                false,
+            ),
+            (ModelError::Cancelled, ModelFailureKind::Cancelled, false),
+        ];
+
+        for (error, expected_kind, retryable) in cases {
+            let failure = error.model_failure();
+            assert_eq!(failure.kind, expected_kind);
+            assert_eq!(failure.is_retryable(), retryable);
+            assert_eq!(error.is_retryable(), retryable);
+        }
+    }
+
+    #[test]
+    fn provider_metadata_and_retry_context_survive_classification() {
+        let error = ModelError::RetryExhausted {
+            attempts: 3,
+            elapsed: Duration::from_secs(2),
+            last_error: Box::new(ModelError::provider_with_status(
+                "anthropic",
+                "rate_limit_error",
+                "slow down",
+                ModelFailureKind::RateLimited,
+                Some(429),
+                Some(Duration::from_secs(7)),
+            )),
+        };
+
+        let failure = error.model_failure();
+        assert_eq!(failure.kind, ModelFailureKind::RateLimited);
+        assert_eq!(failure.status, Some(429));
+        assert_eq!(failure.provider.as_deref(), Some("anthropic"));
+        assert_eq!(failure.provider_code.as_deref(), Some("rate_limit_error"));
+        assert_eq!(failure.retry_after, Some(Duration::from_secs(7)));
+        assert_eq!(failure.attempt, Some(3));
+    }
+
+    #[test]
+    fn legacy_core_errors_convert_without_losing_source_or_metadata() {
+        let mut headers = HashMap::new();
+        headers.insert("Retry-After".to_string(), "5".to_string());
+        let core_error = ModelApiError::new(429, "limited")
+            .with_message("slow down")
+            .with_error_code("rate_limit_error")
+            .with_headers(headers);
+        let error = ModelError::from(core_error);
+        let failure = error.model_failure();
+
+        assert_eq!(failure.kind, ModelFailureKind::RateLimited);
+        assert_eq!(failure.status, Some(429));
+        assert_eq!(failure.provider_code.as_deref(), Some("rate_limit_error"));
+        assert_eq!(failure.retry_after, Some(Duration::from_secs(5)));
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

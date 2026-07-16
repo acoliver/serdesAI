@@ -61,6 +61,14 @@ pub enum StreamError {
     #[error("SSE buffer exceeded maximum size")]
     BufferOverflow,
 
+    /// The SSE byte stream contained invalid UTF-8.
+    #[error("SSE stream contained invalid UTF-8")]
+    InvalidUtf8,
+
+    /// The transport ended with an unterminated SSE record.
+    #[error("SSE stream ended with an incomplete record")]
+    IncompleteSse,
+
     /// Other error.
     #[error("{0}")]
     Other(String),
