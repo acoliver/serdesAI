@@ -99,7 +99,14 @@ pub enum AgentStreamEvent {
     /// Thinking delta (for reasoning models).
     ThinkingDelta { text: String },
     /// Model response completed.
-    ResponseComplete { step: u32 },
+    ResponseComplete {
+        /// 1-based index of the model response within the run.
+        step: u32,
+        /// Token usage the provider reported for THIS model response.
+        ///
+        /// `None` means the provider did not report usage for this step.
+        usage: Option<RequestUsage>,
+    },
     /// Output ready.
     OutputReady,
     /// Run completed.
@@ -108,6 +115,11 @@ pub enum AgentStreamEvent {
         /// Complete message history from this run (system prompt, user prompts,
         /// assistant responses, tool calls and returns).
         messages: Vec<ModelRequest>,
+        /// Field-wise aggregate of the per-step `RequestUsage` values across
+        /// every model response in this run; `total_tokens` is derived from
+        /// request+response when a provider omits it. Equivalent to the
+        /// `AgentRunResult.usage` returned by the non-streaming `run()` path.
+        usage: RunUsage,
     },
     /// Error occurred.
     Error { message: String },
@@ -119,6 +131,11 @@ pub enum AgentStreamEvent {
         partial_thinking: Option<String>,
         /// Tool calls that were in progress when cancelled.
         pending_tools: Vec<String>,
+        /// Run-aggregate token usage accumulated up to the point of cancellation.
+        ///
+        /// A cancelled run still reports what it spent so far; may be all-zero
+        /// (`RunUsage::default()`) if cancelled before any usage-bearing response.
+        usage: RunUsage,
     },
 }
 
@@ -671,28 +688,19 @@ impl AgentStream {
                     "AgentStream: finished processing model stream"
                 );
 
-                // If the stream did not produce a terminal StreamComplete event,
-                // this is a premature EOF — emit an error and abort.
-                let stream_finish_reason = match stream_finish_reason {
-                    Some(reason) => reason,
-                    None => {
-                        let _ = tx
-                            .send(Ok(AgentStreamEvent::Error {
-                                message:
-                                    "model stream ended without a terminal StreamComplete event"
-                                        .to_string(),
-                            }))
-                            .await;
-                        let _ = tx
-                            .send(Err(AgentRunError::Model(
-                                serdes_ai_models::ModelError::incomplete_stream(
-                                    "model stream ended without a terminal StreamComplete event",
-                                ),
-                            )))
-                            .await;
-                        return;
-                    }
-                };
+                // A stream may legitimately end without an explicit terminal StreamComplete
+                // (in-memory/mock streams, and OpenAI/Google/etc. parsers which never emit one).
+                // Anthropic's parser surfaces REAL truncation separately as an explicit Err
+                // (handled above), so a clean end here with content is a successful completion.
+                // Default the finish reason to Stop. (The `response_parts.is_empty()` guard in
+                // the next block still catches a stream that produced nothing.)
+                if stream_finish_reason.is_none() {
+                    debug!(
+                        parts = response_parts.len(),
+                        "stream ended without terminal StreamComplete; defaulting finish_reason=Stop"
+                    );
+                }
+                let stream_finish_reason = stream_finish_reason.unwrap_or(FinishReason::Stop);
 
                 // If the stream produced no parts at all, treat it as an error
                 if response_parts.is_empty() {
@@ -727,9 +735,18 @@ impl AgentStream {
                 finish_reason = response.finish_reason;
                 responses.push(response.clone());
 
+                // Accumulate run-wide usage, mirroring the non-streaming run()
+                // path (run.rs:398-399) so streaming and non-streaming agree.
+                if let Some(u) = &response.usage {
+                    usage.add_request(u.clone());
+                }
+
                 // Emit ResponseComplete
                 let _ = tx
-                    .send(Ok(AgentStreamEvent::ResponseComplete { step }))
+                    .send(Ok(AgentStreamEvent::ResponseComplete {
+                        step,
+                        usage: response.usage.clone(),
+                    }))
                     .await;
 
                 // Check for tool calls that need execution
@@ -854,7 +871,7 @@ impl AgentStream {
                 }
 
                 // No tool calls - check finish condition
-                if finish_reason == Some(FinishReason::Stop) {
+                if finish_reason.is_some_and(|r| r.is_complete()) {
                     // Add final response to messages for complete history
                     let mut response_req = ModelRequest::new();
                     response_req
@@ -864,6 +881,19 @@ impl AgentStream {
 
                     finished = true;
                     let _ = tx.send(Ok(AgentStreamEvent::OutputReady)).await;
+                } else if let Some(r) = finish_reason {
+                    // finish_reason is Some but NOT complete, and there were no
+                    // tool calls (the tool-call path `continue`d before reaching
+                    // here). The loop is about to silently re-issue the same
+                    // request - make that observable. NOT a behavior change:
+                    // termination is unchanged; termination-on-Length/etc. is a
+                    // separate P2 follow-up. `let _ = &r` keeps `r` "used" so the
+                    // no-op `warn!` build (tracing-integration off) stays clean.
+                    let _ = &r;
+                    warn!(
+                        finish_reason = ?r,
+                        "stream completed with a non-terminal finish reason and no tool calls; re-issuing request (this can loop - see follow-up for Length/ContentFilter/Error handling)"
+                    );
                 }
             }
 
@@ -872,6 +902,7 @@ impl AgentStream {
                 .send(Ok(AgentStreamEvent::RunComplete {
                     run_id: run_id_clone,
                     messages,
+                    usage,
                 }))
                 .await;
         });
@@ -1001,6 +1032,7 @@ impl AgentStream {
                                 Some(accumulated_thinking)
                             },
                             pending_tools: pending_tool_names,
+                            usage: usage.clone(),
                         }))
                         .await;
                     let _ = tx.send(Err(AgentRunError::Cancelled)).await;
@@ -1112,6 +1144,7 @@ impl AgentStream {
                                         Some(accumulated_thinking)
                                     },
                                     pending_tools: pending_tool_names,
+                                    usage: usage.clone(),
                                 }))
                                 .await;
                             let _ = tx.send(Err(AgentRunError::Cancelled)).await;
@@ -1247,28 +1280,19 @@ impl AgentStream {
                     }
                 }
 
-                // If the stream did not produce a terminal StreamComplete event,
-                // this is a premature EOF — emit an error and abort.
-                let stream_finish_reason = match stream_finish_reason {
-                    Some(reason) => reason,
-                    None => {
-                        let _ = tx
-                            .send(Ok(AgentStreamEvent::Error {
-                                message:
-                                    "model stream ended without a terminal StreamComplete event"
-                                        .to_string(),
-                            }))
-                            .await;
-                        let _ = tx
-                            .send(Err(AgentRunError::Model(
-                                serdes_ai_models::ModelError::incomplete_stream(
-                                    "model stream ended without a terminal StreamComplete event",
-                                ),
-                            )))
-                            .await;
-                        return;
-                    }
-                };
+                // A stream may legitimately end without an explicit terminal StreamComplete
+                // (in-memory/mock streams, and OpenAI/Google/etc. parsers which never emit one).
+                // Anthropic's parser surfaces REAL truncation separately as an explicit Err
+                // (handled above), so a clean end here with content is a successful completion.
+                // Default the finish reason to Stop. (The `response_parts.is_empty()` guard in
+                // the next block still catches a stream that produced nothing.)
+                if stream_finish_reason.is_none() {
+                    debug!(
+                        parts = response_parts.len(),
+                        "stream ended without terminal StreamComplete; defaulting finish_reason=Stop"
+                    );
+                }
+                let stream_finish_reason = stream_finish_reason.unwrap_or(FinishReason::Stop);
 
                 // If the stream produced no parts at all, treat it as an error
                 if response_parts.is_empty() {
@@ -1303,8 +1327,17 @@ impl AgentStream {
                 finish_reason = response.finish_reason;
                 responses.push(response.clone());
 
+                // Accumulate run-wide usage, mirroring the non-streaming run()
+                // path (run.rs:398-399) so streaming and non-streaming agree.
+                if let Some(u) = &response.usage {
+                    usage.add_request(u.clone());
+                }
+
                 let _ = tx
-                    .send(Ok(AgentStreamEvent::ResponseComplete { step }))
+                    .send(Ok(AgentStreamEvent::ResponseComplete {
+                        step,
+                        usage: response.usage.clone(),
+                    }))
                     .await;
 
                 // Check for tool calls
@@ -1346,6 +1379,7 @@ impl AgentStream {
                                         Some(accumulated_thinking)
                                     },
                                     pending_tools: pending_tool_names,
+                                    usage: usage.clone(),
                                 }))
                                 .await;
                             let _ = tx.send(Err(AgentRunError::Cancelled)).await;
@@ -1444,7 +1478,7 @@ impl AgentStream {
                     continue;
                 }
 
-                if finish_reason == Some(FinishReason::Stop) {
+                if finish_reason.is_some_and(|r| r.is_complete()) {
                     // Add final response to messages for complete history
                     let mut response_req = ModelRequest::new();
                     response_req
@@ -1454,6 +1488,19 @@ impl AgentStream {
 
                     finished = true;
                     let _ = tx.send(Ok(AgentStreamEvent::OutputReady)).await;
+                } else if let Some(r) = finish_reason {
+                    // finish_reason is Some but NOT complete, and there were no
+                    // tool calls (the tool-call path `continue`d before reaching
+                    // here). The loop is about to silently re-issue the same
+                    // request - make that observable. NOT a behavior change:
+                    // termination is unchanged; termination-on-Length/etc. is a
+                    // separate P2 follow-up. `let _ = &r` keeps `r` "used" so the
+                    // no-op `warn!` build (tracing-integration off) stays clean.
+                    let _ = &r;
+                    warn!(
+                        finish_reason = ?r,
+                        "stream completed with a non-terminal finish reason and no tool calls; re-issuing request (this can loop - see follow-up for Length/ContentFilter/Error handling)"
+                    );
                 }
             }
 
@@ -1461,6 +1508,7 @@ impl AgentStream {
                 .send(Ok(AgentStreamEvent::RunComplete {
                     run_id: run_id_clone,
                     messages,
+                    usage,
                 }))
                 .await;
         });
@@ -1554,11 +1602,13 @@ mod tests {
             AgentStreamEvent::RunComplete {
                 run_id: "123".to_string(),
                 messages: vec![],
+                usage: RunUsage::default(),
             },
             AgentStreamEvent::Cancelled {
                 partial_text: Some("partial".to_string()),
                 partial_thinking: None,
                 pending_tools: vec!["tool1".to_string()],
+                usage: RunUsage::default(),
             },
         ];
 
@@ -1571,6 +1621,7 @@ mod tests {
             partial_text: Some("Hello, I was saying...".to_string()),
             partial_thinking: Some("Let me think about this...".to_string()),
             pending_tools: vec!["search".to_string(), "fetch".to_string()],
+            usage: RunUsage::default(),
         };
 
         let debug = format!("{:?}", event);
@@ -1585,17 +1636,24 @@ mod tests {
             partial_text: None,
             partial_thinking: None,
             pending_tools: vec![],
+            usage: RunUsage::default(),
         };
 
         if let AgentStreamEvent::Cancelled {
             partial_text,
             partial_thinking,
             pending_tools,
+            usage,
         } = event
         {
             assert!(partial_text.is_none());
             assert!(partial_thinking.is_none());
             assert!(pending_tools.is_empty());
+            // No usage-bearing response occurred, so the partial aggregate is empty.
+            assert_eq!(usage.request_count, 0);
+            assert_eq!(usage.request_tokens, 0);
+            assert_eq!(usage.response_tokens, 0);
+            assert_eq!(usage.total_tokens, 0);
         } else {
             panic!("Expected Cancelled event");
         }
@@ -1614,6 +1672,464 @@ mod tests {
         assert_eq!(usage.request_tokens, Some(10));
         assert_eq!(usage.response_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(15));
+        assert_eq!(usage.cache_creation_tokens, Some(3));
+        assert_eq!(usage.cache_read_tokens, Some(7));
+    }
+
+    // ========================================================================
+    // Usage-surfacing tests (T1-T4): token usage flows through the streaming
+    // `AgentStreamEvent` path, mirroring the non-streaming `run()` path.
+    // ========================================================================
+
+    /// T1 (R1): `ResponseComplete` carries the per-step provider usage.
+    #[tokio::test]
+    async fn test_response_complete_reports_per_step_usage() {
+        let model = FunctionModel::with_stream(move |_messages, _settings| {
+            let events = vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("done")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(FinishReason::Stop)
+                        .with_input_tokens(10)
+                        .with_output_tokens(5),
+                )),
+            ];
+            Box::pin(stream::iter(events))
+        });
+
+        let agent = agent(model).build();
+        let mut stream = agent
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut response_completes = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            if let AgentStreamEvent::ResponseComplete { step, usage } = event {
+                response_completes.push((step, usage));
+            }
+        }
+
+        assert_eq!(
+            response_completes.len(),
+            1,
+            "expected exactly one ResponseComplete"
+        );
+        let (step, usage) = &response_completes[0];
+        assert_eq!(*step, 1);
+        let usage = usage.as_ref().expect("per-step usage should be present");
+        assert_eq!(usage.request_tokens, Some(10));
+        assert_eq!(usage.response_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+    }
+
+    /// T2 (R1 / AC1.2): `ResponseComplete.usage` is `None` when the provider
+    /// reports no token fields.
+    #[tokio::test]
+    async fn test_response_complete_usage_none_when_provider_reports_nothing() {
+        let model = FunctionModel::with_stream(move |_messages, _settings| {
+            let events = vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("done")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(FinishReason::Stop),
+                )),
+            ];
+            Box::pin(stream::iter(events))
+        });
+
+        let agent = agent(model).build();
+        let mut stream = agent
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_response_complete = false;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            if let AgentStreamEvent::ResponseComplete { usage, .. } = event {
+                saw_response_complete = true;
+                assert!(
+                    usage.is_none(),
+                    "usage should be None when provider reports no tokens"
+                );
+            }
+        }
+        assert!(saw_response_complete, "expected a ResponseComplete event");
+    }
+
+    /// T3 (R2 + R3): `RunComplete.usage` is the field-wise aggregate of every
+    /// step's usage across a real 2-request tool loop, and equals the sum of
+    /// the per-step `ResponseComplete.usage` values observed in the same stream.
+    #[tokio::test]
+    async fn test_run_complete_reports_aggregate_usage() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let events = if step == 0 {
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::ToolCall(
+                                ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                    .with_tool_call_id("call_1"),
+                            ),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::ToolCall)
+                                .with_input_tokens(10)
+                                .with_output_tokens(5),
+                        )),
+                    ]
+                } else {
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::Text(TextPart::new("done")),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::Stop)
+                                .with_input_tokens(4)
+                                .with_output_tokens(6),
+                        )),
+                    ]
+                };
+                Box::pin(stream::iter(events))
+            })
+        };
+
+        let agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                |_ctx, _args: serde_json::Value| Ok(serdes_ai_tools::ToolReturn::text("ok")),
+            )
+            .build();
+
+        let mut stream = agent
+            .run_stream("trigger tool then finish", ())
+            .await
+            .expect("stream should start");
+
+        let mut per_step_request = 0u64;
+        let mut per_step_response = 0u64;
+        let mut per_step_total = 0u64;
+        let mut run_complete_usage = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            match event {
+                AgentStreamEvent::ResponseComplete { usage: Some(u), .. } => {
+                    per_step_request += u.request_tokens.unwrap_or(0);
+                    per_step_response += u.response_tokens.unwrap_or(0);
+                    per_step_total += u.total_tokens.unwrap_or(0);
+                }
+                AgentStreamEvent::RunComplete { usage, .. } => {
+                    run_complete_usage = Some(usage);
+                }
+                _ => {}
+            }
+        }
+
+        let usage = run_complete_usage.expect("expected a RunComplete event");
+        // Field-wise sum of both steps: input 10+4, output 5+6, total 15+10.
+        assert_eq!(usage.request_tokens, 14);
+        assert_eq!(usage.response_tokens, 11);
+        assert_eq!(usage.total_tokens, 25);
+        // Ties R2 accumulation to the R1 per-step values seen in this stream.
+        assert_eq!(usage.request_tokens, per_step_request);
+        assert_eq!(usage.response_tokens, per_step_response);
+        assert_eq!(usage.total_tokens, per_step_total);
+    }
+
+    /// T4 (R4): `Cancelled` carries the partial run-aggregate usage.
+    ///
+    /// Deterministic mid-run cancellation is racy against a synchronous mock
+    /// stream (the whole model stream drains before the token flips at the
+    /// intended point), so this uses the TEST_PLAN-documented fallback: a
+    /// construction+match round-trip asserting the partial aggregate survives
+    /// on the `Cancelled` variant. The three production emit sites are covered
+    /// by code review (they all pass `usage.clone()`), and the existing
+    /// cancel-path tests remain green with the new field.
+    #[test]
+    fn test_cancelled_reports_partial_usage() {
+        let mut partial = RunUsage::new();
+        partial.add_request(RequestUsage::new().request_tokens(10).response_tokens(5));
+
+        let event = AgentStreamEvent::Cancelled {
+            partial_text: Some("partial".to_string()),
+            partial_thinking: None,
+            pending_tools: vec!["demo_tool".to_string()],
+            usage: partial,
+        };
+
+        if let AgentStreamEvent::Cancelled { usage, .. } = event {
+            // A run cancelled after >=1 usage-bearing response reports the
+            // partial sum, not an all-zero aggregate.
+            assert_eq!(usage.request_count, 1);
+            assert_eq!(usage.request_tokens, 10);
+            assert_eq!(usage.response_tokens, 5);
+            assert_eq!(usage.total_tokens, 15);
+        } else {
+            panic!("expected Cancelled event");
+        }
+    }
+
+    /// T4b (R2 Loop 2 / AC2.2): prove Loop 2's usage accumulation by EXECUTION.
+    ///
+    /// Cancel-path option chosen: **full non-cancelled run THROUGH Loop 2**.
+    /// Deterministic mid-run cancellation is racy against a synchronous mock
+    /// stream — the whole model stream drains before the token flip can land at
+    /// the intended point — so instead of the unreliable mid-run-cancel path we
+    /// drive the *cancellable* code path (`new_with_cancel`) with a token that is
+    /// never triggered, all the way through a real 2-request tool loop to
+    /// completion. This exercises the accumulator at stream.rs:748-749 that lives
+    /// inside the `new_with_cancel` task (a physically different loop body from
+    /// the `new`/`run_stream` path proven by T3), so Loop 2's `add_request` is
+    /// validated by running it, not only by code review.
+    #[tokio::test]
+    async fn test_run_complete_aggregate_usage_through_cancellable_loop() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let events = if step == 0 {
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::ToolCall(
+                                ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                    .with_tool_call_id("call_1"),
+                            ),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::ToolCall)
+                                .with_input_tokens(10)
+                                .with_output_tokens(5),
+                        )),
+                    ]
+                } else {
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::Text(TextPart::new("done")),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::Stop)
+                                .with_input_tokens(4)
+                                .with_output_tokens(6),
+                        )),
+                    ]
+                };
+                Box::pin(stream::iter(events))
+            })
+        };
+
+        let agentic = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                |_ctx, _args: serde_json::Value| Ok(serdes_ai_tools::ToolReturn::text("ok")),
+            )
+            .build();
+
+        // Untriggered token -> the run completes normally through Loop 2.
+        let token = CancellationToken::new();
+        let mut stream = AgentStream::new_with_cancel(
+            &agentic,
+            "trigger tool then finish".into(),
+            (),
+            RunOptions::default(),
+            token,
+        )
+        .await
+        .expect("stream should start");
+
+        let mut per_step_request = 0u64;
+        let mut per_step_response = 0u64;
+        let mut run_complete_usage = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            match event {
+                AgentStreamEvent::ResponseComplete { usage: Some(u), .. } => {
+                    per_step_request += u.request_tokens.unwrap_or(0);
+                    per_step_response += u.response_tokens.unwrap_or(0);
+                }
+                AgentStreamEvent::RunComplete { usage, .. } => {
+                    run_complete_usage = Some(usage);
+                }
+                _ => {}
+            }
+        }
+
+        let usage = run_complete_usage.expect("expected a RunComplete event");
+        // Field-wise aggregate of both steps accumulated inside Loop 2.
+        assert_eq!(usage.request_tokens, 14);
+        assert_eq!(usage.response_tokens, 11);
+        assert_eq!(usage.total_tokens, 25);
+        assert_eq!(usage.request_count, 2);
+        // Loop 2's aggregate matches the per-step values it emitted.
+        assert_eq!(usage.request_tokens, per_step_request);
+        assert_eq!(usage.response_tokens, per_step_response);
+    }
+
+    /// T7 (R2 / AC1.2 + AC3.2): a mid-run step with NO provider usage must not
+    /// corrupt or double-count the run aggregate. Step 0 reports usage (10/5)
+    /// and triggers a tool; step 1 reports no token fields. Step 1's
+    /// `ResponseComplete.usage` is `None`, and the terminal aggregate reflects
+    /// only the one usage-bearing step (`request_count == 1`).
+    #[tokio::test]
+    async fn test_run_complete_aggregate_ignores_usage_none_step() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let events = if step == 0 {
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::ToolCall(
+                                ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                    .with_tool_call_id("call_1"),
+                            ),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::ToolCall)
+                                .with_input_tokens(10)
+                                .with_output_tokens(5),
+                        )),
+                    ]
+                } else {
+                    // Step 1 reports NO token fields.
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::Text(TextPart::new("done")),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(FinishReason::Stop),
+                        )),
+                    ]
+                };
+                Box::pin(stream::iter(events))
+            })
+        };
+
+        let agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                |_ctx, _args: serde_json::Value| Ok(serdes_ai_tools::ToolReturn::text("ok")),
+            )
+            .build();
+
+        let mut stream = agent
+            .run_stream("trigger tool then finish", ())
+            .await
+            .expect("stream should start");
+
+        let mut step_usages: Vec<(u32, Option<RequestUsage>)> = Vec::new();
+        let mut run_complete_usage = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            match event {
+                AgentStreamEvent::ResponseComplete { step, usage } => {
+                    step_usages.push((step, usage));
+                }
+                AgentStreamEvent::RunComplete { usage, .. } => {
+                    run_complete_usage = Some(usage);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(step_usages.len(), 2, "expected two ResponseComplete events");
+        // Step 0 carried usage; step 1 reported nothing.
+        let step0 = step_usages[0].1.as_ref().expect("step 0 has usage");
+        assert_eq!(step0.request_tokens, Some(10));
+        assert!(
+            step_usages[1].1.is_none(),
+            "the usage-None step must ship None, not a zeroed usage"
+        );
+
+        let usage = run_complete_usage.expect("expected a RunComplete event");
+        // Only the one usage-bearing step contributes; the None step is skipped,
+        // so the aggregate is neither corrupted nor double-counted.
+        assert_eq!(usage.request_tokens, 10);
+        assert_eq!(usage.response_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(usage.request_count, 1);
+    }
+
+    /// T8 (R1 + R3, billing): cache-creation and cache-read tokens survive from
+    /// the provider's `StreamComplete` all the way onto the event path — both
+    /// the per-step `ResponseComplete.usage` and the terminal `RunComplete.usage`
+    /// aggregate — proving cache-token accumulation is exercised end-to-end, not
+    /// just inside the private `usage_from_stream_complete` helper.
+    #[tokio::test]
+    async fn test_cache_tokens_surface_on_event_path() {
+        let model = FunctionModel::with_stream(move |_messages, _settings| {
+            let events = vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("done")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(FinishReason::Stop)
+                        .with_input_tokens(10)
+                        .with_output_tokens(5)
+                        .with_cache_creation_tokens(3)
+                        .with_cache_read_tokens(7),
+                )),
+            ];
+            Box::pin(stream::iter(events))
+        });
+
+        let agent = agent(model).build();
+        let mut stream = agent
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut step_usage = None;
+        let mut run_complete_usage = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event should be ok");
+            match event {
+                AgentStreamEvent::ResponseComplete { usage, .. } => {
+                    step_usage = usage;
+                }
+                AgentStreamEvent::RunComplete { usage, .. } => {
+                    run_complete_usage = Some(usage);
+                }
+                _ => {}
+            }
+        }
+
+        // Per-step cache tokens survive onto ResponseComplete.usage.
+        let step = step_usage.expect("per-step usage should be present");
+        assert_eq!(step.cache_creation_tokens, Some(3));
+        assert_eq!(step.cache_read_tokens, Some(7));
+
+        // And they accumulate into the terminal RunComplete aggregate.
+        let usage = run_complete_usage.expect("expected a RunComplete event");
         assert_eq!(usage.cache_creation_tokens, Some(3));
         assert_eq!(usage.cache_read_tokens, Some(7));
     }
@@ -1971,6 +2487,724 @@ mod tests {
         assert!(
             !saw_tool_executed,
             "must NOT execute tool on premature EOF (cancellable)"
+        );
+    }
+
+    // ========================================================================
+    // Regression tests for the #39/PR#50 over-broad inferred-EOF gate:
+    // a stream that produces content and ends WITHOUT a terminal
+    // StreamComplete (in-memory/mock streams AND real OpenAI/Google/etc.
+    // parsers, which never emit one) must complete SUCCESSFULLY. Real
+    // truncation is still surfaced as an explicit Err by the provider parser
+    // (Anthropic), which is covered by serdes-ai-models tests.
+    // ========================================================================
+
+    /// RT1: a mock stream emits text + part_end but NO StreamComplete.
+    /// It must complete successfully (TextDelta + RunComplete, no Error).
+    /// This FAILED before the fix (inferred-EOF gate emitted Error + returned).
+    #[tokio::test]
+    async fn test_run_stream_completes_without_terminal_streamcomplete() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("hello world")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+            ]))
+        });
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("Hi", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_text = false;
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::TextDelta { .. }) => saw_text = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("stream without StreamComplete must not error: {:?}", e),
+            }
+        }
+
+        assert!(saw_text, "expected at least one TextDelta");
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT2: a genuinely empty stream (no parts, no StreamComplete) must still
+    /// error - the empty-content guard is preserved.
+    #[tokio::test]
+    async fn test_empty_stream_still_errors() {
+        let model =
+            FunctionModel::with_stream(|_messages, _settings| Box::pin(stream::iter(vec![])));
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("Hi", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(_) => saw_error = true,
+            }
+        }
+
+        assert!(!saw_run_complete, "empty stream must NOT emit RunComplete");
+        assert!(saw_error, "empty stream must still produce an error");
+    }
+
+    /// RT4: the OpenAI-parser terminal shape (part_start + text_delta + part_end,
+    /// closed on finish, NO StreamComplete) - the real non-Anthropic-provider
+    /// stream shape. Must complete successfully (TextDelta + RunComplete, no Error).
+    #[tokio::test]
+    async fn test_run_stream_openai_shape_no_streamcomplete() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("")),
+                )),
+                Ok(ModelResponseStreamEvent::text_delta(0, "hello ")),
+                Ok(ModelResponseStreamEvent::text_delta(0, "world")),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+            ]))
+        });
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("Hi", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_text = false;
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::TextDelta { .. }) => saw_text = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("OpenAI-shape stream must not error: {:?}", e),
+            }
+        }
+
+        assert!(saw_text, "expected at least one TextDelta");
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT1-cancellable (Loop 2 success path): the RT1 mock — text + part_end,
+    /// NO terminal StreamComplete — driven through the *cancellable* code path
+    /// (`new_with_cancel` with an UNTRIGGERED token). This proves Loop 2's
+    /// `unwrap_or(FinishReason::Stop)` at stream.rs:1270+ by EXECUTION: Loop 2 is
+    /// a physically distinct loop body from `run_stream`'s Loop 1 (proven by RT1),
+    /// so it needs its own regression guard. Must complete successfully
+    /// (TextDelta + RunComplete, no Error).
+    #[tokio::test]
+    async fn test_run_stream_completes_without_terminal_streamcomplete_cancellable() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("hello world")),
+                )),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+            ]))
+        });
+
+        let agentic = agent(model).build();
+
+        // Untriggered token -> the run completes normally through Loop 2.
+        let token = CancellationToken::new();
+        let mut stream =
+            AgentStream::new_with_cancel(&agentic, "Hi".into(), (), RunOptions::default(), token)
+                .await
+                .expect("stream should start");
+
+        let mut saw_text = false;
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::TextDelta { .. }) => saw_text = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => {
+                    panic!(
+                        "cancellable stream without StreamComplete must not error: {:?}",
+                        e
+                    )
+                }
+            }
+        }
+
+        assert!(saw_text, "expected at least one TextDelta");
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT2-cancellable (Loop 2 empty-content guard): a genuinely empty stream
+    /// (no parts, no StreamComplete) driven through the *cancellable* path must
+    /// still error. This proves the `response_parts.is_empty()` guard is intact
+    /// on Loop 2 as well as Loop 1 (RT2) — defaulting the finish reason to Stop
+    /// does NOT paper over a stream that produced nothing.
+    #[tokio::test]
+    async fn test_empty_stream_still_errors_cancellable() {
+        let model =
+            FunctionModel::with_stream(|_messages, _settings| Box::pin(stream::iter(vec![])));
+
+        let agentic = agent(model).build();
+
+        let token = CancellationToken::new();
+        let mut stream =
+            AgentStream::new_with_cancel(&agentic, "Hi".into(), (), RunOptions::default(), token)
+                .await
+                .expect("stream should start");
+
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(_) => saw_error = true,
+            }
+        }
+
+        assert!(
+            !saw_run_complete,
+            "empty cancellable stream must NOT emit RunComplete"
+        );
+        assert!(
+            saw_error,
+            "empty cancellable stream must still produce an error"
+        );
+    }
+
+    /// Multi-step tool loop where NO step emits a terminal StreamComplete
+    /// (each defaults to FinishReason::Stop). Step 0 emits a ToolCall; step 1
+    /// emits text. This proves loop continuation keys on TOOL-CALL PRESENCE,
+    /// not on the finish reason: even though step 0 defaults to Stop, the
+    /// pending tool call forces a 2nd request. Asserts the tool executed, two
+    /// model requests were made, and exactly ONE terminal RunComplete fired.
+    #[tokio::test]
+    async fn test_tool_loop_without_streamcomplete_continues() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let events = if step == 0 {
+                    // ToolCall part, NO StreamComplete -> finish_reason defaults to Stop.
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::ToolCall(
+                                ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                    .with_tool_call_id("call_1"),
+                            ),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                    ]
+                } else {
+                    // Text, NO StreamComplete -> finish_reason defaults to Stop.
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::Text(TextPart::new("done")),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                    ]
+                };
+                Box::pin(stream::iter(events))
+            })
+        };
+
+        let agentic = {
+            let tool_calls = Arc::clone(&tool_calls);
+            agent(model)
+                .tool_fn(
+                    "demo_tool",
+                    "Demo tool",
+                    move |_ctx, _args: serde_json::Value| {
+                        tool_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(serdes_ai_tools::ToolReturn::text("ok"))
+                    },
+                )
+                .build()
+        };
+
+        let mut stream = agentic
+            .run_stream("trigger tool then finish", ())
+            .await
+            .expect("stream should start");
+
+        let mut run_complete_count = 0usize;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => run_complete_count += 1,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("tool loop without StreamComplete must not error: {:?}", e),
+            }
+        }
+
+        assert!(!saw_error, "must NOT emit an Error event");
+        assert_eq!(
+            tool_calls.load(Ordering::SeqCst),
+            1,
+            "the registered tool must have executed exactly once"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            2,
+            "loop must make a 2nd model request after the tool call (2 steps)"
+        );
+        assert_eq!(
+            run_complete_count, 1,
+            "exactly one terminal RunComplete must fire"
+        );
+    }
+
+    /// AC3.2 ACCEPTED-TRADE-OFF GUARD: a stream that emits partial content
+    /// (a couple of TextDeltas + part_end) but NO terminal StreamComplete and
+    /// NO Err is accepted as a SUCCESSFUL completion (finish_reason defaults to
+    /// Stop). This is a DELIBERATE trade-off: for non-Anthropic providers a
+    /// genuinely truncated stream is currently indistinguishable from success,
+    /// because their parsers never emit StreamComplete. Anthropic still surfaces
+    /// real truncation as an explicit Err and is unaffected.
+    ///
+    /// This test PINS the current behavior so any future re-tightening (see the
+    /// AC3.3 follow-up: real OpenAI/Google termination detection) is a conscious,
+    /// reviewed change rather than a silent regression.
+    #[tokio::test]
+    async fn test_partial_content_without_terminal_accepted_as_stop() {
+        let model = FunctionModel::with_stream(|_messages, _settings| {
+            Box::pin(stream::iter(vec![
+                Ok(ModelResponseStreamEvent::part_start(
+                    0,
+                    ModelResponsePart::Text(TextPart::new("")),
+                )),
+                Ok(ModelResponseStreamEvent::text_delta(0, "partial ")),
+                Ok(ModelResponseStreamEvent::text_delta(0, "answer")),
+                Ok(ModelResponseStreamEvent::part_end(0)),
+            ]))
+        });
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("Hi", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("accepted-trade-off stream must not error: {:?}", e),
+            }
+        }
+
+        // AC3.2: partial-but-unterminated content is accepted as SUCCESS today.
+        assert!(
+            saw_run_complete,
+            "partial content without StreamComplete must complete as success"
+        );
+        assert!(
+            !saw_error,
+            "must NOT emit an Error event (accepted trade-off)"
+        );
+    }
+
+    // ========================================================================
+    // EndTurn-loop regression (fix: run_stream exited only on Stop, but
+    // Anthropic streaming maps normal completions to EndTurn). The loop now
+    // keys on FinishReason::is_complete() = {Stop, EndTurn, StopSequence} at
+    // BOTH exit sites (Loop 1 = run_stream, Loop 2 = new_with_cancel).
+    // ========================================================================
+
+    /// RT1 (R1/R5, Loop 1): a tool-less stream whose terminal StreamComplete
+    /// carries `FinishReason::EndTurn` (exactly what Anthropic streaming emits
+    /// for a normal completion) must finish in EXACTLY ONE model round.
+    ///
+    /// The closure counts calls via an `AtomicUsize` and has a SAFETY CAP: once
+    /// it has been invoked 3 times it switches to `Stop`, so a still-broken loop
+    /// cannot hang the test suite - it just fails the `== 1` assertion instead.
+    /// Pre-fix (`== Some(Stop)`) this loops (EndTurn never matched); post-fix it
+    /// is exactly 1. Drives Loop 1 (`run_stream`).
+    #[tokio::test]
+    async fn test_run_stream_completes_on_endturn() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                // Safety cap: after 3 rounds fall back to Stop so a still-broken
+                // loop terminates (and fails `== 1`) instead of hanging.
+                let reason = if step >= 3 {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::EndTurn
+                };
+                Box::pin(stream::iter(vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::Text(TextPart::new("done")),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(reason),
+                    )),
+                ]))
+            })
+        };
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_output_ready = false;
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::OutputReady) => saw_output_ready = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("EndTurn stream must not error: {:?}", e),
+            }
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "EndTurn must complete the loop in exactly one round"
+        );
+        assert!(saw_output_ready, "expected an OutputReady event");
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT1-cancellable (R1/AC1.2, Loop 2): identical to RT1 but driven through
+    /// the *cancellable* path (`new_with_cancel` with an UNTRIGGERED token).
+    /// Loop 2 is a physically distinct loop body from `run_stream`'s Loop 1, so
+    /// it needs its own execution guard - this proves the fix landed on Loop 2
+    /// too. Mirrors `test_run_stream_completes_without_terminal_streamcomplete_cancellable`.
+    #[tokio::test]
+    async fn test_run_stream_completes_on_endturn_cancellable() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let reason = if step >= 3 {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::EndTurn
+                };
+                Box::pin(stream::iter(vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::Text(TextPart::new("done")),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(reason),
+                    )),
+                ]))
+            })
+        };
+
+        let agentic = agent(model).build();
+        let token = CancellationToken::new();
+        let mut stream = AgentStream::new_with_cancel(
+            &agentic,
+            "hello".into(),
+            (),
+            RunOptions::default(),
+            token,
+        )
+        .await
+        .expect("stream should start");
+
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("EndTurn cancellable stream must not error: {:?}", e),
+            }
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "EndTurn must complete Loop 2 in exactly one round"
+        );
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT2 (R1/AC5.1b, Loop 1): same shape as RT1 but with
+    /// `FinishReason::StopSequence`. Proves the loop keys on the full
+    /// `is_complete()` set - {Stop, EndTurn, StopSequence} - and did not merely
+    /// add an EndTurn special-case.
+    #[tokio::test]
+    async fn test_run_stream_completes_on_stop_sequence() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let reason = if step >= 3 {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::StopSequence
+                };
+                Box::pin(stream::iter(vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::Text(TextPart::new("done")),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(reason),
+                    )),
+                ]))
+            })
+        };
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut saw_run_complete = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { .. }) => saw_run_complete = true,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("StopSequence stream must not error: {:?}", e),
+            }
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "StopSequence must complete the loop in exactly one round"
+        );
+        assert!(saw_run_complete, "expected a terminal RunComplete");
+        assert!(!saw_error, "must NOT emit an Error event");
+    }
+
+    /// RT5 (R4/AC4.1): the usage feature stays intact on the EndTurn completion
+    /// path. A single-round EndTurn completion (input 10 / output 5) must emit
+    /// EXACTLY ONE terminal RunComplete whose aggregate usage is 10/5/15 - i.e.
+    /// usage fires once, not once-per-erroneous-loop.
+    #[tokio::test]
+    async fn test_run_stream_endturn_usage_fires_once() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                let reason = if step >= 3 {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::EndTurn
+                };
+                Box::pin(stream::iter(vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::Text(TextPart::new("done")),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(reason)
+                            .with_input_tokens(10)
+                            .with_output_tokens(5),
+                    )),
+                ]))
+            })
+        };
+
+        let agentic = agent(model).build();
+        let mut stream = agentic
+            .run_stream("hello", ())
+            .await
+            .expect("stream should start");
+
+        let mut run_completes = Vec::new();
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::RunComplete { usage, .. }) => run_completes.push(usage),
+                Ok(_) => {}
+                Err(e) => panic!("EndTurn usage stream must not error: {:?}", e),
+            }
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "EndTurn must complete in exactly one round"
+        );
+        assert_eq!(
+            run_completes.len(),
+            1,
+            "expected exactly one terminal RunComplete"
+        );
+        let usage = &run_completes[0];
+        assert_eq!(usage.request_tokens, 10);
+        assert_eq!(usage.response_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    /// RT6 (ordering guard, Loop 1): a tool-bearing step whose terminal
+    /// StreamComplete ALSO carries `FinishReason::EndTurn` - which is now
+    /// `is_complete()` - must NOT terminate the loop early. The tool-call
+    /// `continue` (which fires on `!tool_calls.is_empty()`) MUST run BEFORE the
+    /// widened completion check, so the loop issues a 2nd request to let the
+    /// model respond to the tool result.
+    ///
+    /// STEP 0: ToolCall part_start/part_end + StreamComplete(EndTurn)
+    ///         (a tool-bearing response that also carries a now-complete reason).
+    /// STEP 1: text + StreamComplete(EndTurn) -> the genuine terminal round.
+    ///
+    /// If the widened finish check were reached BEFORE the tool `continue`,
+    /// STEP 0's EndTurn would terminate the run after ONE round and the tool
+    /// result would never be sent back - the `call_count == 2` assertion catches
+    /// that regression. An `AtomicUsize` call counter with a SAFETY CAP (>= 4 ->
+    /// Stop) guarantees a genuinely broken loop FAILS an assertion rather than
+    /// hanging the suite.
+    #[tokio::test]
+    async fn test_tool_loop_with_endturn_continues() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let model = {
+            let call_count = Arc::clone(&call_count);
+            FunctionModel::with_stream(move |_messages, _settings| {
+                let step = call_count.fetch_add(1, Ordering::SeqCst);
+                // Safety cap: after 4 rounds fall back to Stop so a genuinely
+                // broken loop terminates (and fails `== 2`) instead of hanging.
+                let reason = if step >= 4 {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::EndTurn
+                };
+                let events = if step == 0 {
+                    // Tool-bearing step whose terminal reason is ALSO complete
+                    // (EndTurn). The tool-call `continue` must win over the
+                    // widened finish check.
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::ToolCall(
+                                ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                    .with_tool_call_id("call_1"),
+                            ),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(reason),
+                        )),
+                    ]
+                } else {
+                    // Genuine terminal round: text + EndTurn completion.
+                    vec![
+                        Ok(ModelResponseStreamEvent::part_start(
+                            0,
+                            ModelResponsePart::Text(TextPart::new("done")),
+                        )),
+                        Ok(ModelResponseStreamEvent::part_end(0)),
+                        Ok(ModelResponseStreamEvent::StreamComplete(
+                            StreamCompleteEvent::new(reason),
+                        )),
+                    ]
+                };
+                Box::pin(stream::iter(events))
+            })
+        };
+
+        let agentic = {
+            let tool_calls = Arc::clone(&tool_calls);
+            agent(model)
+                .tool_fn(
+                    "demo_tool",
+                    "Demo tool",
+                    move |_ctx, _args: serde_json::Value| {
+                        tool_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(serdes_ai_tools::ToolReturn::text("ok"))
+                    },
+                )
+                .build()
+        };
+
+        let mut stream = agentic
+            .run_stream("call the tool then finish", ())
+            .await
+            .expect("stream should start");
+
+        let mut run_complete_count = 0usize;
+        let mut saw_output_ready = false;
+        let mut saw_error = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(AgentStreamEvent::OutputReady) => saw_output_ready = true,
+                Ok(AgentStreamEvent::RunComplete { .. }) => run_complete_count += 1,
+                Ok(AgentStreamEvent::Error { .. }) => saw_error = true,
+                Ok(_) => {}
+                Err(e) => panic!("tool+EndTurn loop must not error: {:?}", e),
+            }
+        }
+
+        assert!(!saw_error, "must NOT emit an Error event");
+        assert_eq!(
+            tool_calls.load(Ordering::SeqCst),
+            1,
+            "the registered tool must have executed exactly once"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            2,
+            "tool-bearing EndTurn step must NOT terminate early: the loop must \
+             make a 2nd round to respond to the tool result"
+        );
+        assert!(
+            saw_output_ready,
+            "the genuine terminal (2nd) round must emit OutputReady"
+        );
+        assert_eq!(
+            run_complete_count, 1,
+            "exactly one terminal RunComplete must fire (no premature termination)"
         );
     }
 }

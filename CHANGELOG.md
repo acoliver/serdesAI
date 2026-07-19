@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-07-19
+
+### Added
+- Token usage is now surfaced through the streaming `AgentStreamEvent` path (`run_stream`), matching the non-streaming `run()` path:
+  - `AgentStreamEvent::ResponseComplete` now carries `usage: Option<RequestUsage>` (per-model-response token usage; `None` when the provider reports none).
+  - `AgentStreamEvent::RunComplete` now carries `usage: RunUsage` (run-aggregate token usage, the field-wise sum of per-step usage).
+  - `AgentStreamEvent::Cancelled` now carries `usage: RunUsage` (partial run-aggregate accumulated up to cancellation).
+- Both the standard and cancellable streaming loops now accumulate per-response usage run-wide, mirroring `run()`.
+
+### Fixed
+- Streaming runs (`run_stream`) over models whose parser does not emit a terminal `StreamComplete` event no longer collapse to an empty/errored result. A change in the streaming-resilience work (#39) made the agent run-loop treat the absence of a terminal `StreamComplete` as a premature EOF, which incorrectly broke every non-Anthropic provider (OpenAI/Google/Groq/etc., whose parsers never emit `StreamComplete`) as well as in-memory test models - collapsing otherwise-valid runs to "no response". The run-loop now treats a clean stream end (content produced, no explicit error) as a successful completion (`FinishReason::Stop`). Anthropic's explicit truncation detection (`IncompleteStream` on a missing `message_stop`/partial frame) is unchanged, and the empty-stream guard still errors on a stream that produced no content.
+  - Note: for non-Anthropic providers, whose parsers do not signal truncation, a genuinely truncated stream is now accepted as a normal completion (the pre-#39 behavior). Adding real termination detection for those parsers is tracked as a follow-up.
+- Streaming runs (`run_stream`) against an Anthropic model no longer re-issue the same request 3-4 times for a single, tool-less completion. The agent loop ended a run only on `FinishReason::Stop`, but the Anthropic streaming parser maps normal completions to `EndTurn` (the non-streaming parser maps `end_turn` to `Stop`, so only streaming was affected). The loop now ends on the existing completeness predicate `FinishReason::is_complete()` (`Stop | EndTurn | StopSequence`), so a normal streamed completion terminates in exactly one round - eliminating the redundant model calls, latency, and token cost. Tool-call rounds are unaffected (they continue before the completion check).
+  - Note: a `max_tokens`-truncated (`Length`) streamed completion is still not treated as terminal and can re-issue the request; this pre-existing behavior is now logged (via `warn!`) and tracked as a follow-up.
+
+### Note
+- Adding fields to these public `AgentStreamEvent` struct-variants is source-breaking for downstream code that matches them exhaustively without `..`.
+
 ## [0.2.6] - 2025-07-11
 
 ### Added
