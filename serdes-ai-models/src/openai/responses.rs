@@ -18,8 +18,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serdes_ai_core::messages::{
-    ImageContent, RetryPromptPart, TextPart, ThinkingPart, ToolCallArgs, ToolCallPart,
-    ToolReturnPart, UserContent, UserContentPart, UserPromptPart,
+    ImageContent, ModelResponseStreamEvent, PartStartEvent, RetryPromptPart, StreamCompleteEvent,
+    TextPart, ThinkingPart, ToolCallArgs, ToolCallPart, ToolReturnPart, UserContent,
+    UserContentPart, UserPromptPart,
 };
 use serdes_ai_core::{
     FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
@@ -1157,6 +1158,7 @@ impl Model for OpenAIResponsesModel {
         self.process_response(resp)
     }
 
+    /// Stream a response through the non-streaming request fallback.
     async fn request_stream(
         &self,
         messages: &[ModelRequest],
@@ -1167,23 +1169,59 @@ impl Model for OpenAIResponsesModel {
         // TODO: Implement proper streaming with ResponsesStreamParser
         let response = self.request(messages, settings, params).await?;
 
-        // Convert to a single-event stream
-        let events: Vec<Result<serdes_ai_core::messages::ModelResponseStreamEvent, ModelError>> =
-            response
-                .parts
-                .into_iter()
-                .enumerate()
-                .map(|(idx, part)| {
-                    Ok(
-                        serdes_ai_core::messages::ModelResponseStreamEvent::PartStart(
-                            serdes_ai_core::messages::PartStartEvent::new(idx, part),
-                        ),
-                    )
-                })
-                .collect();
+        let ModelResponse {
+            parts,
+            finish_reason,
+            usage,
+            ..
+        } = response;
+
+        // Part events first, terminal event last; the request error above
+        // short-circuits failures before any event is emitted.
+        let mut events: Vec<Result<ModelResponseStreamEvent, ModelError>> = parts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, part)| {
+                Ok(ModelResponseStreamEvent::PartStart(PartStartEvent::new(
+                    idx, part,
+                )))
+            })
+            .collect();
+
+        events.push(Ok(stream_complete_event(finish_reason, usage.as_ref())));
 
         Ok(Box::pin(futures::stream::iter(events)))
     }
+}
+
+/// Build the terminal event from the finish reason and usage the
+/// non-streaming path mapped from the completed response.
+///
+/// Usage fields absent from the response stay `None`; a status the
+/// non-streaming mapping leaves unmapped defaults to [`FinishReason::Stop`],
+/// matching the chat stream parser's terminal default.
+fn stream_complete_event(
+    finish_reason: Option<FinishReason>,
+    usage: Option<&RequestUsage>,
+) -> ModelResponseStreamEvent {
+    let mut event = StreamCompleteEvent::new(finish_reason.unwrap_or(FinishReason::Stop));
+
+    if let Some(u) = usage {
+        if let Some(tokens) = u.request_tokens {
+            event = event.with_input_tokens(tokens);
+        }
+        if let Some(tokens) = u.response_tokens {
+            event = event.with_output_tokens(tokens);
+        }
+        if let Some(tokens) = u.cache_creation_tokens {
+            event = event.with_cache_creation_tokens(tokens);
+        }
+        if let Some(tokens) = u.cache_read_tokens {
+            event = event.with_cache_read_tokens(tokens);
+        }
+    }
+
+    ModelResponseStreamEvent::StreamComplete(event)
 }
 
 #[cfg(test)]
@@ -1283,5 +1321,134 @@ mod tests {
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"role\":\"tool\""));
         assert!(json.contains("\"tool_call_id\":\"call_123\""));
+    }
+
+    // Streaming fallback over wiremock (real HTTP request path).
+
+    /// Build a completed non-streaming Responses response body, with usage
+    /// attached only when the scenario provides it.
+    fn completed_response_body(usage: Option<serde_json::Value>) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 1234567890,
+            "model": "o3-mini",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": "Hello", "annotations": [] }]
+            }],
+            "error": null,
+            "metadata": null,
+            "service_tier": null
+        });
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        body
+    }
+
+    /// Serve the given response body from a wiremock server and collect the
+    /// events `request_stream` yields against it.
+    async fn stream_events_for(body: serde_json::Value) -> Vec<ModelResponseStreamEvent> {
+        use futures::StreamExt;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/responses"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let model = OpenAIResponsesModel::new("o3-mini", "sk-test").with_base_url(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+        events
+    }
+
+    /// A streamed request over real HTTP replays the buffered completed
+    /// response as part events and ends with exactly one terminal
+    /// StreamComplete carrying the mapped finish reason and usage.
+    #[tokio::test]
+    async fn request_stream_emits_terminal_stream_complete_with_usage() {
+        let usage = serde_json::json!({
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "total_tokens": 19,
+            "input_tokens_details": {"cached_tokens": 4},
+            "output_tokens_details": {"reasoning_tokens": 3}
+        });
+        let events = stream_events_for(completed_response_body(Some(usage))).await;
+
+        // Part events precede the terminal event.
+        match events.first() {
+            Some(ModelResponseStreamEvent::PartStart(start)) => {
+                assert_eq!(start.index, 0);
+                assert!(
+                    matches!(&start.part, ModelResponsePart::Text(t) if t.content == "Hello"),
+                    "expected the buffered text part first, got {:?}",
+                    start.part
+                );
+            }
+            other => panic!("expected a leading part event, got {:?}", other),
+        }
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(12));
+                assert_eq!(complete.output_tokens, Some(7));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, Some(4));
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A completed response without usage still ends with exactly one
+    /// terminal event, and every token field stays `None`.
+    #[tokio::test]
+    async fn request_stream_without_usage_yields_none_token_fields() {
+        let events = stream_events_for(completed_response_body(None)).await;
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, None);
+                assert_eq!(complete.output_tokens, None);
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
     }
 }
