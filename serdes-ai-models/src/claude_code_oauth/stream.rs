@@ -67,3 +67,70 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use futures::StreamExt;
+    use serdes_ai_core::messages::FinishReason;
+
+    fn make_sse_bytes(event_type: &str, data: &str) -> Bytes {
+        Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, data))
+    }
+
+    /// The wrapper passes the wrapped Anthropic parser's terminal
+    /// StreamComplete through unchanged: exactly one terminal event,
+    /// emitted last, with the usage fields the Anthropic stream reported.
+    #[tokio::test]
+    async fn passes_through_terminal_stream_complete() {
+        let msg_start = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":3,"cache_read_input_tokens":7}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let msg_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#;
+        let msg_stop = r#"{"type":"message_stop"}"#;
+
+        let bytes = vec![
+            Ok(make_sse_bytes("message_start", msg_start)),
+            Ok(make_sse_bytes("content_block_start", block_start)),
+            Ok(make_sse_bytes("content_block_delta", delta)),
+            Ok(make_sse_bytes("content_block_stop", block_stop)),
+            Ok(make_sse_bytes("message_delta", msg_delta)),
+            Ok(make_sse_bytes("message_stop", msg_stop)),
+        ];
+
+        let mut parser = ClaudeCodeStreamParser::new(stream::iter(bytes));
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result.unwrap());
+        }
+
+        // Part events precede the terminal event.
+        assert_eq!(
+            events.len(),
+            4,
+            "Expected PartStart, PartDelta, PartEnd, StreamComplete, got {:?}",
+            events
+        );
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::EndTurn);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, Some(3));
+                assert_eq!(complete.cache_read_tokens, Some(7));
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+}

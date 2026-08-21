@@ -149,6 +149,7 @@ impl Model for AzureOpenAIModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serdes_ai_core::FinishReason;
 
     #[test]
     fn test_azure_model_creation() {
@@ -160,5 +161,68 @@ mod tests {
         );
         assert_eq!(model.name(), "gpt-4");
         assert_eq!(model.system(), "azure");
+    }
+
+    /// Azure streams by delegating to an inner OpenAI chat model, so a
+    /// streamed request over real HTTP inherits the terminal StreamComplete
+    /// emission at [DONE] with the buffered usage.
+    #[tokio::test]
+    async fn request_stream_inherits_terminal_stream_complete() {
+        use futures::StreamExt;
+        use serdes_ai_core::messages::ModelResponseStreamEvent;
+
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/openai/deployments/gpt-4/chat/completions",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let model = AzureOpenAIModel::new("gpt-4", server.uri(), "2024-02-15-preview", "test-key");
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
     }
 }

@@ -13,14 +13,15 @@ use futures::Stream;
 use reqwest::Client;
 use serdes_ai_core::{
     messages::{
-        ModelResponseStreamEvent, TextPart, ToolCallArgs, ToolCallPart, UserContent,
-        UserContentPart,
+        ModelResponseStreamEvent, StreamCompleteEvent, TextPart, ToolCallArgs, ToolCallPart,
+        UserContent, UserContentPart,
     },
     FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
     RequestUsage,
 };
 use serdes_ai_tools::ToolDefinition;
 use std::{
+    collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -80,6 +81,13 @@ impl CohereModel {
     #[must_use]
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Set a custom API base URL.
+    #[must_use]
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
         self
     }
 
@@ -359,11 +367,15 @@ impl Model for CohereModel {
     }
 }
 
-/// Stream parser for Cohere SSE responses.
+/// Stream parser for Cohere NDJSON responses.
 pub struct CohereStreamParser<S> {
     inner: S,
     buffer: String,
     started: bool,
+    // Events queued by a parsed line, drained before parsing more lines
+    pending: VecDeque<ModelResponseStreamEvent>,
+    // Finished: terminal event emitted or stream failed; no further events
+    done: bool,
 }
 
 impl<S> CohereStreamParser<S> {
@@ -373,6 +385,8 @@ impl<S> CohereStreamParser<S> {
             inner: stream,
             buffer: String::new(),
             started: false,
+            pending: VecDeque::new(),
+            done: false,
         }
     }
 }
@@ -385,6 +399,17 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
+            // Drain queued events first so the terminal event follows the
+            // part end that queued it.
+            if let Some(event) = self.pending.pop_front() {
+                return Poll::Ready(Some(Ok(event)));
+            }
+
+            // After the terminal event the stream is done.
+            if self.done {
+                return Poll::Ready(None);
+            }
+
             // Try to parse a complete event from buffer
             if let Some(event) = self.try_parse_event() {
                 return Poll::Ready(Some(Ok(event)));
@@ -432,6 +457,9 @@ impl<S> CohereStreamParser<S> {
                         }
                     }
                     "stream-end" => {
+                        // Mark done so no event follows the terminal one.
+                        self.done = true;
+                        self.pending.push_back(stream_complete_event(&event));
                         return Some(ModelResponseStreamEvent::part_end(0));
                     }
                     _ => {}
@@ -440,6 +468,43 @@ impl<S> CohereStreamParser<S> {
         }
         None
     }
+}
+
+/// Build the terminal event from a `stream-end` event's finish reason and
+/// the token counts in its wrapped response; usage fields absent from the
+/// wire stay `None`.
+fn stream_complete_event(event: &StreamEvent) -> ModelResponseStreamEvent {
+    let reason = event.finish_reason.as_deref().or_else(|| {
+        event
+            .response
+            .as_ref()
+            .and_then(|r| r.finish_reason.as_deref())
+    });
+    let finish_reason = match reason {
+        Some("MAX_TOKENS") => FinishReason::Length,
+        Some("TOOL_CALL") => FinishReason::ToolCall,
+        // COMPLETE and END_TURN map to Stop, matching the non-streaming
+        // response mapping; unknown and absent reasons also fall back to
+        // Stop because the terminal event requires a reason.
+        _ => FinishReason::Stop,
+    };
+
+    let mut complete = StreamCompleteEvent::new(finish_reason);
+    if let Some(tokens) = event
+        .response
+        .as_ref()
+        .and_then(|r| r.meta.as_ref())
+        .and_then(|meta| meta.tokens.as_ref())
+    {
+        if let Some(tokens) = tokens.input_tokens {
+            complete = complete.with_input_tokens(u64::from(tokens));
+        }
+        if let Some(tokens) = tokens.output_tokens {
+            complete = complete.with_output_tokens(u64::from(tokens));
+        }
+    }
+
+    ModelResponseStreamEvent::StreamComplete(complete)
 }
 
 #[cfg(test)]
@@ -467,5 +532,193 @@ mod tests {
         let profile = CohereModel::profile_for_model("command-r-plus");
         assert!(profile.supports_tools);
         assert_eq!(profile.context_window, Some(128_000));
+    }
+
+    /// A custom base URL overrides the default Cohere API endpoint.
+    #[test]
+    fn test_custom_base_url() {
+        let model = CohereModel::new("command-r-plus", "test-key")
+            .with_base_url("http://localhost:8080/v2");
+        assert_eq!(model.base_url, "http://localhost:8080/v2");
+    }
+
+    // Stream parser terminal-event contract.
+
+    /// Collect every event a parser yields for the given NDJSON lines.
+    async fn parse_ndjson(lines: &[&str]) -> Vec<ModelResponseStreamEvent> {
+        use futures::{stream, StreamExt};
+
+        let bytes = lines
+            .iter()
+            .map(|l| Ok(Bytes::from(format!("{}\n", l))))
+            .collect::<Vec<_>>();
+        let mut parser = CohereStreamParser::new(stream::iter(bytes));
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result.unwrap());
+        }
+        events
+    }
+
+    /// A stream-end event with token usage ends the stream with exactly one
+    /// terminal event, emitted last, mapping the finish reason and counts.
+    #[tokio::test]
+    async fn stream_end_emits_terminal_stream_complete_with_usage() {
+        let events = parse_ndjson(&[
+            r#"{"event_type":"text-generation","text":"Hel"}"#,
+            r#"{"event_type":"text-generation","text":"lo"}"#,
+            r#"{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hello","generation_id":"gen-1","finish_reason":"COMPLETE","meta":{"tokens":{"input_tokens":10,"output_tokens":5}}}}"#,
+        ])
+        .await;
+
+        assert_eq!(
+            events.len(),
+            4,
+            "Expected PartStart, PartDelta, PartEnd, StreamComplete, got {:?}",
+            events
+        );
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                // The wire format reports no cache counts.
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A stream-end event without usage still ends the stream with exactly
+    /// one terminal event; every token field stays `None`.
+    #[tokio::test]
+    async fn stream_end_without_usage_yields_none_token_fields() {
+        let events = parse_ndjson(&[
+            r#"{"event_type":"text-generation","text":"Hi"}"#,
+            r#"{"event_type":"stream-end","finish_reason":"MAX_TOKENS"}"#,
+        ])
+        .await;
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Length);
+                assert_eq!(complete.input_tokens, None);
+                assert_eq!(complete.output_tokens, None);
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A TOOL_CALL stream-end maps to the ToolCall finish reason on the
+    /// terminal event, matching the non-streaming response mapping.
+    #[tokio::test]
+    async fn tool_call_stream_end_maps_to_tool_call_finish_reason() {
+        let events =
+            parse_ndjson(&[r#"{"event_type":"stream-end","finish_reason":"TOOL_CALL"}"#]).await;
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::ToolCall);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A stream that ends without stream-end emits no terminal event, so
+    /// consumers keep treating the truncated stream as incomplete.
+    #[tokio::test]
+    async fn eof_without_stream_end_emits_no_terminal_event() {
+        let events = parse_ndjson(&[r#"{"event_type":"text-generation","text":"Hi"}"#]).await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_))),
+            "truncated stream must not emit a terminal event"
+        );
+    }
+
+    // Streaming over wiremock (real HTTP request path).
+
+    /// A streamed chat over real HTTP ends with exactly one terminal
+    /// StreamComplete carrying the stream-end response's token counts.
+    #[tokio::test]
+    async fn request_stream_emits_terminal_stream_complete_with_usage() {
+        use futures::StreamExt;
+
+        let ndjson_body = concat!(
+            "{\"event_type\":\"text-generation\",\"text\":\"Hel\"}\n",
+            "{\"event_type\":\"text-generation\",\"text\":\"lo\"}\n",
+            "{\"event_type\":\"stream-end\",\"finish_reason\":\"COMPLETE\",\"response\":{\"text\":\"Hello\",\"generation_id\":\"gen-1\",\"finish_reason\":\"COMPLETE\",\"meta\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":5}}}}\n",
+        );
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/x-ndjson")
+                    .set_body_string(ndjson_body),
+            )
+            .mount(&server)
+            .await;
+
+        let model = CohereModel::new("command-r-plus", "test-key").with_base_url(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+
+        // Part events precede the terminal event.
+        assert!(
+            matches!(events.first(), Some(ModelResponseStreamEvent::PartStart(_))),
+            "expected a leading part event, got {:?}",
+            events.first()
+        );
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
     }
 }

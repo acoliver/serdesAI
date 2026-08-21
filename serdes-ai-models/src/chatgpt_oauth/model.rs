@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
 use serdes_ai_core::messages::{
-    ImageContent, PartStartEvent, TextPart, ToolCallArgs, ToolCallPart, UserContent,
-    UserContentPart, UserPromptPart,
+    ImageContent, ModelResponseStreamEvent, PartStartEvent, StreamCompleteEvent, TextPart,
+    ToolCallArgs, ToolCallPart, UserContent, UserContentPart, UserPromptPart,
 };
 use serdes_ai_core::{
     FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
@@ -649,6 +649,7 @@ impl Model for ChatGptOAuthModel {
         self.parse_sse_response(response).await
     }
 
+    /// Stream a response through the non-streaming request fallback.
     async fn request_stream(
         &self,
         messages: &[ModelRequest],
@@ -659,10 +660,16 @@ impl Model for ChatGptOAuthModel {
         // TODO: Implement proper SSE streaming
         let response = self.request(messages, settings, params).await?;
 
-        use serdes_ai_core::messages::ModelResponseStreamEvent;
+        let ModelResponse {
+            parts,
+            finish_reason,
+            usage,
+            ..
+        } = response;
 
-        let events: Vec<Result<ModelResponseStreamEvent, ModelError>> = response
-            .parts
+        // Part events first, terminal event last; the request error above
+        // short-circuits failures before any event is emitted.
+        let mut events: Vec<Result<ModelResponseStreamEvent, ModelError>> = parts
             .into_iter()
             .enumerate()
             .map(|(idx, part)| {
@@ -672,10 +679,164 @@ impl Model for ChatGptOAuthModel {
             })
             .collect();
 
+        events.push(Ok(stream_complete_event(finish_reason, usage.as_ref())));
+
         Ok(Box::pin(futures::stream::iter(events)))
     }
 
     fn profile(&self) -> &ModelProfile {
         &self.profile
+    }
+}
+
+/// Build the terminal event from the finish reason and usage mapped from
+/// the completed response.
+///
+/// Usage fields absent from the response stay `None`. A missing finish
+/// reason defaults to [`FinishReason::Stop`]; the terminal event requires a
+/// reason, and unknown strings already default to `Stop` in the
+/// non-streaming mapping.
+fn stream_complete_event(
+    finish_reason: Option<FinishReason>,
+    usage: Option<&RequestUsage>,
+) -> ModelResponseStreamEvent {
+    let mut event = StreamCompleteEvent::new(finish_reason.unwrap_or(FinishReason::Stop));
+
+    if let Some(u) = usage {
+        if let Some(tokens) = u.request_tokens {
+            event = event.with_input_tokens(tokens);
+        }
+        if let Some(tokens) = u.response_tokens {
+            event = event.with_output_tokens(tokens);
+        }
+        if let Some(tokens) = u.cache_creation_tokens {
+            event = event.with_cache_creation_tokens(tokens);
+        }
+        if let Some(tokens) = u.cache_read_tokens {
+            event = event.with_cache_read_tokens(tokens);
+        }
+    }
+
+    ModelResponseStreamEvent::StreamComplete(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Streaming fallback over wiremock (real HTTP request path).
+
+    /// Serve a Codex SSE body from a wiremock server and collect the events
+    /// `request_stream` yields against it.
+    async fn stream_events_for(sse_body: &str) -> Vec<ModelResponseStreamEvent> {
+        use futures::StreamExt;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/responses"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let config = ChatGptConfig {
+            api_base_url: server.uri(),
+            ..Default::default()
+        };
+        let model = ChatGptOAuthModel::new("chatgpt-4o-codex", "test-token").with_config(config);
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+        events
+    }
+
+    /// A streamed request over real HTTP replays the buffered completed
+    /// response as part events and ends with exactly one terminal
+    /// StreamComplete carrying the mapped usage.
+    #[tokio::test]
+    async fn request_stream_emits_terminal_stream_complete_with_usage() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o-codex\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        // Part events precede the terminal event.
+        match events.first() {
+            Some(ModelResponseStreamEvent::PartStart(start)) => {
+                assert_eq!(start.index, 0);
+                assert!(
+                    matches!(&start.part, ModelResponsePart::Text(t) if t.content == "Hello"),
+                    "expected the buffered text part first, got {:?}",
+                    start.part
+                );
+            }
+            other => panic!("expected a leading part event, got {:?}", other),
+        }
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A completed response without usage still ends with exactly one
+    /// terminal event, and every token field stays `None`.
+    #[tokio::test]
+    async fn request_stream_without_usage_yields_none_token_fields() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-4o-codex\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, None);
+                assert_eq!(complete.output_tokens, None);
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
     }
 }

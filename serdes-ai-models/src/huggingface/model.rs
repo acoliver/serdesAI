@@ -10,8 +10,9 @@ use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::ModelProfile;
 use serdes_ai_core::{
-    messages::ModelResponseStreamEvent, FinishReason, ModelRequest, ModelRequestPart,
-    ModelResponse, ModelResponsePart, ModelSettings, TextPart, UserContent, UserContentPart,
+    messages::{ModelResponseStreamEvent, StreamCompleteEvent},
+    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
+    TextPart, UserContent, UserContentPart,
 };
 
 /// HuggingFace Inference API base URL.
@@ -196,21 +197,16 @@ impl HuggingFaceModel {
             .ok_or_else(|| ModelError::invalid_response("No generated text"))?;
 
         let finish_reason = match &resp {
-            GenerateResponse::Single(r) => r.details.as_ref().and_then(|d| {
-                d.finish_reason.as_ref().map(|r| match r.as_str() {
-                    "length" => FinishReason::Length,
-                    "eos_token" | "stop" => FinishReason::Stop,
-                    _ => FinishReason::Stop,
-                })
-            }),
+            GenerateResponse::Single(r) => r
+                .details
+                .as_ref()
+                .and_then(|d| d.finish_reason.as_deref())
+                .map(map_finish_reason),
             GenerateResponse::Batch(results) => results.first().and_then(|r| {
-                r.details.as_ref().and_then(|d| {
-                    d.finish_reason.as_ref().map(|r| match r.as_str() {
-                        "length" => FinishReason::Length,
-                        "eos_token" | "stop" => FinishReason::Stop,
-                        _ => FinishReason::Stop,
-                    })
-                })
+                r.details
+                    .as_ref()
+                    .and_then(|d| d.finish_reason.as_deref())
+                    .map(map_finish_reason)
             }),
         };
 
@@ -296,6 +292,7 @@ impl Model for HuggingFaceModel {
         self.parse_response(resp)
     }
 
+    /// Stream a generation from the TGI endpoint.
     async fn request_stream(
         &self,
         messages: &[ModelRequest],
@@ -328,15 +325,16 @@ impl Model for HuggingFaceModel {
         }
 
         let stream = response.bytes_stream();
-        let model_id = self.model_id.clone();
 
-        // Parse SSE stream
-        let mapped = stream.filter_map(move |chunk| {
-            let _model_id = model_id.clone();
-            async move {
+        // Parse SSE stream; a chunk can carry several data lines, so every
+        // event it produces is emitted, with the terminal event last.
+        let events = stream
+            .filter_map(|chunk| async {
                 match chunk {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
+                        let mut events: Vec<Result<ModelResponseStreamEvent, ModelError>> =
+                            Vec::new();
                         // Parse SSE data lines
                         for line in text.lines() {
                             if let Some(data) = line.strip_prefix("data:") {
@@ -347,25 +345,61 @@ impl Model for HuggingFaceModel {
                                 if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
                                     if let Some(token) = resp.token {
                                         if !token.special {
-                                            return Some(Ok(ModelResponseStreamEvent::text_delta(
+                                            events.push(Ok(ModelResponseStreamEvent::text_delta(
                                                 0, token.text,
                                             )));
                                         }
                                     }
                                     if resp.generated_text.is_some() {
-                                        return Some(Ok(ModelResponseStreamEvent::part_end(0)));
+                                        events.push(Ok(ModelResponseStreamEvent::part_end(0)));
+                                        let finish_reason = resp
+                                            .details
+                                            .as_ref()
+                                            .and_then(|d| d.finish_reason.as_deref())
+                                            .map(map_finish_reason)
+                                            .unwrap_or(FinishReason::Stop);
+                                        events.push(Ok(ModelResponseStreamEvent::StreamComplete(
+                                            StreamCompleteEvent::new(finish_reason),
+                                        )));
                                     }
                                 }
                             }
                         }
-                        None
+                        if events.is_empty() {
+                            None
+                        } else {
+                            Some(events)
+                        }
                     }
-                    Err(e) => Some(Err(ModelError::network(e.to_string()))),
+                    Err(e) => Some(vec![Err(ModelError::network(e.to_string()))]),
                 }
+            })
+            .flat_map(futures::stream::iter);
+
+        // The terminal event ends the stream: nothing is yielded after the
+        // first StreamComplete, keeping it exactly once and last.
+        let mut terminal_seen = false;
+        let mapped = events.take_while(move |event| {
+            let stop = terminal_seen;
+            if matches!(event, Ok(ModelResponseStreamEvent::StreamComplete(_))) {
+                terminal_seen = true;
             }
+            std::future::ready(!stop)
         });
 
         Ok(Box::pin(mapped))
+    }
+}
+
+/// Map a TGI finish reason string to a [`FinishReason`].
+///
+/// Unknown reasons map to [`FinishReason::Stop`], matching the non-streaming
+/// response mapping.
+fn map_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "length" => FinishReason::Length,
+        "eos_token" | "stop" => FinishReason::Stop,
+        _ => FinishReason::Stop,
     }
 }
 
@@ -406,5 +440,153 @@ mod tests {
         assert!(prompt.contains("<|user|>"));
         assert!(prompt.contains("Hello!"));
         assert!(prompt.ends_with("<|assistant|>\n"));
+    }
+
+    // Streaming over wiremock (real HTTP request path).
+
+    /// Collect the events a streamed request yields for the given SSE body.
+    async fn stream_events_for(sse_body: &str) -> Vec<ModelResponseStreamEvent> {
+        use futures::StreamExt;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let model = HuggingFaceModel::new("test-model", "test-token").with_endpoint(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+        events
+    }
+
+    /// A streamed generation over real HTTP ends with exactly one terminal
+    /// StreamComplete after the part end, mapping the final chunk's finish
+    /// reason and leaving every token field `None`.
+    #[tokio::test]
+    async fn request_stream_emits_terminal_stream_complete() {
+        let sse_body = concat!(
+            "data:{\"token\":{\"id\":1,\"text\":\"Hello\",\"logprob\":null,\"special\":false}}\n\n",
+            "data:{\"token\":{\"id\":2,\"text\":\" world\",\"logprob\":null,\"special\":false}}\n\n",
+            "data:{\"generated_text\":\"Hello world\",\"details\":{\"finish_reason\":\"length\",\"generated_tokens\":2,\"seed\":null}}\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        // Text deltas precede the part end and the terminal event.
+        assert_eq!(
+            events.len(),
+            4,
+            "Expected 2 PartDelta, PartEnd, StreamComplete, got {:?}",
+            events
+        );
+        assert!(matches!(events[0], ModelResponseStreamEvent::PartDelta(_)));
+        assert!(matches!(events[1], ModelResponseStreamEvent::PartDelta(_)));
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Length);
+                // TGI reports no token counts in this mode.
+                assert_eq!(complete.input_tokens, None);
+                assert_eq!(complete.output_tokens, None);
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
+
+    /// A stream that ends without a generated_text chunk emits no terminal
+    /// event, so consumers keep treating the truncated stream as incomplete.
+    #[tokio::test]
+    async fn request_stream_without_generated_text_emits_no_terminal_event() {
+        let sse_body = concat!(
+            "data:{\"token\":{\"id\":1,\"text\":\"Hello\",\"logprob\":null,\"special\":false}}\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        assert_eq!(
+            events.len(),
+            1,
+            "expected only the text delta, got {:?}",
+            events
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_))),
+            "truncated stream must not emit a terminal event"
+        );
+    }
+
+    /// A data line after the generated_text line yields no event after the
+    /// terminal one, keeping the terminal the stream's last event.
+    #[tokio::test]
+    async fn request_stream_ignores_lines_after_generated_text() {
+        let sse_body = concat!(
+            "data:{\"token\":{\"id\":1,\"text\":\"Hello\",\"logprob\":null,\"special\":false}}\n\n",
+            "data:{\"generated_text\":\"Hello\",\"details\":{\"finish_reason\":\"stop\",\"generated_tokens\":1,\"seed\":null}}\n\n",
+            "data:{\"token\":{\"id\":2,\"text\":\" trailing\",\"logprob\":null,\"special\":false}}\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+        assert!(
+            matches!(
+                events.last(),
+                Some(ModelResponseStreamEvent::StreamComplete(_))
+            ),
+            "terminal event must be emitted last, got {:?}",
+            events.last()
+        );
+    }
+
+    /// A duplicated generated_text line still yields exactly one terminal
+    /// event.
+    #[tokio::test]
+    async fn request_stream_with_duplicated_generated_text_emits_one_terminal_event() {
+        let sse_body = concat!(
+            "data:{\"generated_text\":\"Hello\",\"details\":{\"finish_reason\":\"stop\",\"generated_tokens\":1,\"seed\":null}}\n\n",
+            "data:{\"generated_text\":\"Hello again\",\"details\":{\"finish_reason\":\"stop\",\"generated_tokens\":2,\"seed\":null}}\n\n",
+        );
+
+        let events = stream_events_for(sse_body).await;
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
     }
 }
