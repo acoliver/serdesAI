@@ -1283,10 +1283,7 @@ mod tests {
     fn test_reasoning_effort_parse_maps_known_and_keeps_custom_verbatim() {
         assert_eq!(ReasoningEffort::parse("xhigh"), ReasoningEffort::XHigh);
         assert_eq!(ReasoningEffort::parse("MAX"), ReasoningEffort::Max);
-        assert_eq!(
-            ReasoningEffort::from("Minimal"),
-            ReasoningEffort::Minimal
-        );
+        assert_eq!(ReasoningEffort::from("Minimal"), ReasoningEffort::Minimal);
         assert_eq!(
             ReasoningEffort::from(String::from("xhigh")),
             ReasoningEffort::XHigh
