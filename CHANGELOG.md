@@ -290,6 +290,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added `with_header(name, value)` and `with_appended_header(name, value)` builder methods to `AnthropicModel` for attaching custom HTTP headers to every request:
+  - `with_header()` replaces any existing value of that header, including the library's own (`x-api-key`, `anthropic-version`, `Content-Type`, `anthropic-beta`) - no header is protected.
+  - `with_appended_header()` adds a value while keeping existing ones, for multi-valued headers such as `anthropic-beta`. It is the wrong choice for single-valued headers like `x-api-key`, where appending sends the header twice instead of overriding it.
+  - Header names and values are trusted caller configuration, not end-user input: since no header is protected, forwarding user-controlled data into these builders would let that user overwrite `x-api-key`.
+  - Header construction for the streaming and non-streaming paths is consolidated into a single `build_headers()`; an invalid header name or value now surfaces as `ModelError::Configuration` naming the header (never its value) instead of a late transport error.
+
 ### Planned
 - OpenAI Realtime API support
 - Cohere provider
