@@ -215,6 +215,15 @@ impl RunUsage {
         self.request_count += 1;
     }
 
+    /// Record a model request that reported no usage.
+    ///
+    /// The request still has to be counted: `max_requests` is the only bound on
+    /// a runaway agent loop, and a provider that omits usage would otherwise
+    /// leave it permanently inert.
+    pub fn record_request(&mut self) {
+        self.request_count += 1;
+    }
+
     /// Record a tool call.
     pub fn record_tool_call(&mut self) {
         self.tool_call_count += 1;

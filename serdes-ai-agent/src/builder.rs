@@ -58,7 +58,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use serdes_ai_core::ModelSettings;
 use serdes_ai_models::{Model, ModelError};
-use serdes_ai_tools::{ToolDefinition, ToolError, ToolReturn};
+use serdes_ai_tools::{ObjectJsonSchema, ToolDefinition, ToolError, ToolReturn};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -676,12 +676,30 @@ where
 
         // Pre-compute tool definitions at build time.
         // This avoids cloning tool definitions on every agent step.
-        let cached_tool_defs = Arc::new(
-            self.tools
-                .iter()
-                .map(|t| t.definition.clone())
-                .collect::<Vec<_>>(),
-        );
+        let mut tool_defs = self
+            .tools
+            .iter()
+            .map(|t| t.definition.clone())
+            .collect::<Vec<_>>();
+
+        // A tool-mode output schema has to advertise its tool, or the model is
+        // never told the tool exists and can never produce structured output.
+        // The definition is not added to `self.tools`: it has no executor, and
+        // `is_output_tool` intercepts the call before tool dispatch.
+        if let (Some(name), Some(schema)) = (output_schema.tool_name(), output_schema.json_schema())
+        {
+            if let Ok(parameters) = serde_json::from_value::<ObjectJsonSchema>(schema) {
+                tool_defs.push(
+                    ToolDefinition::new(
+                        name,
+                        "Return the final result. Call this when the task is complete.",
+                    )
+                    .with_parameters(parameters),
+                );
+            }
+        }
+
+        let cached_tool_defs = Arc::new(tool_defs);
 
         Agent {
             model: self.model,
@@ -1064,5 +1082,117 @@ mod tests {
             }
             Ok(_) => panic!("Expected error for unknown provider"),
         }
+    }
+
+    // ===== Structured output must be advertised to the model =====
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Answer {
+        #[allow(dead_code)]
+        value: String,
+    }
+
+    fn answer_schema() -> JsonValue {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        })
+    }
+
+    fn advertised(agent: &Agent<(), Answer>) -> Vec<String> {
+        agent
+            .tool_definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn output_tool_is_advertised_to_the_model() {
+        // Without this the model is never told the tool exists, so it has no way
+        // to produce structured output at all.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        assert!(
+            advertised(&agent).contains(&"submit_answer".to_string()),
+            "output tool missing from the definitions sent to the model"
+        );
+    }
+
+    #[test]
+    fn the_advertised_output_tool_carries_its_schema() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        let defs = agent.tool_definitions();
+        let tool = defs
+            .iter()
+            .find(|d| d.name == "submit_answer")
+            .expect("output tool missing");
+
+        assert!(
+            tool.parameters().get("properties").is_some(),
+            "the output tool must carry its parameter schema"
+        );
+    }
+
+    #[test]
+    fn advertising_the_output_tool_keeps_regular_tools() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .tool_fn("echo", "echo", |_c: &RunContext<()>, _a: JsonValue| {
+                    Ok(ToolReturn::text("ok"))
+                })
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        let names = advertised(&agent);
+        assert!(names.contains(&"echo".to_string()), "{names:?}");
+        assert!(names.contains(&"submit_answer".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn json_mode_advertises_no_output_tool() {
+        // JSON mode sends the schema on the request instead of as a tool.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_type_with_schema::<Answer>(answer_schema())
+                .build();
+
+        assert!(
+            advertised(&agent).is_empty(),
+            "json mode should advertise no tool"
+        );
+    }
+
+    #[test]
+    fn a_json_mode_schema_is_offered_as_a_native_schema() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_type_with_schema::<Answer>(answer_schema())
+                .build();
+
+        assert!(
+            agent.native_output_schema().is_some(),
+            "the provider must receive the schema, or nothing asks for JSON"
+        );
+    }
+
+    #[test]
+    fn a_tool_mode_schema_is_not_also_offered_natively() {
+        // Sending both would ask the provider for a tool call and a JSON
+        // response_format at the same time.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        assert!(agent.native_output_schema().is_none());
     }
 }

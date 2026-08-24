@@ -321,6 +321,19 @@ where
         self.output_schema.tool_name().map(|s| s.to_string())
     }
 
+    /// The output schema to send as a native structured-output request, if the
+    /// schema asks for JSON rather than a tool call.
+    ///
+    /// Tool-mode schemas advertise a tool instead, so returning a schema here
+    /// too would ask the provider for both at once.
+    pub(crate) fn native_output_schema(&self) -> Option<serdes_ai_tools::ObjectJsonSchema> {
+        if self.output_schema.tool_name().is_some() {
+            return None;
+        }
+        let schema = self.output_schema.json_schema()?;
+        serde_json::from_value(schema).ok()
+    }
+
     /// Get the static system prompt.
     pub fn static_system_prompt(&self) -> &str {
         &self.static_system_prompt
