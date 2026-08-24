@@ -5,121 +5,18 @@
 //! whole chain, from the orchestrator's `spawn_agent` call through a nested
 //! agent's `write_file`, lands bytes on disk.
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+mod support;
 
-use serdes_ai_core::messages::StreamCompleteEvent;
-use serdes_ai_core::{FinishReason, ModelResponse, ModelResponsePart, ModelResponseStreamEvent};
-use serdes_ai_models::{FunctionModel, Model, ModelError};
+use std::fs;
+use std::sync::Arc;
+
 use serdes_ai_orchestrator::config::OrchestratorConfig;
 use serdes_ai_orchestrator::events::{AgentId, OrchestratorEvent};
 use serdes_ai_orchestrator::orchestrator::Orchestrator;
-use serdes_ai_orchestrator::registry::ModelFactory;
 use serdes_ai_orchestrator::role::Role;
 use tokio_util::sync::CancellationToken;
 
-/// One scripted model turn.
-#[derive(Clone)]
-enum Turn {
-    /// Call a tool with these arguments.
-    Tool {
-        name: &'static str,
-        args: serde_json::Value,
-    },
-    /// Answer with text and stop.
-    Text(String),
-}
-
-/// Build a streaming model that plays `turns` in order, repeating the last one.
-///
-/// Every agent in an orchestration is driven through `run_stream`, so the script
-/// has to be delivered on the streaming path.
-fn scripted(turns: Vec<Turn>) -> FunctionModel {
-    let turns = Arc::new(turns);
-    let blocking_turns = Arc::clone(&turns);
-    let blocking_step = Arc::new(AtomicUsize::new(0));
-    let stream_step = Arc::new(AtomicUsize::new(0));
-
-    let pick = |turns: &[Turn], step: &AtomicUsize| -> Turn {
-        let i = step.fetch_add(1, Ordering::SeqCst);
-        turns[i.min(turns.len() - 1)].clone()
-    };
-
-    FunctionModel::with_both(
-        move |_, _| match pick(&blocking_turns, &blocking_step) {
-            Turn::Text(text) => ModelResponse::text(text).with_finish_reason(FinishReason::Stop),
-            Turn::Tool { name, args } => {
-                ModelResponse::with_parts(vec![ModelResponsePart::tool_call(name, args)])
-                    .with_finish_reason(FinishReason::ToolCall)
-            }
-        },
-        move |_, _| {
-            let events = match pick(&turns, &stream_step) {
-                Turn::Text(text) => vec![
-                    Ok(ModelResponseStreamEvent::part_start(
-                        0,
-                        ModelResponsePart::text(""),
-                    )),
-                    Ok(ModelResponseStreamEvent::text_delta(0, text)),
-                    Ok(ModelResponseStreamEvent::StreamComplete(
-                        StreamCompleteEvent::new(FinishReason::Stop),
-                    )),
-                ],
-                Turn::Tool { name, args } => vec![
-                    Ok(ModelResponseStreamEvent::part_start(
-                        0,
-                        ModelResponsePart::tool_call(name, args),
-                    )),
-                    Ok(ModelResponseStreamEvent::StreamComplete(
-                        StreamCompleteEvent::new(FinishReason::ToolCall),
-                    )),
-                ],
-            };
-            Box::pin(futures::stream::iter(events))
-        },
-    )
-}
-
-/// Hands each role its own script.
-struct ScriptedFactory {
-    scripts: Mutex<HashMap<Role, Vec<Turn>>>,
-}
-
-impl ScriptedFactory {
-    fn new() -> Self {
-        Self {
-            scripts: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn script(self, role: Role, turns: Vec<Turn>) -> Self {
-        self.scripts.lock().unwrap().insert(role, turns);
-        self
-    }
-}
-
-impl ModelFactory for ScriptedFactory {
-    fn model_for(&self, role: Role, _spec: &str) -> Result<Arc<dyn Model>, ModelError> {
-        let turns = self
-            .scripts
-            .lock()
-            .unwrap()
-            .get(&role)
-            .cloned()
-            .unwrap_or_else(|| vec![Turn::Text(format!("{role} had no script"))]);
-
-        Ok(Arc::new(scripted(turns)))
-    }
-}
-
-fn temp_root() -> PathBuf {
-    let base = std::env::temp_dir().join(format!("serdes-e2e-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&base).unwrap();
-    base.canonicalize().unwrap()
-}
+use support::{temp_root, ScriptedFactory, Turn};
 
 #[tokio::test]
 async fn orchestrator_delegates_to_code_which_writes_a_real_file() {

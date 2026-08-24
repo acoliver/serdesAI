@@ -34,6 +34,17 @@ pub struct RoleConfig {
     /// Cap on tokens for a single agent of this role, if any.
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    /// Cap on model requests for a single agent of this role.
+    ///
+    /// The agent loop ends on a completion signal, so an agent whose model keeps
+    /// returning tool calls never terminates on its own. This bounds that.
+    #[serde(default = "default_max_requests")]
+    pub max_requests: u32,
+}
+
+/// Default cap on model requests within a single agent run.
+fn default_max_requests() -> u32 {
+    50
 }
 
 impl RoleConfig {
@@ -43,6 +54,7 @@ impl RoleConfig {
             model: default_model_for(role).to_string(),
             system_prompt: crate::prompts::for_role(role).to_string(),
             max_tokens: None,
+            max_requests: default_max_requests(),
         }
     }
 }
@@ -124,6 +136,15 @@ pub struct OrchestratorConfig {
     /// Gate settings.
     #[serde(default)]
     pub gate: GateConfig,
+    /// How many times a rejected plan may be sent back to the planner before
+    /// the run gives up.
+    #[serde(default = "default_plan_revisions")]
+    pub max_plan_revisions: u32,
+}
+
+/// Default cap on planner revisions.
+fn default_plan_revisions() -> u32 {
+    3
 }
 
 impl OrchestratorConfig {
@@ -133,6 +154,7 @@ impl OrchestratorConfig {
             root: root.into(),
             roles: HashMap::new(),
             gate: GateConfig::default(),
+            max_plan_revisions: default_plan_revisions(),
         }
     }
 

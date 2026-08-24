@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::plan::{ApprovalDecision, Plan};
 use crate::role::Role;
 
 /// Identifies one agent *instance* within a run.
@@ -89,6 +90,18 @@ pub enum OrchestratorEvent {
         mode: Mode,
         /// The task the user asked for.
         task: String,
+    },
+    /// The planner produced a plan for approval.
+    PlanDrafted {
+        /// The proposed plan.
+        plan: Plan,
+        /// Which attempt this is, counting from zero.
+        attempt: u32,
+    },
+    /// The user decided about a proposed plan.
+    PlanDecision {
+        /// What they chose.
+        decision: ApprovalDecision,
     },
     /// An agent instance was created and is about to run.
     AgentSpawned {

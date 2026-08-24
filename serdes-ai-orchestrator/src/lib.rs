@@ -17,6 +17,7 @@
 pub mod config;
 pub mod events;
 pub mod orchestrator;
+pub mod plan;
 pub mod prompts;
 pub mod registry;
 pub mod role;
@@ -26,6 +27,7 @@ pub mod tools;
 pub use config::{GateConfig, OrchestratorConfig, RoleConfig};
 pub use events::{AgentId, DeltaKind, Mode, OrchestratorEvent, ToolPhase};
 pub use orchestrator::{OrchestrationError, Orchestrator};
+pub use plan::{ApprovalDecision, AutoApprove, Plan, PlanApprover, PlanStep};
 pub use registry::{AgentRegistry, ModelFactory};
 pub use role::Role;
 pub use run::{run_agent, RunError};

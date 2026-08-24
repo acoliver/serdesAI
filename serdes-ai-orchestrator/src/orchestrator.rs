@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConfigError, OrchestratorConfig};
 use crate::events::{AgentId, Mode, OrchestratorEvent};
+use crate::plan::{ApprovalDecision, Plan, PlanApprover};
 use crate::registry::{AgentRegistry, ModelFactory};
 use crate::role::Role;
 use crate::run::{run_agent, RunError};
@@ -38,6 +39,21 @@ pub enum OrchestrationError {
     /// An agent run failed.
     #[error(transparent)]
     Run(#[from] RunError),
+
+    /// The user abandoned the run at the approval step.
+    #[error("the run was cancelled at plan approval")]
+    PlanCancelled,
+
+    /// The planner never produced a plan the user would accept.
+    #[error("no plan was approved after {attempts} attempts")]
+    PlanRejected {
+        /// How many plans were put to the user.
+        attempts: u32,
+    },
+
+    /// The planner returned a plan with no steps.
+    #[error("the planner produced a plan with no steps")]
+    EmptyPlan,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +133,122 @@ impl Orchestrator {
         });
 
         result
+    }
+
+    /// Draft a plan for `task` and put it to `approver`.
+    ///
+    /// A rejection returns to the planner with the feedback attached, up to
+    /// `max_plan_revisions` times. The cap exists so a user who keeps rejecting
+    /// gets an answer rather than an unbounded loop.
+    pub async fn plan(
+        &self,
+        task: &str,
+        approver: &dyn PlanApprover,
+        cancel: &CancellationToken,
+    ) -> Result<Plan, OrchestrationError> {
+        let max_revisions = self.registry.config().max_plan_revisions;
+        let mut feedback: Vec<String> = Vec::new();
+
+        for attempt in 0..=max_revisions {
+            if cancel.is_cancelled() {
+                return Err(OrchestrationError::Run(RunError::Cancelled {
+                    role: Role::Planner,
+                }));
+            }
+
+            let prompt = if feedback.is_empty() {
+                task.to_string()
+            } else {
+                format!(
+                    "{task}\n\nA previous plan was rejected. Address this feedback:\n{}",
+                    feedback
+                        .iter()
+                        .map(|f| format!("- {f}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+
+            let plan = self.draft_plan(prompt, cancel).await?;
+
+            let _ = self.events.send(OrchestratorEvent::PlanDrafted {
+                plan: plan.clone(),
+                attempt,
+            });
+
+            let decision = approver.approve(&plan).await;
+
+            let _ = self.events.send(OrchestratorEvent::PlanDecision {
+                decision: decision.clone(),
+            });
+
+            match decision {
+                ApprovalDecision::Approve => return Ok(plan),
+                ApprovalDecision::Cancel => {
+                    return Err(OrchestrationError::PlanCancelled);
+                }
+                ApprovalDecision::Reject { feedback: note } => feedback.push(note),
+            }
+        }
+
+        Err(OrchestrationError::PlanRejected {
+            attempts: max_revisions + 1,
+        })
+    }
+
+    /// Run the planner once and deserialize its plan.
+    async fn draft_plan(
+        &self,
+        prompt: String,
+        cancel: &CancellationToken,
+    ) -> Result<Plan, OrchestrationError> {
+        let builder =
+            self.registry
+                .builder_for(Role::Planner)
+                .map_err(|e| OrchestrationError::Build {
+                    role: Role::Planner,
+                    message: e.to_string(),
+                })?;
+
+        // The planner investigates before planning, so it gets read-only tools,
+        // and returns a Plan rather than prose so the gate has something
+        // structured to check against later.
+        let agent =
+            tools::register_for_role(builder, Role::Planner, self.registry.tool_context().clone())
+                .output_tool::<Plan>(crate::plan::PLAN_TOOL, Plan::schema())
+                .build();
+
+        let id = AgentId::new();
+        let _ = self.events.send(OrchestratorEvent::AgentSpawned {
+            id,
+            parent: None,
+            role: Role::Planner,
+            task: prompt.clone(),
+        });
+
+        if cancel.is_cancelled() {
+            return Err(OrchestrationError::Run(RunError::Cancelled {
+                role: Role::Planner,
+            }));
+        }
+
+        let result = agent.run(prompt, ()).await.map_err(|e| {
+            OrchestrationError::Run(RunError::Agent {
+                role: Role::Planner,
+                message: e.to_string(),
+            })
+        })?;
+
+        let _ = self.events.send(OrchestratorEvent::AgentFinished {
+            id,
+            output: result.output.summary.clone(),
+        });
+
+        if result.output.is_empty() {
+            return Err(OrchestrationError::EmptyPlan);
+        }
+
+        Ok(result.output)
     }
 
     /// Build the orchestrator agent and run it.

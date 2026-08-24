@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use serdes_ai_agent::{Agent, AgentBuilder};
+use serdes_ai_agent::{Agent, AgentBuilder, UsageLimits};
 use serdes_ai_models::Model;
 use serdes_ai_models::ModelError;
 
@@ -27,6 +27,14 @@ pub struct SpecModelFactory;
 impl ModelFactory for SpecModelFactory {
     fn model_for(&self, _role: Role, spec: &str) -> Result<Arc<dyn Model>, ModelError> {
         serdes_ai_models::infer_model(spec)
+    }
+}
+
+/// Bound a single agent run to `max_requests` model calls.
+fn request_limit(max_requests: u32) -> UsageLimits {
+    UsageLimits {
+        max_requests: Some(max_requests),
+        ..UsageLimits::default()
     }
 }
 
@@ -75,8 +83,9 @@ impl AgentRegistry {
         let role_config = self.config.role(role);
         let model = self.factory.model_for(role, &role_config.model)?;
 
-        let mut builder =
-            AgentBuilder::<(), String>::from_arc(model).system_prompt(role_config.system_prompt);
+        let mut builder = AgentBuilder::<(), String>::from_arc(model)
+            .system_prompt(role_config.system_prompt)
+            .usage_limits(request_limit(role_config.max_requests));
 
         if let Some(max_tokens) = role_config.max_tokens {
             builder = builder.max_tokens(max_tokens);
@@ -93,7 +102,9 @@ impl AgentRegistry {
         let role_config = self.config.role(role);
         let model = self.factory.model_for(role, &role_config.model)?;
 
-        Ok(AgentBuilder::<(), String>::from_arc(model).system_prompt(role_config.system_prompt))
+        Ok(AgentBuilder::<(), String>::from_arc(model)
+            .system_prompt(role_config.system_prompt)
+            .usage_limits(request_limit(role_config.max_requests)))
     }
 
     /// The tool context shared by every agent this registry builds.
