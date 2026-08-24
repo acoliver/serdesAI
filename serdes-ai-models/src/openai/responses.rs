@@ -35,7 +35,7 @@ use std::time::Duration;
 /// OpenAI Responses API model settings.
 #[derive(Debug, Clone, Default)]
 pub struct OpenAIResponsesModelSettings {
-    /// Reasoning effort: "low", "medium", "high"
+    /// Reasoning effort (e.g. "low", "high", "xhigh", "max", or any custom string)
     pub reasoning_effort: Option<ReasoningEffort>,
 
     /// Reasoning summary: "concise", "detailed", "auto"
@@ -61,24 +61,74 @@ pub struct OpenAIResponsesModelSettings {
 }
 
 /// Reasoning effort level for reasoning models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Known efforts are named variants; newer models may accept efforts this
+/// crate does not know about, which can be expressed with
+/// [`ReasoningEffort::Custom`]. The value is sent to the API verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReasoningEffort {
-    /// Minimal reasoning - fastest responses
+    /// Minimal reasoning - fastest responses (gpt-5 family)
+    Minimal,
+    /// Low reasoning
     Low,
     /// Balanced reasoning - default
     #[default]
     Medium,
-    /// Deep reasoning - most thorough
+    /// Deep reasoning
     High,
+    /// Extra-deep reasoning (newer models, e.g. gpt-5.1)
+    XHigh,
+    /// Maximum reasoning (newer models, e.g. gpt-5.1-pro)
+    Max,
+    /// Any other effort string, passed through verbatim.
+    Custom(String),
 }
 
 impl ReasoningEffort {
-    fn as_str(&self) -> &'static str {
+    /// The effort string sent to the API.
+    fn as_str(&self) -> &str {
         match self {
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Custom(s) => s,
         }
+    }
+
+    /// Parse an effort string. Known (case-insensitive) values map to named
+    /// variants; anything else becomes [`ReasoningEffort::Custom`] with the
+    /// original string preserved.
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::XHigh,
+            "max" => Self::Max,
+            _ => Self::Custom(s.to_string()),
+        }
+    }
+}
+
+impl From<&str> for ReasoningEffort {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
+    }
+}
+
+impl From<String> for ReasoningEffort {
+    fn from(s: String) -> Self {
+        Self::parse(&s)
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -702,9 +752,12 @@ impl OpenAIResponsesModel {
     }
 
     /// Set the reasoning effort level.
+    ///
+    /// Accepts a [`ReasoningEffort`] or any string; known efforts map to
+    /// named variants and unknown strings pass through verbatim.
     #[must_use]
-    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.default_settings.reasoning_effort = Some(effort);
+    pub fn with_reasoning_effort(mut self, effort: impl Into<ReasoningEffort>) -> Self {
+        self.default_settings.reasoning_effort = Some(effort.into());
         self
     }
 
@@ -939,7 +992,7 @@ impl OpenAIResponsesModel {
             || self.default_settings.reasoning_summary.is_some()
         {
             Some(ReasoningConfig {
-                effort: self.default_settings.reasoning_effort,
+                effort: self.default_settings.reasoning_effort.clone(),
                 summary: self.default_settings.reasoning_summary,
             })
         } else {
@@ -1190,6 +1243,8 @@ impl Model for OpenAIResponsesModel {
 mod tests {
     use super::*;
 
+    /// Every effort variant serializes as its API string; custom values
+    /// pass through verbatim.
     #[test]
     fn test_reasoning_effort_serialization() {
         assert_eq!(
@@ -1204,6 +1259,40 @@ mod tests {
             serde_json::to_string(&ReasoningEffort::High).unwrap(),
             "\"high\""
         );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Minimal).unwrap(),
+            "\"minimal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::XHigh).unwrap(),
+            "\"xhigh\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Max).unwrap(),
+            "\"max\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Custom("ultra".to_string())).unwrap(),
+            "\"ultra\""
+        );
+    }
+
+    /// Known efforts parse case-insensitively; unknown strings become
+    /// `Custom` with the original casing preserved.
+    #[test]
+    fn test_reasoning_effort_parse_maps_known_and_keeps_custom_verbatim() {
+        assert_eq!(ReasoningEffort::parse("xhigh"), ReasoningEffort::XHigh);
+        assert_eq!(ReasoningEffort::parse("MAX"), ReasoningEffort::Max);
+        assert_eq!(ReasoningEffort::from("Minimal"), ReasoningEffort::Minimal);
+        assert_eq!(
+            ReasoningEffort::from(String::from("xhigh")),
+            ReasoningEffort::XHigh
+        );
+        assert_eq!(
+            ReasoningEffort::parse("UltraDeep"),
+            ReasoningEffort::Custom("UltraDeep".to_string())
+        );
+        assert_eq!(ReasoningEffort::XHigh.to_string(), "xhigh");
     }
 
     #[test]
@@ -1239,6 +1328,58 @@ mod tests {
             model.default_settings.reasoning_effort,
             Some(ReasoningEffort::High)
         );
+    }
+
+    /// The effort builder accepts strings, mapping known values to variants.
+    #[test]
+    fn test_model_builder_accepts_effort_strings() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test")
+            .with_reasoning_effort("xhigh")
+            .with_reasoning_effort("max");
+        assert_eq!(
+            model.default_settings.reasoning_effort,
+            Some(ReasoningEffort::Max)
+        );
+    }
+
+    /// A set effort reaches the request body as the reasoning config.
+    #[test]
+    fn test_build_request_serializes_reasoning_effort() {
+        let model =
+            OpenAIResponsesModel::new("gpt-5.1-pro", "sk-test").with_reasoning_effort("max");
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let request = model.build_request(
+            &[req],
+            &ModelSettings::new(),
+            &ModelRequestParameters::new(),
+            false,
+        );
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains(r#""reasoning":{"effort":"max"}"#),
+            "expected max effort in request, got: {json}"
+        );
+    }
+
+    /// The extended-config path applies the configured effort and options
+    /// to the built Responses model, not just the model selection.
+    #[test]
+    fn test_extended_config_applies_effort_to_responses_model() {
+        let config = crate::ExtendedModelConfig::new()
+            .with_api_key("test-key")
+            .with_reasoning_effort("xhigh")
+            .with_base_url("https://custom.api.com/v1");
+
+        let model = crate::openai_responses_model_from_config("gpt-5.1", &config).unwrap();
+
+        assert_eq!(
+            model.default_settings.reasoning_effort,
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(model.base_url, "https://custom.api.com/v1");
     }
 
     #[test]
