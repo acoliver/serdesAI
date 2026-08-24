@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::gate::Verdict;
 use crate::plan::{ApprovalDecision, Plan};
 use crate::role::Role;
 
@@ -147,6 +148,31 @@ pub enum OrchestratorEvent {
         id: AgentId,
         /// Why it failed.
         error: String,
+    },
+    /// A gate round began.
+    GateRoundStart {
+        /// Which round, counting from one.
+        round: u32,
+        /// How many verifiers will vote.
+        verifiers: usize,
+    },
+    /// One verifier cast its vote.
+    GateVerdict {
+        /// The verifier.
+        id: AgentId,
+        /// What it decided.
+        verdict: Verdict,
+    },
+    /// A gate round was tallied.
+    GateResult {
+        /// Which round.
+        round: u32,
+        /// How many accepted.
+        passed: usize,
+        /// How many voted.
+        total: usize,
+        /// Whether quorum was reached.
+        quorum_met: bool,
     },
     /// A run ended.
     RunFinished {

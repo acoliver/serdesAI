@@ -16,6 +16,8 @@
 
 pub mod config;
 pub mod events;
+pub mod evidence;
+pub mod gate;
 pub mod orchestrator;
 pub mod plan;
 pub mod prompts;
@@ -26,7 +28,9 @@ pub mod tools;
 
 pub use config::{GateConfig, OrchestratorConfig, RoleConfig};
 pub use events::{AgentId, DeltaKind, Mode, OrchestratorEvent, ToolPhase};
-pub use orchestrator::{OrchestrationError, Orchestrator};
+pub use evidence::Evidence;
+pub use gate::{Finding, GateOutcome, Severity, Verdict};
+pub use orchestrator::{OrchestrationError, Orchestrator, WorkflowOutcome};
 pub use plan::{ApprovalDecision, AutoApprove, Plan, PlanApprover, PlanStep};
 pub use registry::{AgentRegistry, ModelFactory};
 pub use role::Role;

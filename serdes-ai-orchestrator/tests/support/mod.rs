@@ -87,6 +87,11 @@ pub fn scripted(turns: Vec<Turn>) -> FunctionModel {
 /// Hands each role its own script.
 pub struct ScriptedFactory {
     scripts: Mutex<HashMap<Role, Vec<Turn>>>,
+    /// Per-invocation scripts, consumed in order. Lets several agents of one
+    /// role — the gate's verifiers — behave differently from each other.
+    sequences: Mutex<HashMap<Role, Vec<Vec<Turn>>>>,
+    /// How many times each role has been built.
+    counts: Mutex<HashMap<Role, usize>>,
     /// Roles that were asked for, in order.
     pub requested: Mutex<Vec<Role>>,
 }
@@ -95,6 +100,8 @@ impl ScriptedFactory {
     pub fn new() -> Self {
         Self {
             scripts: Mutex::new(HashMap::new()),
+            sequences: Mutex::new(HashMap::new()),
+            counts: Mutex::new(HashMap::new()),
             requested: Mutex::new(Vec::new()),
         }
     }
@@ -102,6 +109,19 @@ impl ScriptedFactory {
     pub fn script(self, role: Role, turns: Vec<Turn>) -> Self {
         self.scripts.lock().unwrap().insert(role, turns);
         self
+    }
+
+    /// Give successive agents of `role` different scripts.
+    ///
+    /// The last entry repeats once the sequence is exhausted.
+    pub fn script_each(self, role: Role, turns: Vec<Vec<Turn>>) -> Self {
+        self.sequences.lock().unwrap().insert(role, turns);
+        self
+    }
+
+    /// How many agents of `role` were built.
+    pub fn count_for(&self, role: Role) -> usize {
+        self.counts.lock().unwrap().get(&role).copied().unwrap_or(0)
     }
 }
 
@@ -114,6 +134,21 @@ impl Default for ScriptedFactory {
 impl ModelFactory for ScriptedFactory {
     fn model_for(&self, role: Role, _spec: &str) -> Result<Arc<dyn Model>, ModelError> {
         self.requested.lock().unwrap().push(role);
+
+        let nth = {
+            let mut counts = self.counts.lock().unwrap();
+            let entry = counts.entry(role).or_insert(0);
+            let nth = *entry;
+            *entry += 1;
+            nth
+        };
+
+        if let Some(sequence) = self.sequences.lock().unwrap().get(&role) {
+            if !sequence.is_empty() {
+                let turns = sequence[nth.min(sequence.len() - 1)].clone();
+                return Ok(Arc::new(scripted(turns)));
+            }
+        }
 
         let turns = self
             .scripts

@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConfigError, OrchestratorConfig};
 use crate::events::{AgentId, Mode, OrchestratorEvent};
+use crate::evidence;
+use crate::gate::{self, GateOutcome, Verdict};
 use crate::plan::{ApprovalDecision, Plan, PlanApprover};
 use crate::registry::{AgentRegistry, ModelFactory};
 use crate::role::Role;
@@ -54,6 +56,19 @@ pub enum OrchestrationError {
     /// The planner returned a plan with no steps.
     #[error("the planner produced a plan with no steps")]
     EmptyPlan,
+}
+
+/// The result of a Workflow Mode run.
+#[derive(Debug, Clone)]
+pub struct WorkflowOutcome {
+    /// Whether the gate accepted the work.
+    pub accepted: bool,
+    /// How many orchestrate-then-verify rounds were run.
+    pub rounds: u32,
+    /// The orchestrator's closing summary from the last round.
+    pub summary: String,
+    /// The final gate tally, if the gate ran.
+    pub gate: Option<GateOutcome>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +148,193 @@ impl Orchestrator {
         });
 
         result
+    }
+
+    /// Run `task` in Workflow Mode: plan, approval, execution, then the gate.
+    ///
+    /// The orchestrator is sent back around with the verifiers' dissent until
+    /// quorum is reached or `gate.max_rounds` is exhausted. Exhausting the rounds
+    /// is reported with the accumulated findings rather than as a bare failure —
+    /// the user needs to see what the verifiers objected to.
+    pub async fn run_workflow(
+        &self,
+        task: &str,
+        approver: &dyn PlanApprover,
+        cancel: CancellationToken,
+    ) -> Result<WorkflowOutcome, OrchestrationError> {
+        let _ = self.events.send(OrchestratorEvent::ModeStarted {
+            mode: Mode::Workflow,
+            task: task.to_string(),
+        });
+
+        let result = self.workflow_inner(task, approver, &cancel).await;
+
+        let _ = self.events.send(OrchestratorEvent::RunFinished {
+            success: matches!(&result, Ok(o) if o.accepted),
+            summary: match &result {
+                Ok(outcome) => outcome.summary.clone(),
+                Err(e) => e.to_string(),
+            },
+        });
+
+        result
+    }
+
+    async fn workflow_inner(
+        &self,
+        task: &str,
+        approver: &dyn PlanApprover,
+        cancel: &CancellationToken,
+    ) -> Result<WorkflowOutcome, OrchestrationError> {
+        let plan = self.plan(task, approver, cancel).await?;
+        let gate_config = self.registry.config().gate.clone();
+
+        let mut feedback: Option<String> = None;
+        let mut last_outcome: Option<GateOutcome> = None;
+        let mut summary = String::new();
+
+        for round in 1..=gate_config.max_rounds {
+            if cancel.is_cancelled() {
+                return Err(OrchestrationError::Run(RunError::Cancelled {
+                    role: Role::Orchestrator,
+                }));
+            }
+
+            let prompt = match &feedback {
+                None => {
+                    format!("Carry out this approved plan.\n\n{plan}\n\nOriginal request: {task}")
+                }
+                Some(notes) => format!(
+                    "Your previous attempt did not pass verification.\n\n{notes}\n\n\
+                     The approved plan is unchanged:\n\n{plan}\n\nOriginal request: {task}"
+                ),
+            };
+
+            let id = AgentId::new();
+            summary = self.run_orchestrator(id, prompt, cancel).await?;
+
+            let outcome = self.run_gate(&plan, round, cancel).await?;
+
+            let _ = self.events.send(OrchestratorEvent::GateResult {
+                round,
+                passed: outcome.passed,
+                total: outcome.total(),
+                quorum_met: outcome.quorum_met,
+            });
+
+            if outcome.quorum_met {
+                return Ok(WorkflowOutcome {
+                    accepted: true,
+                    rounds: round,
+                    summary,
+                    gate: Some(outcome),
+                });
+            }
+
+            feedback = Some(outcome.feedback());
+            last_outcome = Some(outcome);
+        }
+
+        Ok(WorkflowOutcome {
+            accepted: false,
+            rounds: gate_config.max_rounds,
+            summary,
+            gate: last_outcome,
+        })
+    }
+
+    /// Run one gate round: gather evidence once, then vote on it.
+    async fn run_gate(
+        &self,
+        plan: &Plan,
+        round: u32,
+        cancel: &CancellationToken,
+    ) -> Result<GateOutcome, OrchestrationError> {
+        let config = self.registry.config();
+        let verifier_count = config.gate.verifiers;
+
+        let _ = self.events.send(OrchestratorEvent::GateRoundStart {
+            round,
+            verifiers: verifier_count,
+        });
+
+        // Gathered once and shared: every verifier must judge the same tree, or
+        // they are not voting on the same thing.
+        let evidence = evidence::collect(&config.root, config.gate.test_command.as_deref()).await;
+
+        let votes = (0..verifier_count).map(|index| {
+            let prompt = gate::verifier_prompt(plan, &evidence, index);
+            async move { self.run_verifier(prompt, cancel).await }
+        });
+
+        // Verifiers are independent, so they run concurrently.
+        let results = futures::future::join_all(votes).await;
+
+        let verdicts: Vec<Verdict> = results
+            .into_iter()
+            .filter_map(|r| match r {
+                Ok(verdict) => Some(verdict),
+                Err(e) => {
+                    tracing::warn!("a verifier failed to report: {e}");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(GateOutcome::tally(verdicts, verifier_count))
+    }
+
+    /// Run one verifier and collect its verdict.
+    async fn run_verifier(
+        &self,
+        prompt: String,
+        cancel: &CancellationToken,
+    ) -> Result<Verdict, OrchestrationError> {
+        if cancel.is_cancelled() {
+            return Err(OrchestrationError::Run(RunError::Cancelled {
+                role: Role::Verifier,
+            }));
+        }
+
+        let builder =
+            self.registry
+                .builder_for(Role::Verifier)
+                .map_err(|e| OrchestrationError::Build {
+                    role: Role::Verifier,
+                    message: e.to_string(),
+                })?;
+
+        // A verifier reads and runs tests but cannot write: it must not be able
+        // to repair the work it is judging.
+        let agent = tools::register_for_role(
+            builder,
+            Role::Verifier,
+            self.registry.tool_context().clone(),
+        )
+        .output_tool::<Verdict>(gate::VERDICT_TOOL, Verdict::schema())
+        .build();
+
+        let id = AgentId::new();
+        let _ = self.events.send(OrchestratorEvent::AgentSpawned {
+            id,
+            parent: None,
+            role: Role::Verifier,
+            task: "verify the work against the plan".to_string(),
+        });
+
+        let result = agent.run(prompt, ()).await.map_err(|e| {
+            OrchestrationError::Run(RunError::Agent {
+                role: Role::Verifier,
+                message: e.to_string(),
+            })
+        })?;
+
+        let _ = self.events.send(OrchestratorEvent::GateVerdict {
+            id,
+            verdict: result.output.clone(),
+        });
+
+        Ok(result.output)
     }
 
     /// Draft a plan for `task` and put it to `approver`.
