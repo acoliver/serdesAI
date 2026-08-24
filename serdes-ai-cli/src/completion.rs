@@ -2,7 +2,7 @@
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
     ExecutableCommand, QueueableCommand,
@@ -107,7 +107,58 @@ impl CompletingInput {
             show_completions: false,
         }
     }
+}
 
+/// What a key press did to the input line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputOutcome {
+    /// The line was submitted.
+    Submitted(String),
+    /// The user cancelled the current line (Ctrl-C).
+    Cancelled,
+    /// The user asked to end the session (Ctrl-D on an empty line).
+    EndOfInput,
+}
+
+impl CompletingInput {
+    /// Handle a key with its modifiers.
+    ///
+    /// Raw mode is enabled while reading, so Ctrl-C and Ctrl-D arrive here as
+    /// ordinary key events rather than as signals. Without handling them
+    /// explicitly they fall through to the `Char(c)` arm and get typed into the
+    /// buffer — Ctrl-C would insert a literal 'c' — despite the startup banner
+    /// telling the user both keys work.
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> Option<InputOutcome> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                // Ctrl-C abandons the line; on an already-empty line it means
+                // "I want out", matching what every other terminal tool does.
+                KeyCode::Char('c') => {
+                    if self.buffer.is_empty() {
+                        return Some(InputOutcome::Cancelled);
+                    }
+                    self.buffer.clear();
+                    self.cursor_pos = 0;
+                    self.show_completions = false;
+                    self.completions.clear();
+                    return None;
+                }
+                // Ctrl-D on an empty line is the conventional clean exit.
+                KeyCode::Char('d') => {
+                    if self.buffer.is_empty() {
+                        return Some(InputOutcome::EndOfInput);
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+
+        self.handle_key(key.code).map(InputOutcome::Submitted)
+    }
+}
+
+impl CompletingInput {
     /// Handle key event, returns Some(result) if input complete
     pub fn handle_key(&mut self, key: KeyCode) -> Option<String> {
         match key {
@@ -230,7 +281,7 @@ impl Default for CompletingInput {
 }
 
 /// Read input with live completion
-pub fn read_input_with_completion() -> io::Result<String> {
+pub fn read_input_with_completion() -> io::Result<Option<String>> {
     let mut stdout = io::stdout();
     let mut input = CompletingInput::new();
 
@@ -242,11 +293,32 @@ pub fn read_input_with_completion() -> io::Result<String> {
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                if let Some(result) = input.handle_key(key.code) {
-                    terminal::disable_raw_mode()?;
-                    stdout.queue(Print("\n"))?;
-                    stdout.flush()?;
-                    return Ok(result);
+                match input.handle_key_event(key) {
+                    Some(InputOutcome::Submitted(result)) => {
+                        terminal::disable_raw_mode()?;
+                        stdout.queue(Print("\n"))?;
+                        stdout.flush()?;
+                        return Ok(Some(result));
+                    }
+                    // Cancelling one line is not the end of the session: the
+                    // caller prints a notice and prompts again.
+                    Some(InputOutcome::Cancelled) => {
+                        terminal::disable_raw_mode()?;
+                        stdout.queue(Print("\n"))?;
+                        stdout.flush()?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "input cancelled by the user",
+                        ));
+                    }
+                    // End of input means the session is over.
+                    Some(InputOutcome::EndOfInput) => {
+                        terminal::disable_raw_mode()?;
+                        stdout.queue(Print("\n"))?;
+                        stdout.flush()?;
+                        return Ok(None);
+                    }
+                    None => {}
                 }
             }
         }

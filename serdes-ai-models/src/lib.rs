@@ -162,6 +162,7 @@ pub use antigravity::AntigravityModel;
 pub mod mock;
 /// Provider-neutral same-model retry orchestration.
 pub mod retry;
+pub mod scripted;
 
 // Re-exports
 pub use error::{ModelError, ModelResult, ProviderErrorKind};

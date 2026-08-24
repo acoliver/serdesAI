@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serdes_ai_agent::ModelConfig;
+use serdes_ai_models::scripted::{Script, ScriptedModel};
 use serdes_ai_models::Model;
 use tracing::{debug, info, warn};
 
@@ -24,6 +25,12 @@ pub async fn create_model_from_spec(spec: &str) -> Result<Arc<dyn Model>> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Err(anyhow!("model spec cannot be empty"));
+    }
+
+    // A scripted model takes precedence over every provider, so UI tests and
+    // reproductions run the real application with no network involved.
+    if let Some(model) = scripted_model_from_env()? {
+        return Ok(model);
     }
 
     let (provider, model_name) = if spec.contains(':') {
@@ -57,6 +64,34 @@ pub async fn create_model_from_spec(spec: &str) -> Result<Arc<dyn Model>> {
 
     debug!("Model created successfully from spec '{}'.", spec);
     Ok(model)
+}
+
+/// Environment variable pointing at a scripted-model fixture.
+pub const MOCK_ENV: &str = "SERDES_AI_MOCK";
+
+/// Build a scripted model when [`MOCK_ENV`] is set.
+///
+/// Returns `Ok(None)` when unset, so normal runs are untouched. A set-but-broken
+/// value is an error rather than a silent fallback to a real provider: a test
+/// that quietly started calling the network would be worse than one that fails.
+fn scripted_model_from_env() -> Result<Option<Arc<dyn Model>>> {
+    let Some(path) = std::env::var_os(MOCK_ENV) else {
+        return Ok(None);
+    };
+
+    let path = std::path::PathBuf::from(path);
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+
+    let script = Script::from_file(&path)
+        .map_err(|e| anyhow!("{MOCK_ENV} is set but the script could not be loaded: {e}"))?;
+
+    warn!(
+        "{MOCK_ENV} is set: replaying {} instead of calling a provider",
+        path.display()
+    );
+    Ok(Some(Arc::new(ScriptedModel::new(script))))
 }
 
 /// Load API key from environment or config file.

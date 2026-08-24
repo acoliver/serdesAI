@@ -65,3 +65,9 @@ rpassword = "7.3"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+# UI testing: a real pseudo-terminal plus an ANSI parser, so tests assert on
+# what a user would actually see rather than on raw escape sequences.
+portable-pty = "0.9"
+vt100 = "0.15"
+tempfile = "3.14"
+insta = "1.41"

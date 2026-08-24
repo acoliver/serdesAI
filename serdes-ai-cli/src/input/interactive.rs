@@ -18,8 +18,7 @@ pub async fn get_input_with_completion(
             io::stdout().flush()?;
         }
 
-        let result = completion::read_input_with_completion()?;
-        Ok(Some(result))
+        completion::read_input_with_completion()
     })
     .await
     .map_err(|e| io::Error::other(format!("input task failed: {e}")))?
