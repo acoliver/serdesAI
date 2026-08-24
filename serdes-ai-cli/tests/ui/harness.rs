@@ -11,7 +11,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -21,6 +21,35 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the screen is re-checked while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// How many applications may run at once, across every UI suite.
+///
+/// Each test spawns a real process on its own pseudo-terminal. Cargo runs the
+/// suites in parallel, so without a bound the machine ends up with dozens of
+/// debug-build processes competing for PTYs and CPU, and startup alone can
+/// exceed the assertion timeout — a failure that looks like a bug in the
+/// application but is only contention.
+const MAX_CONCURRENT_APPS: usize = 8;
+
+/// The permits held by running applications.
+static RUNNING: Mutex<usize> = Mutex::new(0);
+static SLOT_FREED: Condvar = Condvar::new();
+
+/// Wait for a slot to run an application in.
+fn acquire_slot() {
+    let mut running = RUNNING.lock().expect("slot lock poisoned");
+    while *running >= MAX_CONCURRENT_APPS {
+        running = SLOT_FREED.wait(running).expect("slot lock poisoned");
+    }
+    *running += 1;
+}
+
+/// Give a slot back.
+fn release_slot() {
+    let mut running = RUNNING.lock().expect("slot lock poisoned");
+    *running = running.saturating_sub(1);
+    SLOT_FREED.notify_one();
+}
 
 /// The tail of the interactive prompt, `"(model) >>> "`.
 ///
@@ -239,6 +268,9 @@ impl TerminalApp {
         rows: u16,
         fixture: Option<tempfile::TempDir>,
     ) -> anyhow::Result<Self> {
+        // Held until this application is dropped.
+        acquire_slot();
+
         let pty = NativePtySystem::default().openpty(PtySize {
             rows,
             cols,
@@ -512,6 +544,7 @@ impl Drop for TerminalApp {
         // Never leave a child running after a failed assertion.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        release_slot();
     }
 }
 

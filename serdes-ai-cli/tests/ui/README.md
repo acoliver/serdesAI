@@ -69,6 +69,12 @@ see whether it begins a sequence — so sending one can swallow the characters
 typed straight after it. An early version of the command sweep did this and
 reported a different set of "broken" commands on every run.
 
+**Concurrency is bounded.** Each test spawns a real process on its own
+pseudo-terminal, and cargo runs the suites in parallel. Without a cap the
+machine ends up with dozens of debug-build processes competing for PTYs, and
+startup alone can exceed the assertion timeout — a failure that looks like an
+application bug but is only contention. At most eight applications run at once.
+
 **Failures show the screen.** Every assertion prints the rendered screen on
 failure, because "expected X, not found" is useless when the question is what
 the interface actually did.
@@ -109,8 +115,12 @@ This is a wiring gap rather than a rendering bug — the display code exists and
 looks reasonable. Connecting the tools to the bus would both improve the output
 and make those variants testable.
 
-**The eight screens under `src/tui/`** — the agent, model and colour pickers, the
-model-settings screen and the tutorial — take over the terminal and wait for
-input. They are reachable but need their own test shape: a spawn per screen, a
-scripted key sequence, and an assertion on the resulting configuration rather
-than on the transcript.
+**Two of the eight modules under `src/tui/` cannot be opened.** `agent_picker`
+and `model_picker` are not referenced anywhere outside that directory, so no
+command reaches them. The other five — the colours menu, model settings, the
+diff menu, the autosave menu and the tutorial — are covered in `ui_screens.rs`.
+
+Those tests assert that the session still works *after* a screen closes, not
+just that it drew. A screen that leaves the terminal in raw mode or in the
+alternate buffer strands the user, and a test that only checked rendering would
+pass straight through that.
