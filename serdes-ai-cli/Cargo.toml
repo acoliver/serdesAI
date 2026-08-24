@@ -25,6 +25,7 @@ serdes-ai-providers = { workspace = true }
 serdes-ai-tools = { workspace = true }
 serdes-ai-output = { workspace = true }
 serdes-ai-streaming = { workspace = true }
+serdes-ai-orchestrator = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }

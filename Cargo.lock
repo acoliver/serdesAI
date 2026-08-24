@@ -4162,6 +4162,7 @@ dependencies = [
  "serdes-ai-agent",
  "serdes-ai-core",
  "serdes-ai-models",
+ "serdes-ai-orchestrator",
  "serdes-ai-output",
  "serdes-ai-providers",
  "serdes-ai-streaming",

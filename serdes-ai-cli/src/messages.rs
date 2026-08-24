@@ -301,6 +301,15 @@ pub struct SkillActivateMessage {
 pub struct SubAgentInvocationMessage {
     #[serde(flatten)]
     pub base: BaseMessage,
+    /// Identifies this agent instance.
+    ///
+    /// A role name alone cannot tell three concurrent verifiers apart, so
+    /// display state is keyed off this rather than off `agent_name`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// The agent that spawned this one, if any.
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub agent_name: String,
     pub prompt: String,
 }
@@ -309,6 +318,9 @@ pub struct SubAgentInvocationMessage {
 pub struct SubAgentResponseMessage {
     #[serde(flatten)]
     pub base: BaseMessage,
+    /// Identifies which agent instance replied.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     pub agent_name: String,
     pub response: String,
 }
@@ -326,6 +338,9 @@ pub enum SubAgentStatus {
 pub struct SubAgentStatusMessage {
     #[serde(flatten)]
     pub base: BaseMessage,
+    /// Identifies which agent instance changed state.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     pub agent_name: String,
     pub status: SubAgentStatus,
     pub progress: Option<f32>,

@@ -2,6 +2,7 @@ pub mod bus;
 pub mod commands;
 pub mod config;
 pub mod messages;
+pub mod orchestration;
 pub mod renderer;
 pub mod streaming;
 pub mod tui;
