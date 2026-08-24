@@ -90,3 +90,27 @@ Both are fixed and held in place by tests. Note that several apparent findings
 turned out to be defects in this harness rather than in the CLI — a test that
 names a different culprit on each run is worse than no test, so treat an
 intermittent failure here as a bug in the harness until proven otherwise.
+
+## Not covered, and why
+
+**Twelve of the twenty-six `AnyMessage` variants have no producer.** `Diff`,
+`FileContent`, `FileListing`, `GrepResult`, `AgentReasoning`, `Divider`,
+`StatusPanel`, `SpinnerControl`, `SkillList`, `SkillActivate`, `VersionCheck` and
+`UniversalConstructor` are all rendered by `renderer/v2.rs` and emitted by
+nothing, so no test can reach them through the real binary.
+
+The cause is that `src/tools/mod.rs` never touches the bus: `read_file`,
+`list_files` and `grep` return their results as plain tool text rather than
+emitting the structured messages the renderer knows how to draw. `src/shell.rs`
+does emit `ShellStart`/`ShellLine`/`ShellOutput`, but nothing calls
+`execute_shell_command`, so that path is unreachable too.
+
+This is a wiring gap rather than a rendering bug — the display code exists and
+looks reasonable. Connecting the tools to the bus would both improve the output
+and make those variants testable.
+
+**The eight screens under `src/tui/`** — the agent, model and colour pickers, the
+model-settings screen and the tutorial — take over the terminal and wait for
+input. They are reachable but need their own test shape: a spawn per screen, a
+scripted key sequence, and an assertion on the resulting configuration rather
+than on the transcript.
