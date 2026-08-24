@@ -8,7 +8,7 @@ use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
 use crate::profile::{anthropic_claude_profile, ModelProfile};
 use async_trait::async_trait;
 use base64::Engine;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::Client;
 use serdes_ai_core::messages::{
     DocumentContent, ImageContent, RetryPromptPart, TextPart, ThinkingPart, ToolCallArgs,
@@ -19,10 +19,56 @@ use serdes_ai_core::{
     RequestUsage,
 };
 use serdes_ai_tools::ToolDefinition;
+use std::fmt;
 use std::time::Duration;
 
-/// Anthropic Claude model.
+/// The `anthropic-beta` feature-flag header. Multi-valued by design.
+const ANTHROPIC_BETA: HeaderName = HeaderName::from_static("anthropic-beta");
+
+/// Placeholder rendered by `Debug` in place of a secret.
+const REDACTED: &str = "<redacted>";
+
+/// Convert a runtime string into a [`HeaderValue`].
+///
+/// The error names the header but never its value - the value may be a secret.
+/// Embedding `e` is safe: `InvalidHeaderValue`'s `Display` is a constant string
+/// that does not echo the input.
+fn parse_header_value(name: &str, value: &str) -> Result<HeaderValue, ModelError> {
+    HeaderValue::from_str(value)
+        .map_err(|e| ModelError::configuration(format!("Invalid value for header '{name}': {e}")))
+}
+
+/// How a caller-supplied header is merged into the request headers.
 #[derive(Debug, Clone)]
+enum HeaderMergeMode {
+    /// Replace every existing value of that header name.
+    Set,
+    /// Add a value, keeping any existing ones.
+    Append,
+}
+
+/// One caller-supplied header. Named fields rather than a tuple: two `String`
+/// slots side by side make a name/value transposition invisible to the compiler.
+#[derive(Clone)]
+struct ExtraHeader {
+    name: String,
+    value: String,
+    mode: HeaderMergeMode,
+}
+
+/// Renders the NAME (diagnostic) but redacts the VALUE, which may be a secret.
+impl fmt::Debug for ExtraHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtraHeader")
+            .field("name", &self.name)
+            .field("value", &REDACTED)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+/// Anthropic Claude model.
+#[derive(Clone)]
 pub struct AnthropicModel {
     model_name: String,
     client: Client,
@@ -38,6 +84,29 @@ pub struct AnthropicModel {
     enable_caching: bool,
     /// Anthropic API version.
     api_version: String,
+    /// Caller-supplied headers, in call order.
+    extra_headers: Vec<ExtraHeader>,
+}
+
+/// Hand-written so that secrets never reach a log or a panic message: the API
+/// key and every caller header VALUE are redacted. Header NAMES stay visible -
+/// they are diagnostic, not secret. Same discipline the error paths follow.
+impl fmt::Debug for AnthropicModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicModel")
+            .field("model_name", &self.model_name)
+            .field("client", &self.client)
+            .field("api_key", &REDACTED)
+            .field("base_url", &self.base_url)
+            .field("profile", &self.profile)
+            .field("default_timeout", &self.default_timeout)
+            .field("enable_thinking", &self.enable_thinking)
+            .field("thinking_budget", &self.thinking_budget)
+            .field("enable_caching", &self.enable_caching)
+            .field("api_version", &self.api_version)
+            .field("extra_headers", &self.extra_headers)
+            .finish()
+    }
 }
 
 impl AnthropicModel {
@@ -57,6 +126,7 @@ impl AnthropicModel {
             thinking_budget: None,
             enable_caching: false,
             api_version: "2023-06-01".to_string(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -118,6 +188,141 @@ impl AnthropicModel {
     pub fn with_api_version(mut self, version: impl Into<String>) -> Self {
         self.api_version = version.into();
         self
+    }
+
+    /// Set a custom HTTP header on every request made by this model.
+    ///
+    /// Setting a header that the library also sets (`x-api-key`,
+    /// `anthropic-version`, `Content-Type`, `anthropic-beta`) REPLACES the
+    /// library's value. There is no protected header: the caller owns the
+    /// request. Calling this twice with the same name keeps the LAST value.
+    ///
+    /// Use [`with_appended_header`](Self::with_appended_header) instead for
+    /// multi-valued headers you want to ADD to rather than replace.
+    ///
+    /// An invalid header name or value is reported as a
+    /// [`ModelError::Configuration`] when the request is built, since this
+    /// builder cannot fail.
+    ///
+    /// # Security
+    ///
+    /// The name and the value are treated as TRUSTED caller configuration, not
+    /// as end-user input. No header is protected, so forwarding user-controlled
+    /// data into this method would let that user overwrite `x-api-key` and send
+    /// requests under a credential of their choosing. Validate or allow-list
+    /// anything that did not originate in your own configuration.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push(ExtraHeader {
+            name: name.into(),
+            value: value.into(),
+            mode: HeaderMergeMode::Set,
+        });
+        self
+    }
+
+    /// Append a custom HTTP header value, keeping any existing values of the
+    /// same name (including the library's own).
+    ///
+    /// This is for multi-valued headers - most notably `anthropic-beta`, which
+    /// carries a list of feature flags. Appending `anthropic-beta` therefore
+    /// ADDS a flag while leaving the library's own flags (extended thinking,
+    /// prompt caching) in place.
+    ///
+    /// An invalid header name or value is reported as a
+    /// [`ModelError::Configuration`] when the request is built, since this
+    /// builder cannot fail.
+    ///
+    /// # Wrong for single-valued headers
+    ///
+    /// Appending a header that may carry only one value - `x-api-key` above
+    /// all, but equally `anthropic-version` or `Content-Type` - does NOT
+    /// override it. It sends the header TWICE, and which of the two values the
+    /// server honors is server-dependent: a caller who appended `x-api-key`
+    /// intending to swap credentials may silently keep authenticating with the
+    /// old key. Use [`with_header`](Self::with_header) to override.
+    ///
+    /// # Security
+    ///
+    /// The name and the value are treated as TRUSTED caller configuration, not
+    /// as end-user input. No header is protected, so forwarding user-controlled
+    /// data into this method would let that user attach a second `x-api-key` to
+    /// every request. Validate or allow-list anything that did not originate in
+    /// your own configuration.
+    #[must_use]
+    pub fn with_appended_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.extra_headers.push(ExtraHeader {
+            name: name.into(),
+            value: value.into(),
+            mode: HeaderMergeMode::Append,
+        });
+        self
+    }
+
+    /// Build the headers for a request - the single construction site shared by
+    /// the streaming and non-streaming paths.
+    ///
+    /// Error messages name the offending header but NEVER its value: a header
+    /// value may be a secret, and for `x-api-key` it always is. The underlying
+    /// `http` errors are safe to embed - their `Display` never echoes the input.
+    fn build_headers(&self) -> Result<HeaderMap, ModelError> {
+        let mut headers = HeaderMap::new();
+
+        let mut api_key = parse_header_value("x-api-key", &self.api_key)?;
+        // Keeps the credential out of the HPACK dynamic table on HTTP/2.
+        // Purely a transport hint: the value sent on the wire is unchanged.
+        api_key.set_sensitive(true);
+        headers.insert(HeaderName::from_static("x-api-key"), api_key);
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            parse_header_value("anthropic-version", &self.api_version)?,
+        );
+        // `CONTENT_TYPE`, not `HeaderName::from_static("Content-Type")`, which
+        // would panic on the uppercase bytes.
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        // Beta flags are multi-valued: the second one appends so that enabling
+        // both thinking and caching still sends both.
+        if self.enable_thinking {
+            headers.append(
+                ANTHROPIC_BETA,
+                HeaderValue::from_static("interleaved-thinking-2025-05-14"),
+            );
+        }
+        if self.enable_caching {
+            headers.append(
+                ANTHROPIC_BETA,
+                HeaderValue::from_static("prompt-caching-2024-07-31"),
+            );
+        }
+
+        for ExtraHeader { name, value, mode } in &self.extra_headers {
+            // `escape_debug` on the NAME: this message reaches `error!()` and
+            // `AgentStreamEvent::Error`, so a name carrying control characters
+            // must not be able to forge a log line. The VALUE is never
+            // interpolated at all - it may be a secret.
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                ModelError::configuration(format!(
+                    "Invalid header name '{}': {e}",
+                    name.escape_debug()
+                ))
+            })?;
+            let header_value = parse_header_value(name, value)?;
+            match mode {
+                HeaderMergeMode::Set => {
+                    headers.insert(header_name, header_value);
+                }
+                HeaderMergeMode::Append => {
+                    headers.append(header_name, header_value);
+                }
+            }
+        }
+
+        Ok(headers)
     }
 
     /// Get the appropriate profile for a model name.
@@ -595,23 +800,11 @@ impl Model for AnthropicModel {
 
         let timeout = settings.timeout.unwrap_or(self.default_timeout);
 
-        let mut request = self
+        let request = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.api_version)
-            .header("Content-Type", "application/json")
+            .headers(self.build_headers()?)
             .timeout(timeout);
-
-        // Add beta header for extended thinking
-        if self.enable_thinking {
-            request = request.header("anthropic-beta", "interleaved-thinking-2025-05-14");
-        }
-
-        // Add beta header for prompt caching
-        if self.enable_caching {
-            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
-        }
 
         let response = request.json(&body).send().await?;
 
@@ -640,21 +833,11 @@ impl Model for AnthropicModel {
 
         let timeout = settings.timeout.unwrap_or(self.default_timeout);
 
-        let mut request = self
+        let request = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.api_version)
-            .header("Content-Type", "application/json")
+            .headers(self.build_headers()?)
             .timeout(timeout);
-
-        if self.enable_thinking {
-            request = request.header("anthropic-beta", "interleaved-thinking-2025-05-14");
-        }
-
-        if self.enable_caching {
-            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
-        }
 
         let response = request.json(&body).send().await?;
 
@@ -727,10 +910,8 @@ mod tests {
                             "application/json",
                         )
                 } else {
-                    ResponseTemplate::new(200).set_body_raw(
-                        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-test","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#,
-                        "application/json",
-                    )
+                    ResponseTemplate::new(200)
+                        .set_body_raw(MESSAGES_SUCCESS_BODY, "application/json")
                 }
             }
         }
@@ -946,5 +1127,429 @@ mod tests {
         assert!(matches!(&result.parts[0], ModelResponsePart::Text(_)));
         assert!(matches!(&result.parts[1], ModelResponsePart::ToolCall(_)));
         assert!(matches!(result.finish_reason, Some(FinishReason::ToolCall)));
+    }
+
+    // -----------------------------------------------------------------
+    // Custom headers - AC1..AC10 of
+    // specs/20260803_feat_anthropic_with_header/TEST_PLAN.md
+    // -----------------------------------------------------------------
+
+    const MESSAGES_SUCCESS_BODY: &str = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-test","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    /// Mock server answering `POST /v1/messages` with a minimal success body.
+    async fn messages_mock_server() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/messages"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(MESSAGES_SUCCESS_BODY, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Headers of the single request the mock server received.
+    async fn only_received_headers(server: &wiremock::MockServer) -> HeaderMap {
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server records requests");
+        assert_eq!(requests.len(), 1, "expected exactly one captured request");
+        requests[0].headers.clone()
+    }
+
+    /// All values sent for `name`, in order. Empty when the header is absent.
+    ///
+    /// A non-UTF-8 value renders as a placeholder rather than panicking, so a
+    /// future test with a latin-1 value fails on its own assertion instead of
+    /// dying inside this helper.
+    fn header_values(headers: &HeaderMap, name: &str) -> Vec<String> {
+        headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("<non-utf8>").to_owned())
+            .collect()
+    }
+
+    /// Drive one non-streaming request and return the headers actually sent.
+    async fn headers_of_non_streaming_request(model: AnthropicModel) -> HeaderMap {
+        let server = messages_mock_server().await;
+        model
+            .with_base_url(server.uri())
+            .request(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .expect("mocked request succeeds");
+        only_received_headers(&server).await
+    }
+
+    /// Drive one streaming request and return the headers actually sent.
+    ///
+    /// `request_stream` only checks the status before handing back the parser,
+    /// so the body is never polled here - the request is already captured.
+    async fn headers_of_streaming_request(model: AnthropicModel) -> HeaderMap {
+        let server = messages_mock_server().await;
+        let _stream = model
+            .with_base_url(server.uri())
+            .request_stream(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .expect("mocked stream request succeeds");
+        only_received_headers(&server).await
+    }
+
+    /// AC6 - default behavior: the three fixed headers, and no `anthropic-beta`.
+    /// Transport headers added by reqwest (host, accept, content-length) are
+    /// deliberately not asserted on.
+    #[tokio::test]
+    async fn no_custom_headers_leaves_request_unchanged() {
+        let headers =
+            headers_of_non_streaming_request(AnthropicModel::new("claude-test", "sk-test")).await;
+
+        assert_eq!(header_values(&headers, "x-api-key"), vec!["sk-test"]);
+        assert_eq!(
+            header_values(&headers, "anthropic-version"),
+            vec!["2023-06-01"]
+        );
+        assert_eq!(
+            header_values(&headers, "content-type"),
+            vec!["application/json"]
+        );
+        assert!(
+            header_values(&headers, "anthropic-beta").is_empty(),
+            "no beta flag must be sent by default"
+        );
+    }
+
+    /// AC9 - regression guard for the `build_headers()` consolidation: thinking
+    /// and caching must BOTH still emit their `anthropic-beta` flag.
+    #[tokio::test]
+    async fn thinking_and_caching_still_send_both_beta_flags() {
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_thinking(Some(1024))
+            .with_caching();
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(
+            header_values(&headers, "anthropic-beta"),
+            vec![
+                "interleaved-thinking-2025-05-14",
+                "prompt-caching-2024-07-31"
+            ]
+        );
+    }
+
+    /// AC1 - a custom header reaches the non-streaming request.
+    #[tokio::test]
+    async fn with_header_appears_in_non_streaming_request() {
+        let model = AnthropicModel::new("claude-test", "sk-test").with_header("x-client", "silix");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "x-client"), vec!["silix"]);
+    }
+
+    /// AC2 - and the streaming request, which is the consumer's normal case.
+    #[tokio::test]
+    async fn with_header_appears_in_streaming_request() {
+        let model = AnthropicModel::new("claude-test", "sk-test").with_header("x-client", "silix");
+
+        let headers = headers_of_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "x-client"), vec!["silix"]);
+    }
+
+    /// AC3 - no header is protected: `x-api-key` is replaced, and sent EXACTLY
+    /// once. The count matters - appending would send it twice and only the
+    /// count catches that.
+    #[tokio::test]
+    async fn with_header_overwrites_api_key_exactly_once() {
+        let model =
+            AnthropicModel::new("claude-test", "sk-original").with_header("x-api-key", "override");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "x-api-key"), vec!["override"]);
+    }
+
+    /// AC4 - `with_header` means SET: it replaces the library's own
+    /// `anthropic-beta` flags. No special case, no inferred intent.
+    #[tokio::test]
+    async fn with_header_replaces_anthropic_beta() {
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_caching()
+            .with_header("anthropic-beta", "only-mine");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "anthropic-beta"), vec!["only-mine"]);
+    }
+
+    /// AC5 - `with_appended_header` means ADD: the library's flags survive.
+    #[tokio::test]
+    async fn with_appended_header_adds_to_anthropic_beta() {
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_caching()
+            .with_appended_header("anthropic-beta", "my-flag");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(
+            header_values(&headers, "anthropic-beta"),
+            vec!["prompt-caching-2024-07-31", "my-flag"]
+        );
+    }
+
+    /// AC7 - setting the same header twice keeps the last value only.
+    #[tokio::test]
+    async fn with_header_last_value_wins() {
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_header("a", "1")
+            .with_header("a", "2");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "a"), vec!["2"]);
+    }
+
+    /// AC10 - the ORDER of set/append calls is honored, in both directions.
+    #[tokio::test]
+    async fn set_and_append_order_is_honored() {
+        let append_then_set = AnthropicModel::new("claude-test", "sk-test")
+            .with_appended_header("x-m", "1")
+            .with_header("x-m", "2");
+        let headers = headers_of_non_streaming_request(append_then_set).await;
+        assert_eq!(
+            header_values(&headers, "x-m"),
+            vec!["2"],
+            "a later set must replace the earlier appended value"
+        );
+
+        let set_then_append = AnthropicModel::new("claude-test", "sk-test")
+            .with_header("x-m", "2")
+            .with_appended_header("x-m", "1");
+        let headers = headers_of_non_streaming_request(set_then_append).await;
+        assert_eq!(
+            header_values(&headers, "x-m"),
+            vec!["2", "1"],
+            "a later append must keep the earlier set value"
+        );
+    }
+
+    /// AC8 - an invalid header NAME is a real configuration error naming the
+    /// offending header, not a silent skip.
+    #[test]
+    fn invalid_header_name_is_configuration_error() {
+        let model = AnthropicModel::new("claude-test", "sk-test").with_header("bad name", "v");
+
+        let error = model.build_headers().expect_err("invalid name must error");
+
+        assert!(
+            matches!(error, ModelError::Configuration(_)),
+            "expected a Configuration error, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("bad name"),
+            "message must name the offending header, got {error}"
+        );
+    }
+
+    /// AC8b - an invalid header VALUE errors, names the header, and must NOT
+    /// echo the value: a custom header may carry a secret.
+    #[test]
+    fn invalid_header_value_error_does_not_leak_value() {
+        let model =
+            AnthropicModel::new("claude-test", "sk-test").with_header("x-tenant", "secret\nvalue");
+
+        let error = model.build_headers().expect_err("invalid value must error");
+
+        assert!(
+            matches!(error, ModelError::Configuration(_)),
+            "expected a Configuration error, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("x-tenant"),
+            "message must name the offending header, got {message}"
+        );
+        assert!(
+            !message.contains("secret"),
+            "message must never echo the header value, got {message}"
+        );
+    }
+
+    /// AC8b (append path) - the same guarantees hold for appended headers.
+    #[test]
+    fn invalid_appended_header_value_does_not_leak_value() {
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_appended_header("x-tenant", "secret\nvalue");
+
+        let error = model.build_headers().expect_err("invalid value must error");
+
+        assert!(matches!(error, ModelError::Configuration(_)));
+        let message = error.to_string();
+        assert!(message.contains("x-tenant"));
+        assert!(!message.contains("secret"));
+    }
+
+    /// AC8c - the fixed headers are fallible too: an API key with a trailing
+    /// newline (the realistic env/file case) errors WITHOUT leaking the key.
+    #[test]
+    fn invalid_api_key_is_configuration_error_without_leaking_key() {
+        let model = AnthropicModel::new("claude-test", "sk-leakcanary-\n");
+
+        let error = model
+            .build_headers()
+            .expect_err("invalid api key must error");
+
+        assert!(
+            matches!(error, ModelError::Configuration(_)),
+            "expected a Configuration error, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("x-api-key"),
+            "message must name the offending header, got {message}"
+        );
+        assert!(
+            !message.contains("leakcanary"),
+            "message must never echo the API key, got {message}"
+        );
+    }
+
+    /// AC8c (version path) - same discipline for `anthropic-version`.
+    #[test]
+    fn invalid_api_version_is_configuration_error() {
+        let model = AnthropicModel::new("claude-test", "sk-test").with_api_version("2023-06-01\n");
+
+        let error = model
+            .build_headers()
+            .expect_err("invalid api version must error");
+
+        assert!(matches!(error, ModelError::Configuration(_)));
+        assert!(error.to_string().contains("anthropic-version"));
+    }
+
+    /// AC8d - `build_headers()` must not panic for a default model. Guards the
+    /// `HeaderName::from_static` uppercase hazard: `from_static("Content-Type")`
+    /// would panic on every single request.
+    #[test]
+    fn build_headers_does_not_panic_for_default_model() {
+        let headers = AnthropicModel::new("claude-test", "sk-test")
+            .build_headers()
+            .expect("default model builds headers");
+
+        assert_eq!(
+            header_values(&headers, "content-type"),
+            vec!["application/json"]
+        );
+    }
+
+    /// A caller header name is NORMALIZED to lowercase, as `HeaderName::from_bytes`
+    /// guarantees. Pins the guarantee against a future refactor to `from_static`,
+    /// which would panic on the uppercase bytes instead.
+    #[tokio::test]
+    async fn caller_header_name_is_normalized_to_lowercase() {
+        let model = AnthropicModel::new("claude-test", "sk-test").with_header("X-Client", "silix");
+
+        let headers = headers_of_non_streaming_request(model).await;
+
+        assert_eq!(header_values(&headers, "x-client"), vec!["silix"]);
+    }
+
+    /// Fail-closed: when `build_headers()` fails, NO request goes out. Without
+    /// this the caller's intended auth/tenant header could be silently dropped
+    /// while the request still reaches the API.
+    #[tokio::test]
+    async fn invalid_header_prevents_the_request_from_being_sent() {
+        let server = messages_mock_server().await;
+        let model = AnthropicModel::new("claude-test", "sk-test")
+            .with_base_url(server.uri())
+            .with_header("bad name", "v");
+
+        let error = model
+            .request(
+                &[ModelRequest::new()],
+                &ModelSettings::default(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .expect_err("an invalid header must fail the request");
+
+        assert!(
+            matches!(error, ModelError::Configuration(_)),
+            "expected a Configuration error, got {error:?}"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server records requests");
+        assert_eq!(
+            requests.len(),
+            0,
+            "no request may reach the API when header construction fails"
+        );
+    }
+
+    /// The `Debug` rendering must not leak secrets: neither the API key nor any
+    /// caller header VALUE. Header NAMES stay visible - they are diagnostic.
+    #[test]
+    fn debug_redacts_api_key_and_extra_header_values() {
+        let model = AnthropicModel::new("claude-test", "sk-leakcanary")
+            .with_header("x-tenant", "tenantcanary")
+            .with_appended_header("x-trace", "tracecanary");
+
+        let rendered = format!("{model:?}");
+
+        assert!(
+            !rendered.contains("sk-leakcanary"),
+            "Debug must not echo the api key, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("tenantcanary"),
+            "Debug must not echo a set header value, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("tracecanary"),
+            "Debug must not echo an appended header value, got {rendered}"
+        );
+        assert!(
+            rendered.contains("x-tenant") && rendered.contains("x-trace"),
+            "header names must stay visible for diagnostics, got {rendered}"
+        );
+        assert!(
+            rendered.contains("claude-test") && rendered.contains("2023-06-01"),
+            "non-secret fields must still be rendered, got {rendered}"
+        );
+    }
+
+    /// The invalid header NAME is escaped before it reaches an error message:
+    /// the message flows into `error!()` and `AgentStreamEvent::Error`, so a
+    /// name with control characters must not be able to forge a log line.
+    #[test]
+    fn invalid_header_name_is_escaped_in_the_error_message() {
+        let model =
+            AnthropicModel::new("claude-test", "sk-test").with_header("bad\nname: injected", "v");
+
+        let error = model.build_headers().expect_err("invalid name must error");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains('\n'),
+            "the error message must stay single-line, got {message:?}"
+        );
+        assert!(
+            message.contains("bad\\nname"),
+            "the name must appear escaped, got {message:?}"
+        );
     }
 }

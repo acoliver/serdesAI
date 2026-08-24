@@ -21,6 +21,12 @@
       in {
         devShells.default = pkgs.mkShell {
           packages = [ rust pkgs.openssl pkgs.pkg-config pkgs.clang pkgs.lld ];
+          # openssl-sys discovery: explicit lib/include dirs; pkg-config as fallback.
+          OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+          OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
+          PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+          # Runtime resolution of libssl.so.3 for binaries built in the shell.
+          LD_LIBRARY_PATH = "${pkgs.openssl.out}/lib";
         };
       }
     );

@@ -2,20 +2,6 @@
 //!
 //! This module provides streaming support for OpenAI chat completions.
 
-use super::types::ChatCompletionChunk;
-use crate::error::ModelError;
-use bytes::Bytes;
-use futures::Stream;
-use pin_project_lite::pin_project;
-use serdes_ai_core::messages::{
-    ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent, PartStartEvent, TextPart, ThinkingPart,
-    ThinkingPartDelta, ToolCallArgs, ToolCallPart,
-};
-use serdes_ai_core::ModelResponsePart;
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 pin_project! {
     /// OpenAI SSE stream parser.
     pub struct OpenAIStreamParser<S> {
@@ -34,12 +20,32 @@ pin_project! {
         current_thinking_index: Option<usize>,
         // Next part index to use
         next_part_index: usize,
-        // Finished
+        // Finished: terminal event emitted or stream failed; no further events
         done: bool,
+        // data: [DONE] marker observed; terminal event still pending
+        done_seen: bool,
+        // Last seen non-None finish reason across chunks
+        last_finish_reason: Option<FinishReason>,
+        // Buffered usage from the include_usage chunk
+        usage: Option<Usage>,
         // Pending PartEnd events to emit (queued when multiple parts close at once)
         pending_part_ends: Vec<usize>,
     }
 }
+
+use super::types::{ChatCompletionChunk, Usage};
+use crate::error::ModelError;
+use bytes::Bytes;
+use futures::Stream;
+use pin_project_lite::pin_project;
+use serdes_ai_core::messages::{
+    FinishReason, ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent, PartStartEvent,
+    StreamCompleteEvent, TextPart, ThinkingPart, ThinkingPartDelta, ToolCallArgs, ToolCallPart,
+};
+use serdes_ai_core::ModelResponsePart;
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// State for an in-progress tool call.
 #[derive(Debug, Clone, Default)]
@@ -67,6 +73,9 @@ where
             current_thinking_index: None,
             next_part_index: 0,
             done: false,
+            done_seen: false,
+            last_finish_reason: None,
+            usage: None,
             pending_part_ends: Vec::new(),
         }
     }
@@ -104,11 +113,23 @@ where
                     this.thinking_started,
                     this.current_thinking_index,
                     this.next_part_index,
-                    this.done,
+                    this.done_seen,
+                    this.last_finish_reason,
+                    this.usage,
                     this.pending_part_ends,
                 ) {
                     return Poll::Ready(Some(event));
                 }
+            }
+
+            // [DONE] observed and all buffered lines consumed: emit the
+            // terminal event. Queued part ends were already drained above.
+            if *this.done_seen {
+                *this.done = true;
+                return Poll::Ready(Some(Ok(stream_complete_event(
+                    *this.last_finish_reason,
+                    this.usage.as_ref(),
+                ))));
             }
 
             // Need more data
@@ -120,6 +141,9 @@ where
                     // Continue to process buffer
                 }
                 Poll::Ready(Some(Err(e))) => {
+                    // Mark done so no event (including the terminal event) is
+                    // emitted after an error.
+                    *this.done = true;
                     return Poll::Ready(Some(Err(ModelError::Other(e.into()))));
                 }
                 Poll::Ready(None) => {
@@ -135,13 +159,26 @@ where
                                 this.thinking_started,
                                 this.current_thinking_index,
                                 this.next_part_index,
-                                this.done,
+                                this.done_seen,
+                                this.last_finish_reason,
+                                this.usage,
                                 this.pending_part_ends,
                             ) {
                                 return Poll::Ready(Some(event));
                             }
                         }
                     }
+
+                    // A [DONE] in the final (newline-less) line still emits
+                    // the terminal event before the stream ends.
+                    if *this.done_seen {
+                        *this.done = true;
+                        return Poll::Ready(Some(Ok(stream_complete_event(
+                            *this.last_finish_reason,
+                            this.usage.as_ref(),
+                        ))));
+                    }
+
                     return Poll::Ready(None);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -160,7 +197,9 @@ fn parse_sse_line(
     thinking_started: &mut bool,
     current_thinking_index: &mut Option<usize>,
     next_part_index: &mut usize,
-    done: &mut bool,
+    done_seen: &mut bool,
+    last_finish_reason: &mut Option<FinishReason>,
+    usage: &mut Option<Usage>,
     pending_part_ends: &mut Vec<usize>,
 ) -> Option<Result<ModelResponseStreamEvent, ModelError>> {
     let line = line.trim();
@@ -174,13 +213,19 @@ fn parse_sse_line(
     if let Some(data) = line.strip_prefix("data: ") {
         // Check for stream end
         if data == "[DONE]" {
-            *done = true;
+            *done_seen = true;
             return None;
         }
 
         // Parse the JSON chunk
         match serde_json::from_str::<ChatCompletionChunk>(data) {
             Ok(chunk) => {
+                // Buffer usage for the terminal event; the usage chunk has
+                // empty choices and produces no part events.
+                if let Some(chunk_usage) = chunk.usage {
+                    *usage = Some(chunk_usage);
+                }
+
                 // Process each choice
                 for choice in chunk.choices {
                     let delta = choice.delta;
@@ -288,8 +333,11 @@ fn parse_sse_line(
                         }
                     }
 
-                    // Handle finish reason - emit part end events
-                    if choice.finish_reason.is_some() {
+                    // Handle finish reason - remember it for the terminal
+                    // event and emit part end events
+                    if let Some(reason) = choice.finish_reason.as_deref() {
+                        *last_finish_reason = Some(map_finish_reason(reason));
+
                         // Collect all part indices that need to be closed
                         let mut parts_to_close = Vec::new();
 
@@ -327,6 +375,47 @@ fn parse_sse_line(
     }
 
     None
+}
+
+/// Build the terminal event from the last seen finish reason and the buffered
+/// usage chunk; fields absent from the wire stay `None`.
+fn stream_complete_event(
+    finish_reason: Option<FinishReason>,
+    usage: Option<&Usage>,
+) -> ModelResponseStreamEvent {
+    let reason = finish_reason.unwrap_or(FinishReason::Stop);
+    let mut event = StreamCompleteEvent::new(reason);
+
+    if let Some(u) = usage {
+        event = event
+            .with_input_tokens(u.prompt_tokens)
+            .with_output_tokens(u.completion_tokens);
+        // The OpenAI wire format reports cached prompt tokens but has no
+        // cache-creation count, so cache_creation_tokens stays None.
+        if let Some(cached) = u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+        {
+            event = event.with_cache_read_tokens(cached);
+        }
+    }
+
+    ModelResponseStreamEvent::StreamComplete(event)
+}
+
+/// Map an OpenAI finish reason string to a [`FinishReason`].
+///
+/// Unknown reasons map to [`FinishReason::Stop`], matching the non-streaming
+/// response mapping.
+fn map_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "content_filter" => FinishReason::ContentFilter,
+        "tool_calls" => FinishReason::ToolCall,
+        _ => FinishReason::Stop,
+    }
 }
 
 #[cfg(test)]
@@ -394,15 +483,87 @@ mod tests {
         }
     }
 
+    /// [DONE] without a usage chunk emits exactly one terminal event with the
+    /// default finish reason and all token fields None; nothing follows it.
     #[tokio::test]
     async fn test_parse_done() {
         let bytes = vec![Ok(Bytes::from("data: [DONE]\n\n"))];
         let stream = stream::iter(bytes);
         let mut parser = OpenAIStreamParser::new(stream);
 
-        // Should return None (stream ended)
-        let event = parser.next().await;
-        assert!(event.is_none());
+        let event = parser.next().await.unwrap().unwrap();
+        match event {
+            ModelResponseStreamEvent::StreamComplete(complete) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, None);
+                assert_eq!(complete.output_tokens, None);
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected StreamComplete, got {:?}", other),
+        }
+
+        // The terminal event is the final event of the stream.
+        assert!(parser.next().await.is_none());
+    }
+
+    /// EOF without [DONE] emits no terminal event (truncated streams stay
+    /// detectable by the agent loop).
+    #[tokio::test]
+    async fn test_eof_without_done_emits_no_terminal_event() {
+        let chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"}}]}"#;
+        let bytes = vec![Ok(make_chunk_bytes(chunk))];
+        let stream = stream::iter(bytes);
+        let mut parser = OpenAIStreamParser::new(stream);
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result.unwrap());
+        }
+
+        assert_eq!(
+            events.len(),
+            1,
+            "expected only the part event: {:?}",
+            events
+        );
+        assert!(matches!(events[0], ModelResponseStreamEvent::PartStart(_)));
+    }
+
+    /// A transport error mid-stream ends the stream with the error and never
+    /// emits the terminal event afterwards.
+    #[tokio::test]
+    async fn stream_error_suppresses_terminal_event() {
+        // reqwest::Error has no public constructor; a refused connection to a
+        // closed loopback port is the cheapest real one to obtain.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let err = client
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("connection to closed loopback port must fail");
+
+        let text_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"}}]}"#;
+        let bytes = vec![Ok(make_chunk_bytes(text_chunk)), Err(err)];
+        let stream = stream::iter(bytes);
+        let mut parser = OpenAIStreamParser::new(stream);
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result);
+        }
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected only the part event and the error: {:?}",
+            events
+        );
+        assert!(matches!(
+            events[0],
+            Ok(ModelResponseStreamEvent::PartStart(_))
+        ));
+        assert!(events[1].is_err());
     }
 
     #[tokio::test]
@@ -412,9 +573,99 @@ mod tests {
         let stream = stream::iter(bytes);
         let mut parser = OpenAIStreamParser::new(stream);
 
-        // Should return None since no parts are open
+        // Should return None since no parts are open and no [DONE] arrived
         let event = parser.next().await;
         assert!(event.is_none());
+    }
+
+    /// The include_usage chunk is buffered and produces no part events; its
+    /// counts are carried on the terminal event at [DONE].
+    #[tokio::test]
+    async fn usage_chunk_then_done_populates_terminal_event() {
+        let text_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"}}]}"#;
+        let finish_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let usage_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":7}}}"#;
+
+        let bytes = vec![
+            Ok(make_chunk_bytes(text_chunk)),
+            Ok(make_chunk_bytes(finish_chunk)),
+            Ok(make_chunk_bytes(usage_chunk)),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let stream = stream::iter(bytes);
+        let mut parser = OpenAIStreamParser::new(stream);
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result.unwrap());
+        }
+
+        // The usage chunk is ignored for part events: only PartStart and
+        // PartEnd precede the terminal event.
+        assert_eq!(
+            events.len(),
+            3,
+            "expected PartStart, PartEnd, StreamComplete: {:?}",
+            events
+        );
+        assert!(matches!(events[0], ModelResponseStreamEvent::PartStart(_)));
+        assert!(matches!(events[1], ModelResponseStreamEvent::PartEnd(_)));
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, Some(7));
+            }
+            other => panic!("expected terminal StreamComplete, got {:?}", other),
+        }
+    }
+
+    /// Finish reason strings map onto the terminal event; unknown reasons
+    /// default to Stop.
+    #[tokio::test]
+    async fn finish_reason_maps_onto_terminal_event() {
+        let cases = [
+            ("stop", FinishReason::Stop),
+            ("length", FinishReason::Length),
+            ("content_filter", FinishReason::ContentFilter),
+            ("tool_calls", FinishReason::ToolCall),
+            ("function_call", FinishReason::Stop),
+            ("unknown_reason", FinishReason::Stop),
+        ];
+
+        for (wire_reason, expected) in cases {
+            let finish_chunk = format!(
+                r#"{{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{{"index":0,"delta":{{}},"finish_reason":"{wire_reason}"}}]}}"#
+            );
+            let bytes = vec![
+                Ok(make_chunk_bytes(&finish_chunk)),
+                Ok(Bytes::from("data: [DONE]\n\n")),
+            ];
+            let stream = stream::iter(bytes);
+            let mut parser = OpenAIStreamParser::new(stream);
+
+            let mut terminals = 0;
+            let mut finish_reason = None;
+            while let Some(result) = parser.next().await {
+                if let ModelResponseStreamEvent::StreamComplete(complete) = result.unwrap() {
+                    terminals += 1;
+                    finish_reason = Some(complete.finish_reason);
+                }
+            }
+
+            assert_eq!(
+                terminals, 1,
+                "expected one terminal event for {wire_reason}"
+            );
+            assert_eq!(
+                finish_reason,
+                Some(expected),
+                "finish reason mapping for {wire_reason}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -441,7 +692,9 @@ mod tests {
     }
 
     /// Regression test: when finish_reason is received with multiple open parts
-    /// (text + tool calls), ALL PartEnd events must be emitted, not just the first.
+    /// (text + tool calls), ALL PartEnd events must be emitted, not just the
+    /// first. The terminal event follows the queued part ends and is emitted
+    /// exactly once, last.
     #[tokio::test]
     async fn test_multiple_part_ends_on_finish() {
         // Scenario: text part starts, then 2 tool calls start, then finish_reason
@@ -450,12 +703,15 @@ mod tests {
         let tool1_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"test\"}"}}]}}]}"#;
         let tool2_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{\"id\":1}"}}]}}]}"#;
         let finish_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let usage_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":7}}}"#;
 
         let bytes = vec![
             Ok(make_chunk_bytes(text_chunk)),
             Ok(make_chunk_bytes(tool1_chunk)),
             Ok(make_chunk_bytes(tool2_chunk)),
             Ok(make_chunk_bytes(finish_chunk)),
+            Ok(make_chunk_bytes(usage_chunk)),
+            Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let stream = stream::iter(bytes);
         let mut parser = OpenAIStreamParser::new(stream);
@@ -471,6 +727,7 @@ mod tests {
         // - 1 PartStart for tool call 1 (index 1)
         // - 1 PartStart for tool call 2 (index 2)
         // - 3 PartEnd events (for indices 0, 1, 2)
+        // - 1 StreamComplete terminal event
         let part_starts: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, ModelResponseStreamEvent::PartStart(_)))
@@ -512,5 +769,28 @@ mod tests {
             vec![0, 1, 2],
             "All part indices should be closed"
         );
+
+        // Exactly one terminal event, carrying the buffered usage, emitted
+        // after every queued part end.
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+        assert!(
+            matches!(
+                events.last(),
+                Some(ModelResponseStreamEvent::StreamComplete(_))
+            ),
+            "terminal event must be emitted last, got {:?}",
+            events.last()
+        );
+        if let Some(ModelResponseStreamEvent::StreamComplete(complete)) = events.last() {
+            assert_eq!(complete.finish_reason, FinishReason::ToolCall);
+            assert_eq!(complete.input_tokens, Some(10));
+            assert_eq!(complete.output_tokens, Some(5));
+            assert_eq!(complete.cache_creation_tokens, None);
+            assert_eq!(complete.cache_read_tokens, Some(7));
+        }
     }
 }

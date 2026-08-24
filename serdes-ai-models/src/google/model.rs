@@ -848,4 +848,73 @@ mod tests {
         assert!(matches!(&result.parts[0], ModelResponsePart::Text(t) if t.content == "Hello!"));
         assert!(matches!(result.finish_reason, Some(FinishReason::Stop)));
     }
+
+    // Streaming over wiremock (real HTTP request path).
+
+    /// A streamed generation over real HTTP ends with exactly one terminal
+    /// StreamComplete carrying the final chunk's mapped usageMetadata counts.
+    #[tokio::test]
+    async fn request_stream_emits_terminal_stream_complete_with_usage() {
+        use futures::StreamExt;
+        use serdes_ai_core::messages::ModelResponseStreamEvent;
+
+        let sse_body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" World\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"totalTokenCount\":15,\"cachedContentTokenCount\":3}}\n\n",
+        );
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let model = GoogleModel::new("gemini-2.0-flash", "test-key").with_base_url(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+
+        // Part events precede the terminal event.
+        assert!(
+            matches!(events.first(), Some(ModelResponseStreamEvent::PartStart(_))),
+            "expected a leading part event, got {:?}",
+            events.first()
+        );
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, Some(3));
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
 }

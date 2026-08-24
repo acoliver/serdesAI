@@ -537,12 +537,38 @@ mod tests {
         let result = build_model_with_config("unknown", "model", None, None, None);
         assert!(result.is_err());
     }
+
+    /// Setting a reasoning effort builds the Responses API model; gpt-5.1
+    /// reports reasoning support only on that path.
+    #[cfg(feature = "openai")]
+    #[test]
+    fn test_build_model_extended_reasoning_effort_selects_responses_model() {
+        let config = ExtendedModelConfig::new()
+            .with_api_key("test-key")
+            .with_reasoning_effort("xhigh");
+        let model = build_model_extended("openai", "gpt-5.1", config).unwrap();
+
+        assert_eq!(model.name(), "gpt-5.1");
+        assert!(model.profile().supports_reasoning);
+    }
+
+    /// Without a reasoning effort the openai branch keeps the chat
+    /// completions model, which does not report reasoning for gpt-5.1.
+    #[cfg(feature = "openai")]
+    #[test]
+    fn test_build_model_extended_without_reasoning_effort_keeps_chat_model() {
+        let config = ExtendedModelConfig::new().with_api_key("test-key");
+        let model = build_model_extended("openai", "gpt-5.1", config).unwrap();
+
+        assert_eq!(model.name(), "gpt-5.1");
+        assert!(!model.profile().supports_reasoning);
+    }
 }
 
 /// Extended configuration options for model building.
 ///
 /// This struct allows configuring advanced model features like extended thinking
-/// for Claude models, reasoning effort for OpenAI o1/o3, etc.
+/// for Claude models, reasoning effort for OpenAI reasoning models, etc.
 #[derive(Debug, Clone, Default)]
 pub struct ExtendedModelConfig {
     /// API key (overrides environment variable)
@@ -557,7 +583,8 @@ pub struct ExtendedModelConfig {
     pub enable_thinking: bool,
     /// Budget for thinking tokens (Anthropic Claude)
     pub thinking_budget: Option<u64>,
-    /// Reasoning effort (OpenAI o1/o3)
+    /// Reasoning effort for OpenAI reasoning models (e.g. "low", "high",
+    /// "xhigh", "max"); any string is sent verbatim
     pub reasoning_effort: Option<String>,
     /// Optional same-model retry policy. Retries are disabled when omitted.
     pub retry_policy: Option<RetryPolicy>,
@@ -600,7 +627,10 @@ impl ExtendedModelConfig {
         self
     }
 
-    /// Set reasoning effort for OpenAI o1/o3 models
+    /// Set reasoning effort for OpenAI reasoning models.
+    ///
+    /// Known efforts map to named variants case-insensitively; any other
+    /// string is sent to the API verbatim.
     pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
         self.reasoning_effort = Some(effort.into());
         self
@@ -622,7 +652,8 @@ impl ExtendedModelConfig {
 /// Build a model with extended configuration options.
 ///
 /// This function extends `build_model_with_config` to support advanced features
-/// like extended thinking for Claude models.
+/// like extended thinking for Claude models and reasoning effort for OpenAI
+/// reasoning models.
 ///
 /// # Arguments
 ///
@@ -640,6 +671,12 @@ impl ExtendedModelConfig {
 ///     .with_api_key("sk-...")
 ///     .with_thinking(Some(10000));
 /// let model = build_model_extended("anthropic", "claude-3-5-sonnet-20241022", config)?;
+///
+/// // Build OpenAI reasoning model with an effort level
+/// let config = ExtendedModelConfig::new()
+///     .with_api_key("sk-...")
+///     .with_reasoning_effort("max");
+/// let model = build_model_extended("openai", "gpt-5.1", config)?;
 /// ```
 pub fn build_model_extended(
     provider: &str,
@@ -653,33 +690,39 @@ pub fn build_model_extended(
         "openai" | "gpt" => {
             #[cfg(feature = "openai")]
             {
-                let model = if let Some(ref key) = config.api_key {
-                    OpenAIChatModel::new(model_name, key)
+                // Reasoning effort exists only on the Responses API, so an
+                // effort set here selects OpenAIResponsesModel over chat
+                // completions.
+                if config.reasoning_effort.is_some() {
+                    let model = openai_responses_model_from_config(model_name, &config)?;
+                    Ok(Arc::new(model) as Arc<dyn Model>)
                 } else {
-                    OpenAIChatModel::from_env(model_name)?
-                };
+                    let model = if let Some(ref key) = config.api_key {
+                        OpenAIChatModel::new(model_name, key)
+                    } else {
+                        OpenAIChatModel::from_env(model_name)?
+                    };
 
-                let model = if let Some(ref url) = config.base_url {
-                    model.with_base_url(url)
-                } else {
-                    model
-                };
+                    let model = if let Some(ref url) = config.base_url {
+                        model.with_base_url(url)
+                    } else {
+                        model
+                    };
 
-                let model = if let Some(t) = config.timeout {
-                    model.with_timeout(t)
-                } else {
-                    model
-                };
+                    let model = if let Some(t) = config.timeout {
+                        model.with_timeout(t)
+                    } else {
+                        model
+                    };
 
-                // TODO: Add reasoning_effort support when available in OpenAIChatModel
+                    let model = if let Some(ref client) = config.client {
+                        model.with_client(client.clone())
+                    } else {
+                        model
+                    };
 
-                let model = if let Some(ref client) = config.client {
-                    model.with_client(client.clone())
-                } else {
-                    model
-                };
-
-                Ok(Arc::new(model) as Arc<dyn Model>)
+                    Ok(Arc::new(model) as Arc<dyn Model>)
+                }
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -833,4 +876,47 @@ pub fn build_model_extended(
         Some(policy) => Arc::new(RetryingModel::from_arc(model, policy)),
         None => model,
     })
+}
+
+/// Build the OpenAI Responses API model for the extended config, applying
+/// the configured reasoning effort and shared connection options.
+///
+/// Returns `ModelError::Configuration` when `config.reasoning_effort` is
+/// unset, because the effort is what selects the Responses API, or when
+/// `config.api_key` is unset and `OPENAI_API_KEY` is absent.
+#[cfg(feature = "openai")]
+pub(crate) fn openai_responses_model_from_config(
+    model_name: &str,
+    config: &ExtendedModelConfig,
+) -> ModelResult<OpenAIResponsesModel> {
+    let Some(effort) = config.reasoning_effort.as_deref() else {
+        return Err(ModelError::Configuration(
+            "Reasoning effort is required to build a Responses API model.".to_string(),
+        ));
+    };
+
+    let model = if let Some(ref key) = config.api_key {
+        OpenAIResponsesModel::new(model_name, key)
+    } else {
+        OpenAIResponsesModel::from_env(model_name)?
+    }
+    .with_reasoning_effort(effort);
+
+    let model = if let Some(ref url) = config.base_url {
+        model.with_base_url(url)
+    } else {
+        model
+    };
+
+    let model = if let Some(t) = config.timeout {
+        model.with_timeout(t)
+    } else {
+        model
+    };
+
+    if let Some(ref client) = config.client {
+        Ok(model.with_client(client.clone()))
+    } else {
+        Ok(model)
+    }
 }
