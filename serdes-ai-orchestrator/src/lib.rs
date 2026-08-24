@@ -14,12 +14,21 @@
 //! goes through the [`PlanApprover`] and [`ToolApprover`] traits. Nothing here
 //! depends on the CLI.
 
+pub mod config;
 pub mod events;
+pub mod orchestrator;
+pub mod prompts;
+pub mod registry;
 pub mod role;
+pub mod run;
 pub mod tools;
 
-pub use events::{AgentId, DeltaKind, OrchestratorEvent, ToolPhase};
+pub use config::{GateConfig, OrchestratorConfig, RoleConfig};
+pub use events::{AgentId, DeltaKind, Mode, OrchestratorEvent, ToolPhase};
+pub use orchestrator::{OrchestrationError, Orchestrator};
+pub use registry::{AgentRegistry, ModelFactory};
 pub use role::Role;
+pub use run::{run_agent, RunError};
 pub use tools::{ToolContext, ToolFailure};
 
 #[cfg(test)]
