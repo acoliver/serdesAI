@@ -1,0 +1,66 @@
+[package]
+name = "serdes-ai-cli"
+description = "CLI application for serdes-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "serdes-ai"
+path = "src/main.rs"
+
+[dependencies]
+serdes-ai-core = { workspace = true }
+serdes-ai-agent = { workspace = true }
+serdes-ai-models = { workspace = true }
+serdes-ai-providers = { workspace = true }
+serdes-ai-tools = { workspace = true }
+serdes-ai-output = { workspace = true }
+serdes-ai-streaming = { workspace = true }
+
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+
+reqwest = { version = "0.12", features = ["json"] }
+scraper = "0.21"
+regex = "1.10"
+open = "5.0"
+url = "2.5"
+urlencoding = "2.1"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+
+clap = { version = "4.5", features = ["derive", "env"] }
+ratatui = "0.29"
+crossterm = "0.29"
+tui-input = "0.11"
+syntect = "5.2"
+nu-ansi-term = "0.50"
+directories = "5.0"
+toml = "0.8"
+figlet-rs = "0.1"
+arboard = "3.4"
+reedline = { version = "0.38", features = ["system_clipboard"] }
+once_cell = "1.19"
+rpassword = "7.3"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

@@ -1,0 +1,151 @@
+//! Model factory for creating models from spec strings.
+//!
+//! Supports formats like:
+//! - "openai:gpt-4o"
+//! - "anthropic:claude-3-5-sonnet-20241022"
+//! - "groq:llama-3.1-70b"
+//! - "ollama:llama3.1"
+//! - "openrouter:anthropic/claude-3.5-sonnet"
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use serdes_ai_agent::ModelConfig;
+use serdes_ai_models::Model;
+use tracing::{debug, info, warn};
+
+use crate::config;
+
+/// Parse a model spec and create a model instance.
+///
+/// Format: "provider:model_name" or just "model_name" (defaults to openai)
+pub async fn create_model_from_spec(spec: &str) -> Result<Arc<dyn Model>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(anyhow!("model spec cannot be empty"));
+    }
+
+    let (provider, model_name) = if spec.contains(':') {
+        let parts: Vec<&str> = spec.splitn(2, ':').collect();
+        (parts[0].to_lowercase(), parts[1])
+    } else {
+        ("openai".to_string(), spec)
+    };
+
+    info!(
+        "Creating model from spec: provider={}, model={}",
+        provider, model_name
+    );
+
+    let mut model_config = ModelConfig::new(format!("{}:{}", provider, model_name));
+
+    if let Some(api_key) = load_api_key(&provider)? {
+        model_config = model_config.with_api_key(api_key);
+    }
+
+    if let Some(base_url) = load_base_url(&provider) {
+        model_config = model_config.with_base_url(base_url);
+    }
+
+    let timeout_secs = config::get_request_timeout();
+    model_config = model_config.with_timeout(Duration::from_secs(timeout_secs));
+
+    let model = model_config
+        .build_model()
+        .map_err(|e| anyhow!("failed to build model '{}': {}", spec, e))?;
+
+    debug!("Model created successfully from spec '{}'.", spec);
+    Ok(model)
+}
+
+/// Load API key from environment or config file.
+fn load_api_key(provider: &str) -> Result<Option<String>> {
+    let env_var = match provider {
+        "openai" | "gpt" => "OPENAI_API_KEY",
+        "anthropic" | "claude" => "ANTHROPIC_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "bedrock" | "aws" => "AWS_ACCESS_KEY_ID",
+        "openrouter" | "or" => "OPENROUTER_API_KEY",
+        "google" | "gemini" => "GOOGLE_API_KEY",
+        "cohere" | "co" => "CO_API_KEY",
+        "huggingface" | "hf" => "HF_TOKEN",
+        "ollama" => return Ok(None),
+        _ => return Ok(None),
+    };
+
+    if let Ok(key) = std::env::var(env_var) {
+        if !key.trim().is_empty() {
+            return Ok(Some(key));
+        }
+    }
+
+    if let Some(key) = config::get_api_key(provider) {
+        if !key.trim().is_empty() {
+            return Ok(Some(key));
+        }
+    }
+
+    warn!(
+        "No API key found for provider '{}' (expected env var '{}').",
+        provider, env_var
+    );
+    Ok(None)
+}
+
+fn load_base_url(provider: &str) -> Option<String> {
+    match provider {
+        "ollama" => std::env::var("OLLAMA_HOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| Some("http://localhost:11434".to_string())),
+        _ => None,
+    }
+}
+
+/// List available providers.
+pub fn list_providers() -> Vec<&'static str> {
+    vec![
+        "openai",
+        "anthropic",
+        "groq",
+        "ollama",
+        "mistral",
+        "bedrock",
+        "openrouter",
+        "google",
+        "cohere",
+        "huggingface",
+    ]
+}
+
+/// Validate a model spec.
+pub fn validate_model_spec(spec: &str) -> Result<()> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(anyhow!("model spec cannot be empty"));
+    }
+
+    let (provider, model_name) = if spec.contains(':') {
+        let parts: Vec<&str> = spec.splitn(2, ':').collect();
+        (parts[0].to_lowercase(), parts[1].trim())
+    } else {
+        ("openai".to_string(), spec)
+    };
+
+    if model_name.is_empty() {
+        return Err(anyhow!("model name cannot be empty in spec '{}'.", spec));
+    }
+
+    let valid = list_providers();
+    if !valid.contains(&provider.as_str()) {
+        return Err(anyhow!(
+            "unknown provider '{}'. Valid: {}",
+            provider,
+            valid.join(", ")
+        ));
+    }
+
+    Ok(())
+}
