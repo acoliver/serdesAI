@@ -466,4 +466,50 @@ mod tests {
         );
         assert!(body.get("provider").is_some() && body.get("transforms").is_some());
     }
+
+    /// OpenRouter streams through `OpenAIStreamParser`, so its streams
+    /// inherit the terminal StreamComplete emission at [DONE] with the
+    /// buffered usage from its include_usage request.
+    #[tokio::test]
+    async fn openrouter_stream_inherits_terminal_stream_complete() {
+        use bytes::Bytes;
+        use futures::{stream, StreamExt};
+        use serdes_ai_core::messages::ModelResponseStreamEvent;
+
+        let content = r#"{"id":"gen-1","object":"chat.completion.chunk","created":1234567890,"model":"anthropic/claude-3-opus","choices":[{"index":0,"delta":{"content":"Hi"}}]}"#;
+        let finish = r#"{"id":"gen-1","object":"chat.completion.chunk","created":1234567890,"model":"anthropic/claude-3-opus","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let usage = r#"{"id":"gen-1","object":"chat.completion.chunk","created":1234567890,"model":"anthropic/claude-3-opus","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#;
+
+        // request_stream wraps response.bytes_stream() in OpenAIStreamParser;
+        // feed it the SSE bytes OpenRouter returns for include_usage streams.
+        let bytes = vec![
+            Ok(Bytes::from(format!("data: {}\n\n", content))),
+            Ok(Bytes::from(format!("data: {}\n\n", finish))),
+            Ok(Bytes::from(format!("data: {}\n\n", usage))),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let mut parser = OpenAIStreamParser::new(stream::iter(bytes));
+
+        let mut events = Vec::new();
+        while let Some(result) = parser.next().await {
+            events.push(result.unwrap());
+        }
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(3));
+                assert_eq!(complete.output_tokens, Some(2));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
+    }
 }

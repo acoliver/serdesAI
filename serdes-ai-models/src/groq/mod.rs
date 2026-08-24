@@ -133,6 +133,7 @@ impl Model for GroqModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serdes_ai_core::FinishReason;
 
     #[test]
     fn test_groq_model_creation() {
@@ -151,5 +152,72 @@ mod tests {
 
         let model = GroqModel::gemma_9b("key");
         assert_eq!(model.name(), "gemma2-9b-it");
+    }
+
+    /// Groq streams by delegating to an inner OpenAI chat model, so a
+    /// streamed request over real HTTP inherits the terminal StreamComplete
+    /// emission at [DONE] with the buffered usage.
+    ///
+    /// The Groq base URL is fixed, so the test points the inner model at a
+    /// mock server and exercises the real `request_stream` delegation.
+    #[tokio::test]
+    async fn request_stream_inherits_terminal_stream_complete() {
+        use futures::StreamExt;
+        use serdes_ai_core::messages::ModelResponseStreamEvent;
+
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"llama-3.1-70b-versatile\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"llama-3.1-70b-versatile\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"llama-3.1-70b-versatile\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let model = GroqModel {
+            inner: OpenAIChatModel::new("llama-3.1-70b-versatile", "test-key")
+                .with_base_url(server.uri()),
+        };
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+        let mut stream = model
+            .request_stream(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.unwrap());
+        }
+
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ModelResponseStreamEvent::StreamComplete(_)))
+            .collect();
+        assert_eq!(terminals.len(), 1, "expected exactly one terminal event");
+
+        match events.last() {
+            Some(ModelResponseStreamEvent::StreamComplete(complete)) => {
+                assert_eq!(complete.finish_reason, FinishReason::Stop);
+                assert_eq!(complete.input_tokens, Some(10));
+                assert_eq!(complete.output_tokens, Some(5));
+                assert_eq!(complete.cache_creation_tokens, None);
+                assert_eq!(complete.cache_read_tokens, None);
+            }
+            other => panic!("expected terminal StreamComplete last, got {:?}", other),
+        }
     }
 }
