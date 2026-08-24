@@ -159,6 +159,25 @@ impl CompletingInput {
 }
 
 impl CompletingInput {
+    /// The byte offset of the character before the cursor.
+    fn previous_boundary(&self) -> Option<usize> {
+        if self.cursor_pos == 0 {
+            return None;
+        }
+        self.buffer[..self.cursor_pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+    }
+
+    /// The byte offset just past the character at the cursor.
+    fn next_boundary(&self) -> Option<usize> {
+        self.buffer[self.cursor_pos..]
+            .chars()
+            .next()
+            .map(|c| self.cursor_pos + c.len_utf8())
+    }
+
     /// Handle key event, returns Some(result) if input complete
     pub fn handle_key(&mut self, key: KeyCode) -> Option<String> {
         match key {
@@ -167,29 +186,33 @@ impl CompletingInput {
             }
             KeyCode::Char('/') if self.buffer.is_empty() => {
                 self.buffer.push('/');
-                self.cursor_pos = 1;
+                self.cursor_pos = self.buffer.len();
                 self.update_completions();
             }
             KeyCode::Char(c) => {
+                // cursor_pos is a byte offset, so it must advance by the
+                // character's encoded width. Advancing by one would leave it
+                // inside a multi-byte character, and String::insert panics on a
+                // non-boundary index — taking the whole process with it.
                 self.buffer.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
                 self.update_completions();
             }
             KeyCode::Backspace => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    self.buffer.remove(self.cursor_pos);
+                if let Some(previous) = self.previous_boundary() {
+                    self.buffer.replace_range(previous..self.cursor_pos, "");
+                    self.cursor_pos = previous;
                     self.update_completions();
                 }
             }
             KeyCode::Left => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                if let Some(previous) = self.previous_boundary() {
+                    self.cursor_pos = previous;
                 }
             }
             KeyCode::Right => {
-                if self.cursor_pos < self.buffer.len() {
-                    self.cursor_pos += 1;
+                if let Some(next) = self.next_boundary() {
+                    self.cursor_pos = next;
                 }
             }
             KeyCode::Up => {
