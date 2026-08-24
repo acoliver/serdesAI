@@ -99,21 +99,15 @@ intermittent failure here as a bug in the harness until proven otherwise.
 
 ## Not covered, and why
 
-**Twelve of the twenty-six `AnyMessage` variants have no producer.** `Diff`,
-`FileContent`, `FileListing`, `GrepResult`, `AgentReasoning`, `Divider`,
-`StatusPanel`, `SpinnerControl`, `SkillList`, `SkillActivate`, `VersionCheck` and
-`UniversalConstructor` are all rendered by `renderer/v2.rs` and emitted by
-nothing, so no test can reach them through the real binary.
+**One `AnyMessage` variant has no producer.** `UniversalConstructor` is rendered
+by `renderer/v2.rs` and emitted nowhere, so no test can reach it through the real
+binary.
 
-The cause is that `src/tools/mod.rs` never touches the bus: `read_file`,
-`list_files` and `grep` return their results as plain tool text rather than
-emitting the structured messages the renderer knows how to draw. `src/shell.rs`
-does emit `ShellStart`/`ShellLine`/`ShellOutput`, but nothing calls
-`execute_shell_command`, so that path is unreachable too.
-
-This is a wiring gap rather than a rendering bug — the display code exists and
-looks reasonable. Connecting the tools to the bus would both improve the output
-and make those variants testable.
+Three others — `SkillList`, `SkillActivate` and `VersionCheck` — used to be in
+that list and have been removed outright. A skills feature and a decision about
+whether the CLI contacts the network at startup were product questions rather
+than display ones, and unreachable display code for features that do not exist
+is worse than no code.
 
 **Two of the eight modules under `src/tui/` cannot be opened.** `agent_picker`
 and `model_picker` are not referenced anywhere outside that directory, so no

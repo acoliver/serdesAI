@@ -15,9 +15,8 @@ use crate::config;
 use crate::messages::{
     AgentReasoningMessage, DiffMessage, DividerMessage, FileContentMessage, FileListingMessage,
     GrepResultMessage, MessageLevel, ShellLineMessage, ShellOutputMessage, ShellStartMessage,
-    SkillActivateMessage, SkillListMessage, SpinnerAction, SpinnerControl, StatusPanelMessage,
-    StatusType, SubAgentInvocationMessage, TextMessage, UniversalConstructorMessage,
-    VersionCheckMessage,
+    SpinnerAction, SpinnerControl, StatusPanelMessage, StatusType, SubAgentInvocationMessage,
+    TextMessage, UniversalConstructorMessage,
 };
 
 pub const DEFAULT_STYLES: &[(MessageLevel, &str)] = &[
@@ -141,9 +140,6 @@ impl RichConsoleRendererV2 {
             AnyMessage::ShellOutput(msg) => self.render_shell_output(msg),
             AnyMessage::AgentReasoning(msg) => self.render_agent_reasoning(msg),
             AnyMessage::StatusPanel(msg) => self.render_status_panel(msg),
-            AnyMessage::SkillList(msg) => self.render_skill_list(msg),
-            AnyMessage::SkillActivate(msg) => self.render_skill_activate(msg),
-            AnyMessage::VersionCheck(msg) => self.render_version_check(msg),
             AnyMessage::UniversalConstructor(msg) => self.render_universal_constructor(msg),
             AnyMessage::SubAgentInvocation(msg) => self.render_subagent_invocation(msg),
             AnyMessage::SpinnerControl(msg) => self.render_spinner_control(msg),
@@ -469,131 +465,6 @@ impl RichConsoleRendererV2 {
         Ok(())
     }
 
-    fn render_skill_list(&mut self, msg: &SkillListMessage) -> anyhow::Result<()> {
-        let banner = self.format_banner("info", "SKILLS");
-        self.print_markup_line(&format!("\n{}", banner));
-
-        if msg.skills.is_empty() {
-            self.print_line("dim", "No skills found.");
-            return Ok(());
-        }
-
-        let name_width = msg
-            .skills
-            .iter()
-            .map(|skill| skill.name.chars().count())
-            .max()
-            .unwrap_or(5)
-            .max("Name".len())
-            .min(32);
-
-        self.print_plain_line(&format!(
-            "┌{}┬{}┬{}┐",
-            "─".repeat(name_width + 2),
-            "─".repeat(12),
-            "─".repeat(42)
-        ));
-        self.print_plain_line(&format!(
-            "│ {:<name_width$} │ {:<10} │ {:<40} │",
-            "Name",
-            "Status",
-            "Description",
-            name_width = name_width
-        ));
-        self.print_plain_line(&format!(
-            "├{}┼{}┼{}┤",
-            "─".repeat(name_width + 2),
-            "─".repeat(12),
-            "─".repeat(42)
-        ));
-
-        for skill in &msg.skills {
-            let status = if skill.installed {
-                "Installed"
-            } else {
-                "Available"
-            };
-            let row_style = if skill.installed { "green" } else { "dim" };
-            let mut description = skill.description.clone();
-            if description.chars().count() > 40 {
-                description = format!("{}…", description.chars().take(39).collect::<String>());
-            }
-
-            self.print_line(
-                row_style,
-                &format!(
-                    "│ {:<name_width$} │ {:<10} │ {:<40} │",
-                    Self::escape_markup(&skill.name),
-                    status,
-                    Self::escape_markup(&description),
-                    name_width = name_width
-                ),
-            );
-        }
-
-        self.print_plain_line(&format!(
-            "└{}┴{}┴{}┘",
-            "─".repeat(name_width + 2),
-            "─".repeat(12),
-            "─".repeat(42)
-        ));
-
-        Ok(())
-    }
-
-    fn render_skill_activate(&mut self, msg: &SkillActivateMessage) -> anyhow::Result<()> {
-        if msg.activated {
-            self.print_line(
-                "green",
-                &format!(
-                    "✓ Skill activated: {}",
-                    Self::escape_markup(&msg.skill_name)
-                ),
-            );
-        } else {
-            self.print_line(
-                "yellow",
-                &format!(
-                    "⏸ Skill deactivated: {}",
-                    Self::escape_markup(&msg.skill_name)
-                ),
-            );
-        }
-        Ok(())
-    }
-
-    fn render_version_check(&mut self, msg: &VersionCheckMessage) -> anyhow::Result<()> {
-        let banner = self.format_banner("info", "VERSION CHECK");
-        self.print_markup_line(&format!("\n{}", banner));
-
-        self.print_line(
-            "dim",
-            &format!(
-                "Current version: {}",
-                Self::escape_markup(&msg.current_version)
-            ),
-        );
-
-        if msg.update_available {
-            if let Some(latest) = &msg.latest_version {
-                self.print_line(
-                    "yellow",
-                    &format!(
-                        "Update available: {} → {}",
-                        Self::escape_markup(&msg.current_version),
-                        Self::escape_markup(latest)
-                    ),
-                );
-            } else {
-                self.print_line("yellow", "Update available (latest version unknown)");
-            }
-        } else {
-            self.print_line("green", "You are up to date.");
-        }
-
-        Ok(())
-    }
-
     fn render_universal_constructor(
         &mut self,
         msg: &UniversalConstructorMessage,
@@ -763,8 +634,6 @@ impl RichConsoleRendererV2 {
             AnyMessage::SelectionResponse(_) => TypeId::of::<crate::messages::SelectionResponse>(),
             AnyMessage::AgentReasoning(_) => TypeId::of::<crate::messages::AgentReasoningMessage>(),
             AnyMessage::StatusPanel(_) => TypeId::of::<crate::messages::StatusPanelMessage>(),
-            AnyMessage::SkillList(_) => TypeId::of::<crate::messages::SkillListMessage>(),
-            AnyMessage::SkillActivate(_) => TypeId::of::<crate::messages::SkillActivateMessage>(),
             AnyMessage::SubAgentInvocation(_) => {
                 TypeId::of::<crate::messages::SubAgentInvocationMessage>()
             }
@@ -772,7 +641,6 @@ impl RichConsoleRendererV2 {
                 TypeId::of::<crate::messages::SubAgentResponseMessage>()
             }
             AnyMessage::SubAgentStatus(_) => TypeId::of::<crate::messages::SubAgentStatusMessage>(),
-            AnyMessage::VersionCheck(_) => TypeId::of::<crate::messages::VersionCheckMessage>(),
             AnyMessage::UniversalConstructor(_) => {
                 TypeId::of::<crate::messages::UniversalConstructorMessage>()
             }
@@ -800,12 +668,9 @@ impl RichConsoleRendererV2 {
             AnyMessage::SelectionRequest(_) => "SelectionRequest",
             AnyMessage::SelectionResponse(_) => "SelectionResponse",
             AnyMessage::StatusPanel(_) => "StatusPanelMessage",
-            AnyMessage::SkillList(_) => "SkillListMessage",
-            AnyMessage::SkillActivate(_) => "SkillActivateMessage",
             AnyMessage::SubAgentInvocation(_) => "SubAgentInvocationMessage",
             AnyMessage::SubAgentResponse(_) => "SubAgentResponseMessage",
             AnyMessage::SubAgentStatus(_) => "SubAgentStatusMessage",
-            AnyMessage::VersionCheck(_) => "VersionCheckMessage",
             AnyMessage::UniversalConstructor(_) => "UniversalConstructorMessage",
         }
     }

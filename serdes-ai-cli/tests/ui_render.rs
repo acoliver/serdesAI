@@ -1,11 +1,7 @@
 //! Terminal UI tests for how output is rendered.
 //!
-//! Only the message variants the running application actually emits are covered
-//! here. Twelve of the twenty-six `AnyMessage` variants — Diff, FileContent,
-//! FileListing, GrepResult, AgentReasoning, Divider, StatusPanel, SpinnerControl,
-//! SkillList, SkillActivate, VersionCheck and UniversalConstructor — have
-//! rendering code but no producer anywhere in the crate, so there is no way to
-//! drive them through the real binary. See the README for the full picture.
+//! Covers the message variants the running application emits. The only one
+//! still without a producer is `UniversalConstructor`; see the README.
 
 #[path = "ui/harness.rs"]
 mod harness;

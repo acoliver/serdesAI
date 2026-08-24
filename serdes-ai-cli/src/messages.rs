@@ -276,28 +276,6 @@ pub struct StatusPanelMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillEntry {
-    pub name: String,
-    pub description: String,
-    pub installed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillListMessage {
-    #[serde(flatten)]
-    pub base: BaseMessage,
-    pub skills: Vec<SkillEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillActivateMessage {
-    #[serde(flatten)]
-    pub base: BaseMessage,
-    pub skill_name: String,
-    pub activated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentInvocationMessage {
     #[serde(flatten)]
     pub base: BaseMessage,
@@ -344,15 +322,6 @@ pub struct SubAgentStatusMessage {
     pub agent_name: String,
     pub status: SubAgentStatus,
     pub progress: Option<f32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionCheckMessage {
-    #[serde(flatten)]
-    pub base: BaseMessage,
-    pub current_version: String,
-    pub latest_version: Option<String>,
-    pub update_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

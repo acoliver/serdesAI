@@ -13,10 +13,9 @@ use crate::messages::{
     AgentReasoningMessage, AgentResponseMessage, BaseMessage, ConfirmationRequest,
     ConfirmationResponse, DiffMessage, DividerMessage, FileContentMessage, FileListingMessage,
     GrepResultMessage, MessageCategory, MessageLevel, SelectionRequest, SelectionResponse,
-    ShellLineMessage, ShellOutputMessage, ShellStartMessage, SkillActivateMessage,
-    SkillListMessage, SpinnerControl, StatusPanelMessage, SubAgentInvocationMessage,
-    SubAgentResponseMessage, SubAgentStatusMessage, TextMessage, UniversalConstructorMessage,
-    UserInputRequest, UserInputResponse, VersionCheckMessage,
+    ShellLineMessage, ShellOutputMessage, ShellStartMessage, SpinnerControl, StatusPanelMessage,
+    SubAgentInvocationMessage, SubAgentResponseMessage, SubAgentStatusMessage, TextMessage,
+    UniversalConstructorMessage, UserInputRequest, UserInputResponse,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,12 +39,9 @@ pub enum AnyMessage {
     SpinnerControl(SpinnerControl),
     Divider(DividerMessage),
     StatusPanel(StatusPanelMessage),
-    SkillList(SkillListMessage),
-    SkillActivate(SkillActivateMessage),
     SubAgentInvocation(SubAgentInvocationMessage),
     SubAgentResponse(SubAgentResponseMessage),
     SubAgentStatus(SubAgentStatusMessage),
-    VersionCheck(VersionCheckMessage),
     UniversalConstructor(UniversalConstructorMessage),
 }
 
@@ -71,12 +67,9 @@ impl AnyMessage {
             AnyMessage::SpinnerControl(m) => &m.base,
             AnyMessage::Divider(m) => &m.base,
             AnyMessage::StatusPanel(m) => &m.base,
-            AnyMessage::SkillList(m) => &m.base,
-            AnyMessage::SkillActivate(m) => &m.base,
             AnyMessage::SubAgentInvocation(m) => &m.base,
             AnyMessage::SubAgentResponse(m) => &m.base,
             AnyMessage::SubAgentStatus(m) => &m.base,
-            AnyMessage::VersionCheck(m) => &m.base,
             AnyMessage::UniversalConstructor(m) => &m.base,
         }
     }
@@ -102,12 +95,9 @@ impl AnyMessage {
             AnyMessage::SpinnerControl(m) => &mut m.base,
             AnyMessage::Divider(m) => &mut m.base,
             AnyMessage::StatusPanel(m) => &mut m.base,
-            AnyMessage::SkillList(m) => &mut m.base,
-            AnyMessage::SkillActivate(m) => &mut m.base,
             AnyMessage::SubAgentInvocation(m) => &mut m.base,
             AnyMessage::SubAgentResponse(m) => &mut m.base,
             AnyMessage::SubAgentStatus(m) => &mut m.base,
-            AnyMessage::VersionCheck(m) => &mut m.base,
             AnyMessage::UniversalConstructor(m) => &mut m.base,
         }
     }
