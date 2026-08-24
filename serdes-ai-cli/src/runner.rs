@@ -413,13 +413,13 @@ pub async fn run_prompt_with_attachments(
 
 pub fn print_intro_banner() {
     if let Ok(font) = FIGfont::standard() {
-        if let Some(figure) = font.convert("CODE PUPPY") {
+        if let Some(figure) = font.convert("NEWCODE") {
             println!("\n{figure}\n");
             return;
         }
     }
 
-    println!("\n🐶 CODE PUPPY\n");
+    println!("\n NEWCODE\n");
 }
 
 pub fn show_help_messages(bus: &MessageBus) {

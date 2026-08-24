@@ -11,6 +11,7 @@ use serdes_ai_agent::{AgentBuilder, RunContext};
 use serdes_ai_tools::{Tool, ToolError, ToolReturn};
 use tracing::{debug, info};
 
+mod coding;
 mod web_fetch;
 mod web_search;
 
@@ -21,17 +22,18 @@ use crate::bus::MessageBus;
 
 /// Tool registry for the CLI.
 pub struct CliToolRegistry {
-    pub(crate) _bus: Arc<MessageBus>,
+    pub(crate) bus: Arc<MessageBus>,
 }
 
 impl CliToolRegistry {
     pub fn new(bus: Arc<MessageBus>) -> Self {
-        Self { _bus: bus }
+        Self { bus }
     }
 
     /// Register all built-in tools.
     pub fn register_builtin_tools(&mut self) -> Result<()> {
         info!("Registering built-in tools");
+        info!("Registered tools: read_file, list_files, grep, write_file, edit_file, bash");
         info!("Registered tool: web_search");
         info!("Registered tool: web_fetch");
         info!("Registered tool: file_search");
@@ -42,7 +44,11 @@ impl CliToolRegistry {
 
     /// Apply tools to an agent builder.
     pub fn apply_to_builder(&self, builder: AgentBuilder<(), String>) -> AgentBuilder<(), String> {
-        let mut builder = builder;
+        // The coding tools come first so that read_file, list_files and grep are
+        // the working, display-emitting implementations rather than the stubs
+        // that used to shadow them.
+        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut builder = coding::register(builder, Arc::clone(&self.bus), root);
 
         // web_search
         builder = builder.tool_fn_async(
