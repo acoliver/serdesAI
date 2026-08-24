@@ -1,0 +1,33 @@
+[package]
+name = "serdes-ai-orchestrator"
+description = "Multi-agent orchestration for serdes-ai: planner, orchestrator, subagents and a quorum gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serdes-ai-core = { workspace = true }
+serdes-ai-agent = { workspace = true }
+serdes-ai-models = { workspace = true }
+serdes-ai-tools = { workspace = true }
+
+tokio = { workspace = true, features = ["sync", "process", "time", "macros", "rt"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

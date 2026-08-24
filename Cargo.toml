@@ -18,7 +18,8 @@ members = [
     "serdes-ai-macros",
     "serdes-ai-ui",
     "serdes-ai-a2a",
-    "serdes-ai-cli"
+    "serdes-ai-cli",
+    "serdes-ai-orchestrator"
 ]
 
 [workspace.package]
@@ -110,6 +111,7 @@ serdes-ai-evals = { path = "serdes-ai-evals", version = "0.3.0" }
 serdes-ai-macros = { path = "serdes-ai-macros", version = "0.3.0" }
 serdes-ai-a2a = { path = "serdes-ai-a2a", version = "0.3.0" }
 serdes-ai-cli = { path = "serdes-ai-cli", version = "0.3.0" }
+serdes-ai-orchestrator = { path = "serdes-ai-orchestrator", version = "0.3.0" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

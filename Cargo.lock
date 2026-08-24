@@ -4324,6 +4324,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "serdes-ai-orchestrator"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "serdes-ai-agent",
+ "serdes-ai-core",
+ "serdes-ai-models",
+ "serdes-ai-tools",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "serdes-ai-output"
 version = "0.3.0"
 dependencies = [
@@ -5024,6 +5043,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
