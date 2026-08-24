@@ -600,8 +600,7 @@ mod tests {
             .get("http://127.0.0.1:1")
             .send()
             .await
-            .err()
-            .expect("connection to closed loopback port must fail");
+            .expect_err("connection to closed loopback port must fail");
 
         let text_chunk = r#"{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}]}}"#;
         let finish_chunk = r#"{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}"#;

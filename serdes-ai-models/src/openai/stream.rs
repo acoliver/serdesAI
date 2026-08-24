@@ -541,8 +541,7 @@ mod tests {
             .get("http://127.0.0.1:1")
             .send()
             .await
-            .err()
-            .expect("connection to closed loopback port must fail");
+            .expect_err("connection to closed loopback port must fail");
 
         let text_chunk = r#"{"id":"123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"}}]}"#;
         let bytes = vec![Ok(make_chunk_bytes(text_chunk)), Err(err)];

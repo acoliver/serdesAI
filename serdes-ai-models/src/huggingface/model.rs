@@ -525,9 +525,8 @@ mod tests {
     /// event, so consumers keep treating the truncated stream as incomplete.
     #[tokio::test]
     async fn request_stream_without_generated_text_emits_no_terminal_event() {
-        let sse_body = concat!(
-            "data:{\"token\":{\"id\":1,\"text\":\"Hello\",\"logprob\":null,\"special\":false}}\n\n",
-        );
+        let sse_body =
+            "data:{\"token\":{\"id\":1,\"text\":\"Hello\",\"logprob\":null,\"special\":false}}\n\n";
 
         let events = stream_events_for(sse_body).await;
 

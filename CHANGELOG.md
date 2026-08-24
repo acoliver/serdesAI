@@ -5,9 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.7] - 2026-07-19
+## [0.3.0] - 2026-08-24
+
+Combined release integrating PRs #51, #52, #53, #54 and #55. Streaming is now a
+fully observable path: providers emit a terminal `StreamComplete` carrying token
+usage, and the agent surfaces that usage through `AgentStreamEvent`.
 
 ### Added
+- Every provider streaming path now ends with exactly one terminal `StreamComplete` event carrying the finish reason and token usage, so callers read final token counts from the stream itself instead of issuing a separate non-streaming request (#54):
+  - OpenAI chat streaming buffers the `include_usage` chunk and emits the terminal event at `data: [DONE]`; OpenRouter, Azure and Groq inherit the parser.
+  - Google and Antigravity close open parts with `PartEnd`; the terminal event carries the final chunk's `finishReason` and `usageMetadata`, mapping `cachedContentTokenCount` to `cache_read_tokens` (that wire reports no cache-creation count).
+  - Cohere maps `stream-end` token counts; HuggingFace and ChatGPT OAuth map `response.completed` usage; the Responses API fallback emits the terminal event after its buffered part events; `claude_code_oauth` passes it through unchanged.
+  - Contract: exactly one terminal event, always last, never after a transport error. Truncated streams emit none; usage fields absent from the wire stay `None`. Request bodies and non-streaming paths are unchanged.
+- Added `CohereModel::with_base_url` for endpoint overrides (#54).
+- Added `with_header(name, value)` and `with_appended_header(name, value)` builder methods to `AnthropicModel` for attaching custom HTTP headers to every request (#52):
+  - `with_header()` replaces any existing value of that header, including the library's own (`x-api-key`, `anthropic-version`, `Content-Type`, `anthropic-beta`) - no header is protected.
+  - `with_appended_header()` adds a value while keeping existing ones, for multi-valued headers such as `anthropic-beta`. It is the wrong choice for single-valued headers like `x-api-key`, where appending sends the header twice instead of overriding it.
+  - Header names and values are trusted caller configuration, not end-user input: since no header is protected, forwarding user-controlled data into these builders would let that user overwrite `x-api-key`.
+  - Header construction for the streaming and non-streaming paths is consolidated into a single `build_headers()`; an invalid header name or value now surfaces as `ModelError::Configuration` naming the header (never its value) instead of a late transport error.
+- `ReasoningEffort` gains `Minimal`, `XHigh`, `Max` and `Custom(String)` variants, and `with_reasoning_effort` now accepts any string (#55):
+  - `ReasoningEffort::parse` maps known strings case-insensitively; unknown strings reach the API verbatim as `Custom`, supporting newer efforts such as `xhigh` on gpt-5.1 and `max` on gpt-5.1-pro.
+  - `build_model_extended` now honours `reasoning_effort` on the OpenAI branch, selecting `OpenAIResponsesModel` (the effort exists only on the Responses API) while still applying the shared `api_key`, `base_url`, `timeout` and `client` options.
 - Token usage is now surfaced through the streaming `AgentStreamEvent` path (`run_stream`), matching the non-streaming `run()` path:
   - `AgentStreamEvent::ResponseComplete` now carries `usage: Option<RequestUsage>` (per-model-response token usage; `None` when the provider reports none).
   - `AgentStreamEvent::RunComplete` now carries `usage: RunUsage` (run-aggregate token usage, the field-wise sum of per-step usage).
@@ -20,8 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Streaming runs (`run_stream`) against an Anthropic model no longer re-issue the same request 3-4 times for a single, tool-less completion. The agent loop ended a run only on `FinishReason::Stop`, but the Anthropic streaming parser maps normal completions to `EndTurn` (the non-streaming parser maps `end_turn` to `Stop`, so only streaming was affected). The loop now ends on the existing completeness predicate `FinishReason::is_complete()` (`Stop | EndTurn | StopSequence`), so a normal streamed completion terminates in exactly one round - eliminating the redundant model calls, latency, and token cost. Tool-call rounds are unaffected (they continue before the completion check).
   - Note: a `max_tokens`-truncated (`Length`) streamed completion is still not treated as terminal and can re-issue the request; this pre-existing behavior is now logged (via `warn!`) and tracked as a follow-up.
 
-### Note
-- Adding fields to these public `AgentStreamEvent` struct-variants is source-breaking for downstream code that matches them exhaustively without `..`.
+### Changed
+- Version bump to `0.3.0` across workspace crates.
+- Nix devshell exports `OPENSSL_LIB_DIR`, `OPENSSL_INCLUDE_DIR`, `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH` so `native-tls` builds work; nixpkgs and rust-overlay locks updated, moving the locked Rust stable toolchain (#53).
+
+### Breaking
+- Streams now yield one extra event: code that treats every event as content must skip `StreamComplete` (#54).
+- Adding `usage` fields to the public `AgentStreamEvent` struct-variants is source-breaking for downstream code that matches them exhaustively without `..` (#51).
+- Callers that previously set `reasoning_effort` on the OpenAI branch of `build_model_extended` received a chat model with the value silently dropped; they now receive a Responses model with reasoning enabled (#55).
 
 ## [0.2.6] - 2025-07-11
 
@@ -307,13 +331,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [Unreleased]
-
-### Added
-- Added `with_header(name, value)` and `with_appended_header(name, value)` builder methods to `AnthropicModel` for attaching custom HTTP headers to every request:
-  - `with_header()` replaces any existing value of that header, including the library's own (`x-api-key`, `anthropic-version`, `Content-Type`, `anthropic-beta`) - no header is protected.
-  - `with_appended_header()` adds a value while keeping existing ones, for multi-valued headers such as `anthropic-beta`. It is the wrong choice for single-valued headers like `x-api-key`, where appending sends the header twice instead of overriding it.
-  - Header names and values are trusted caller configuration, not end-user input: since no header is protected, forwarding user-controlled data into these builders would let that user overwrite `x-api-key`.
-  - Header construction for the streaming and non-streaming paths is consolidated into a single `build_headers()`; an invalid header name or value now surfaces as `ModelError::Configuration` naming the header (never its value) instead of a late transport error.
 
 ### Planned
 - OpenAI Realtime API support
