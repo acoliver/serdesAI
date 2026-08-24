@@ -46,7 +46,7 @@ futures = "0.3"
 pin-project-lite = "0.2"
 
 # Error Handling
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 
 # HTTP Client
@@ -55,10 +55,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.22"
-opentelemetry = "0.21"
-opentelemetry_sdk = "0.21"
-opentelemetry-otlp = "0.14"
+tracing-opentelemetry = "0.32"
+opentelemetry = "0.31"
+opentelemetry_sdk = "0.31"
+opentelemetry-otlp = "0.31"
 
 # Data Types
 bytes = "1.0"
@@ -83,7 +83,7 @@ darling = "0.20"
 
 # Testing
 tokio-test = "0.4"
-mockall = "0.12"
+mockall = "0.14"
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 rstest = "0.26"
