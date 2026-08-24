@@ -527,8 +527,8 @@ where
     ) -> Self
     where
         F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + Sync + 'static,
-        Args: DeserializeOwned + Send + Sync + 'static,
+        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + 'static,
+        Args: DeserializeOwned + Send + 'static,
     {
         let tool_name = name.into();
         let definition = ToolDefinition::new(tool_name.clone(), description.into());
@@ -829,15 +829,15 @@ where
 {
     func: Arc<F>,
     tool_name: String,
-    _phantom: PhantomData<(Deps, Args, Fut)>,
+    _phantom: PhantomData<fn(&RunContext<Deps>, Args)>,
 }
 
 #[async_trait::async_trait]
 impl<F, Deps, Args, Fut> ToolExecutor<Deps> for AsyncFnExecutor<F, Deps, Args, Fut>
 where
     F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + Sync,
-    Args: DeserializeOwned + Send + Sync,
+    Fut: Future<Output = Result<ToolReturn, ToolError>> + Send,
+    Args: DeserializeOwned + Send,
     Deps: Send + Sync,
 {
     async fn execute(
