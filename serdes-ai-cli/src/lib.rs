@@ -27,6 +27,7 @@ pub mod session;
 pub mod shell;
 pub mod terminal;
 pub mod tools;
+pub mod turn_ui;
 pub mod uc;
 pub mod version;
 pub mod wiggum;

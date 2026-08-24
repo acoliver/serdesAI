@@ -1,17 +1,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use figlet_rs::FIGfont;
-use tokio::task::JoinHandle;
-use tokio::time::sleep;
 use tracing::info;
 
 use serdes_ai_agent::{Agent as SerdesAgent, AgentRun, AgentRunResult, RunOptions};
@@ -35,6 +29,7 @@ use crate::tools;
 use crate::tui::{
     mark_tutorial_complete, run_tutorial_wizard, should_run_tutorial, TutorialResult,
 };
+use crate::turn_ui::Turn;
 use crate::wiggum;
 
 pub type Agent = SerdesAgent<(), String>;
@@ -329,7 +324,10 @@ pub async fn execute_single_prompt(bus: Arc<MessageBus>, prompt: String) -> anyh
     }
 
     let agent = get_current_agent().await?;
-    let result = run_prompt_with_attachments(
+
+    // The turn emits its own answer, so there is nothing to print here.
+    run_prompt_with_attachments(
+        &bus,
         &agent,
         parsed.prompt,
         parsed.attachments,
@@ -337,17 +335,11 @@ pub async fn execute_single_prompt(bus: Arc<MessageBus>, prompt: String) -> anyh
     )
     .await?;
 
-    bus.emit(AnyMessage::AgentResponse(AgentResponseMessage {
-        base: BaseMessage::new(MessageCategory::Agent, None),
-        content: result.output.clone(),
-        is_markdown: true,
-        is_streaming: false,
-    }));
-
     Ok(())
 }
 
 pub async fn run_prompt_with_attachments(
+    bus: &Arc<MessageBus>,
     agent: &Agent,
     prompt: String,
     attachments: Vec<Attachment>,
@@ -377,8 +369,7 @@ pub async fn run_prompt_with_attachments(
         UserContent::parts(parts)
     };
 
-    let spinner_done = Arc::new(AtomicBool::new(false));
-    let spinner_task = start_spinner(Arc::clone(&spinner_done), "Thinking...");
+    let turn = Turn::begin(Arc::clone(bus));
 
     let cancel_token = serdes_ai_agent::CancellationToken::new();
     let run = AgentRun::new_with_cancel(
@@ -403,10 +394,10 @@ pub async fn run_prompt_with_attachments(
         }
     };
 
-    spinner_done.store(true, Ordering::SeqCst);
-    let _ = spinner_task.await;
-    eprint!("\r\x1B[2K");
-    io::stderr().flush().ok();
+    match &result {
+        Ok(run) => turn.finish(run),
+        Err(err) => turn.fail(&err.to_string()),
+    }
 
     result
 }
@@ -652,13 +643,6 @@ async fn run_interactive_turn(
 
         *history = result.messages.clone();
 
-        bus.emit(AnyMessage::AgentResponse(AgentResponseMessage {
-            base: BaseMessage::new(MessageCategory::Agent, None),
-            content: result.output.clone(),
-            is_markdown: true,
-            is_streaming: false,
-        }));
-
         autosave.push_user_message(&cleaned);
         autosave.push_agent_message(&result.output);
         autosave.save(bus);
@@ -669,7 +653,7 @@ async fn run_interactive_turn(
 
 /// Execute agent with potential wiggum loop.
 async fn execute_with_wiggum(
-    bus: &MessageBus,
+    bus: &Arc<MessageBus>,
     agent: &Agent,
     run_opts: RunOptions,
     initial_content: UserContent,
@@ -688,7 +672,8 @@ async fn execute_with_wiggum(
             break;
         }
 
-        let result = execute_agent_prompt(agent, current_content, current_run_opts.clone()).await?;
+        let result =
+            execute_agent_prompt(bus, agent, current_content, current_run_opts.clone()).await?;
 
         if wiggum::is_wiggum_active() {
             if wiggum::wiggum_should_continue(&result.output) {
@@ -714,22 +699,25 @@ async fn execute_with_wiggum(
 
 /// Execute single agent prompt.
 async fn execute_agent_prompt(
+    bus: &Arc<MessageBus>,
     agent: &Agent,
     content: UserContent,
     run_opts: RunOptions,
 ) -> anyhow::Result<AgentResult> {
-    let spinner_done = Arc::new(AtomicBool::new(false));
-    let spinner_task = start_spinner(Arc::clone(&spinner_done), "Thinking...");
+    // The waiting indicator, the rule between turns, the model's reasoning and
+    // the closing cost panel all belong to the turn, which owns them together so
+    // no path can leave the spinner running.
+    let turn = Turn::begin(Arc::clone(bus));
 
     let result = agent
         .run_with_options(content, (), run_opts)
         .await
         .map_err(|err| anyhow!(err.to_string()));
 
-    spinner_done.store(true, Ordering::SeqCst);
-    let _ = spinner_task.await;
-    eprint!("\r\x1B[2K");
-    io::stderr().flush().ok();
+    match &result {
+        Ok(run) => turn.finish(run),
+        Err(err) => turn.fail(&err.to_string()),
+    }
 
     result
 }
@@ -859,20 +847,6 @@ fn save_command_to_history(command: &str) {
     };
 
     let _ = writeln!(file, "{}", command.trim());
-}
-
-fn start_spinner(done: Arc<AtomicBool>, label: &'static str) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let mut idx = 0usize;
-
-        while !done.load(Ordering::SeqCst) {
-            eprint!("\r{} {}", frames[idx % frames.len()], label);
-            io::stderr().flush().ok();
-            idx += 1;
-            sleep(Duration::from_millis(80)).await;
-        }
-    })
 }
 
 async fn maybe_run_onboarding(bus: &MessageBus) -> Result<()> {
