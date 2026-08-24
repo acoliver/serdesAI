@@ -19,7 +19,7 @@ use serdes_ai_core::messages::{
     FileContent, ImageContent, ImageMediaType, UserContent, UserContentPart,
 };
 
-use crate::args::Cli;
+use crate::args::{Cli, RunMode};
 use crate::bus::{AnyMessage, MessageBus};
 use crate::commands;
 use crate::commands::registry::{execute_command, CommandResult};
@@ -146,8 +146,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let prompt = cli
                 .get_initial_prompt()
                 .ok_or_else(|| anyhow!("prompt-only mode requested without a prompt"))?;
-            execute_single_prompt(Arc::clone(&bus), prompt).await
+            execute_prompt(Arc::clone(&bus), prompt, cli.mode).await
         } else {
+            set_run_mode(cli.mode);
             interactive_mode(Arc::clone(&bus), cli.get_initial_prompt()).await
         }
     }
@@ -237,6 +238,86 @@ pub async fn interactive_mode(
             bus.emit_error(format!("Error: {err}"));
         }
     }
+
+    Ok(())
+}
+
+/// Show or change the run mode.
+fn handle_mode_command(bus: &MessageBus, argument: &str) {
+    if argument.is_empty() {
+        bus.emit_info(format!("Mode: {}", describe_mode(get_run_mode())));
+        bus.emit_info("Use /mode single|fast|workflow to change it.".to_string());
+        return;
+    }
+
+    let next = match argument.to_ascii_lowercase().as_str() {
+        "single" => RunMode::Single,
+        "fast" => RunMode::Fast,
+        "workflow" => RunMode::Workflow,
+        other => {
+            bus.emit_warning(format!(
+                "Unknown mode '{other}'. Expected one of: single, fast, workflow."
+            ));
+            return;
+        }
+    };
+
+    set_run_mode(next);
+    bus.emit_success(format!("Mode: {}", describe_mode(next)));
+}
+
+/// A one-line description of what a mode does.
+fn describe_mode(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::Single => "single — one agent answers directly",
+        RunMode::Fast => "fast — an orchestrator delegates to subagents, no gate",
+        RunMode::Workflow => "workflow — plan, your approval, execution, then a verification gate",
+    }
+}
+
+/// The mode interactive turns run in.
+///
+/// Held globally because `/mode` changes it mid-session and the input loop has
+/// no other channel to the dispatcher.
+static RUN_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Set the mode for subsequent turns.
+pub fn set_run_mode(mode: RunMode) {
+    let value = match mode {
+        RunMode::Single => 0,
+        RunMode::Fast => 1,
+        RunMode::Workflow => 2,
+    };
+    RUN_MODE.store(value, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The mode subsequent turns will run in.
+pub fn get_run_mode() -> RunMode {
+    match RUN_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => RunMode::Fast,
+        2 => RunMode::Workflow,
+        _ => RunMode::Single,
+    }
+}
+
+/// Execute one prompt under `mode`.
+pub async fn execute_prompt(
+    bus: Arc<MessageBus>,
+    prompt: String,
+    mode: RunMode,
+) -> anyhow::Result<()> {
+    if matches!(mode, RunMode::Single) {
+        return execute_single_prompt(bus, prompt).await;
+    }
+
+    let summary = crate::orchestration::run(Arc::clone(&bus), mode, &prompt).await?;
+
+    bus.emit(AnyMessage::AgentResponse(AgentResponseMessage {
+        base: BaseMessage::new(MessageCategory::Agent, None),
+        content: summary,
+        is_markdown: true,
+        is_streaming: false,
+    }));
 
     Ok(())
 }
@@ -470,7 +551,7 @@ Guidelines:
 }
 
 async fn run_interactive_turn(
-    bus: &MessageBus,
+    bus: &Arc<MessageBus>,
     history: &mut Vec<serdes_ai_core::messages::ModelRequest>,
     autosave: &mut AutosaveState,
     raw_input: String,
@@ -486,6 +567,11 @@ async fn run_interactive_turn(
         let cleaned = parsed.prompt.trim().to_string();
         if cleaned.eq_ignore_ascii_case("/help") {
             show_help_messages(bus);
+            return Ok(());
+        }
+
+        if let Some(rest) = cleaned.strip_prefix("/mode") {
+            handle_mode_command(bus, rest.trim());
             return Ok(());
         }
 
@@ -505,6 +591,34 @@ async fn run_interactive_turn(
         }
 
         save_command_to_history(&effective_input);
+
+        // A multi-agent turn runs the orchestrator. Attachments are not carried
+        // through: subagents receive a self-contained task, not the session's
+        // content parts, so silently dropping them would be misleading.
+        let mode = get_run_mode();
+        if !matches!(mode, RunMode::Single) {
+            if !parsed.attachments.is_empty() {
+                bus.emit_warning(
+                    "Attachments are ignored in multi-agent modes; mention the paths in the request instead."
+                        .to_string(),
+                );
+            }
+
+            let summary = crate::orchestration::run(Arc::clone(bus), mode, &cleaned).await?;
+
+            bus.emit(AnyMessage::AgentResponse(AgentResponseMessage {
+                base: BaseMessage::new(MessageCategory::Agent, None),
+                content: summary.clone(),
+                is_markdown: true,
+                is_streaming: false,
+            }));
+
+            autosave.push_user_message(&cleaned);
+            autosave.push_agent_message(&summary);
+            autosave.save(bus);
+
+            return Ok(());
+        }
 
         let agent = get_current_agent().await?;
         let run_opts = if history.is_empty() {

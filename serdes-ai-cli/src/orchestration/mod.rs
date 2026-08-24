@@ -4,6 +4,10 @@
 //! [`OrchestratorEvent`] values and asks for decisions through traits. This
 //! module is the only place the two meet.
 
+pub mod run;
+
+pub use run::run;
+
 use std::sync::Arc;
 
 use anyhow::Result;

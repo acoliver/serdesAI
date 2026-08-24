@@ -1,4 +1,16 @@
-use clap::{ArgAction, CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+
+/// How a request is executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum RunMode {
+    /// One agent answering directly, as before.
+    #[default]
+    Single,
+    /// An orchestrator delegating to subagents, with no gate.
+    Fast,
+    /// Plan, approval, execution, then a quorum gate.
+    Workflow,
+}
 
 /// SerdesAI CLI arguments.
 #[derive(Debug, Clone, Parser)]
@@ -30,6 +42,11 @@ pub struct Cli {
     /// Specify which model to use (e.g., --model gpt-5)
     #[arg(short = 'm', long = "model", value_name = "NAME")]
     pub model: Option<String>,
+
+    /// How to run: a single agent, a fast multi-agent run, or the full
+    /// plan-approve-verify workflow
+    #[arg(long = "mode", value_name = "MODE", default_value = "single")]
+    pub mode: RunMode,
 
     /// Run a single command (deprecated, use -p instead)
     #[arg(value_name = "COMMAND", num_args = 0..)]

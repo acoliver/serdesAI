@@ -22,6 +22,14 @@ use crate::config;
 ///
 /// Format: "provider:model_name" or just "model_name" (defaults to openai)
 pub async fn create_model_from_spec(spec: &str) -> Result<Arc<dyn Model>> {
+    create_model_sync(spec)
+}
+
+/// Build a model without awaiting.
+///
+/// Model construction does no I/O, and the orchestrator's `ModelFactory` is a
+/// synchronous trait, so both callers share this.
+pub fn create_model_sync(spec: &str) -> Result<Arc<dyn Model>> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Err(anyhow!("model spec cannot be empty"));
@@ -68,6 +76,23 @@ pub async fn create_model_from_spec(spec: &str) -> Result<Arc<dyn Model>> {
 
 /// Environment variable pointing at a scripted-model fixture.
 pub const MOCK_ENV: &str = "SERDES_AI_MOCK";
+
+/// Load the scripted fixture, if one is configured.
+pub fn mock_script() -> Result<Option<Script>> {
+    let Some(path) = std::env::var_os(MOCK_ENV) else {
+        return Ok(None);
+    };
+
+    let path = std::path::PathBuf::from(path);
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+
+    let script = Script::from_file(&path)
+        .map_err(|e| anyhow!("{MOCK_ENV} is set but the script could not be loaded: {e}"))?;
+
+    Ok(Some(script))
+}
 
 /// Build a scripted model when [`MOCK_ENV`] is set.
 ///
