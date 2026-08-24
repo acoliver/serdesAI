@@ -22,6 +22,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the screen is re-checked while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// The tail of the interactive prompt, `"(model) >>> "`.
+///
+/// Used to tell when the application is ready for another line rather than still
+/// producing output.
+pub const PROMPT_MARKER: &str = ">>>";
+
 /// Default terminal size. Fixed so that layout assertions are reproducible
 /// rather than depending on whatever terminal happens to run the tests.
 pub const DEFAULT_COLS: u16 = 100;
@@ -149,17 +155,25 @@ impl AppBuilder {
             cmd.env("SERDES_AI_MOCK", &path);
         }
 
+        // Default to an empty directory inside the sandbox, not the shared
+        // system temp directory. Commands that list the working directory would
+        // otherwise dump whatever happens to be in /tmp — unpredictable content,
+        // and enough of it to flood the terminal and time the test out.
+        let cwd = match &self.cwd {
+            Some(dir) => dir.clone(),
+            None => {
+                let work = sandbox.path().join("work");
+                std::fs::create_dir_all(&work)?;
+                work
+            }
+        };
+        cmd.cwd(&cwd);
+
         self._fixture = Some(sandbox);
 
         for (key, value) in &self.env {
             cmd.env(key, value);
         }
-
-        let cwd = match &self.cwd {
-            Some(dir) => dir.clone(),
-            None => std::env::temp_dir(),
-        };
-        cmd.cwd(&cwd);
 
         TerminalApp::launch(cmd, self.cols, self.rows, self._fixture)
     }
@@ -206,6 +220,11 @@ pub struct TerminalApp {
     _fixture: Option<tempfile::TempDir>,
     cols: u16,
     rows: u16,
+    /// How many lines have been submitted.
+    ///
+    /// The application prints one prompt per turn, so this says how many prompts
+    /// must have appeared before it is ready for the next line.
+    submitted: usize,
 }
 
 impl TerminalApp {
@@ -267,6 +286,7 @@ impl TerminalApp {
             _fixture: fixture,
             cols,
             rows,
+            submitted: 0,
         })
     }
 
@@ -312,8 +332,15 @@ impl TerminalApp {
     }
 
     /// Send raw bytes to the process.
+    ///
+    /// Any newline counts as a submitted line, however it was sent — through
+    /// `type_line`, a bare `send_key(Enter)`, or embedded in raw text. Counting
+    /// only in `type_line` would let the two drift apart, and the prompt wait
+    /// would then be measured against the wrong number.
     pub fn send(&mut self, input: impl AsRef<str>) -> anyhow::Result<()> {
-        self.writer.write_all(input.as_ref().as_bytes())?;
+        let input = input.as_ref();
+        self.submitted += input.matches('\r').count() + input.matches('\n').count();
+        self.writer.write_all(input.as_bytes())?;
         self.writer.flush()?;
         Ok(())
     }
@@ -336,9 +363,67 @@ impl TerminalApp {
     /// newline commits it.
     pub fn type_line(&mut self, line: impl AsRef<str>) -> anyhow::Result<()> {
         let line = line.as_ref();
+
+        // Wait for a fresh prompt first. Output is written by a separate bus, so
+        // a command's text can still be streaming when its echo appears; typing
+        // into that gap interleaves with the output and the resulting Enter
+        // lands on a clobbered line, which never submits.
+        self.wait_for_prompt()?;
+
+        // Count occurrences first: the same text is often already on screen from
+        // an earlier turn, and waiting for it to appear "anywhere" would match
+        // that stale copy and return before the application had read anything.
+        let before = self.transcript().matches(line).count();
         self.send(line)?;
-        self.wait_for(line)?;
+        self.wait_for_additional(line, before)?;
         self.send_key(Key::Enter)
+    }
+
+    /// Wait until the application has printed a prompt for the next turn.
+    pub fn wait_for_prompt(&self) -> anyhow::Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+
+        loop {
+            // One prompt is printed before the first line, and one after each
+            // completed turn.
+            if self.transcript().matches(PROMPT_MARKER).count() > self.submitted {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for prompt number {} (seen {}).\n\
+                     ---- screen ----\n{}\n----------------",
+                    self.submitted + 1,
+                    self.transcript().matches(PROMPT_MARKER).count(),
+                    self.screen_text()
+                );
+            }
+
+            let _ = self.output.recv_timeout(POLL_INTERVAL);
+        }
+    }
+
+    /// Wait until `needle` appears more than `baseline` times.
+    pub fn wait_for_additional(&self, needle: &str, baseline: usize) -> anyhow::Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+
+        loop {
+            if self.transcript().matches(needle).count() > baseline {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for a new occurrence of {needle:?} \
+                     (already present {baseline} time(s)).\n\
+                     ---- screen ----\n{}\n----------------",
+                    self.screen_text()
+                );
+            }
+
+            let _ = self.output.recv_timeout(POLL_INTERVAL);
+        }
     }
 
     /// Send a named key.

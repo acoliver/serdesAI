@@ -57,14 +57,36 @@ reading yet — it prints the prompt, enables raw mode, then blocks. Sending tex
 and Enter into that gap fails intermittently under load. `type_line` waits for
 the application to echo the text before committing it with Enter.
 
+**Input waits for a fresh prompt.** Output is written by a separate message bus,
+so a command's text can still be streaming when its echo appears. Typing into
+that gap interleaves with the output and the resulting Enter lands on a clobbered
+line, which never submits. `type_line` waits for the prompt for the next turn
+before typing, and submissions are counted inside `send` so a bare
+`send_key(Enter)` cannot drift from the count.
+
+**No bare Escape.** A lone escape byte is ambiguous — a terminal has to wait to
+see whether it begins a sequence — so sending one can swallow the characters
+typed straight after it. An early version of the command sweep did this and
+reported a different set of "broken" commands on every run.
+
 **Failures show the screen.** Every assertion prints the rendered screen on
 failure, because "expected X, not found" is useless when the question is what
 the interface actually did.
 
 ## What this found
 
-Writing the first thirteen tests surfaced a real defect: the startup banner
-promises "Ctrl+C to cancel current processing, Ctrl+D to exit cleanly", but the
-input loop handled neither. Raw mode delivers them as ordinary key events, so
-Ctrl-C fell through to the `Char(c)` arm and typed a literal `c` into the
-buffer. Both keys now work, and three tests hold that in place.
+**Ctrl-C and Ctrl-D did nothing.** The startup banner promises "Ctrl+C to cancel
+current processing, Ctrl+D to exit cleanly", but the input loop handled neither.
+Raw mode delivers them as ordinary key events, so Ctrl-C fell through to the
+`Char(c)` arm and typed a literal `c` into the buffer.
+
+**The input buffer was indexed by bytes but stepped by characters.** `cursor_pos`
+advanced one per character while indexing a `String` by byte offset, so after any
+multi-byte character the cursor sat inside it — and `String::insert` and
+`String::remove` panic on a non-boundary index. Typing an accent or an emoji and
+then continuing to edit killed the process.
+
+Both are fixed and held in place by tests. Note that several apparent findings
+turned out to be defects in this harness rather than in the CLI — a test that
+names a different culprit on each run is worse than no test, so treat an
+intermittent failure here as a bug in the harness until proven otherwise.
