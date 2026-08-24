@@ -223,9 +223,7 @@ impl RetryStrategy for LinearBackoff {
 
 /// Generate a random jitter factor between -1.0 and 1.0.
 fn rand_jitter() -> f64 {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    rng.gen_range(-1.0..1.0)
+    rand::random_range(-1.0..1.0)
 }
 
 #[cfg(test)]

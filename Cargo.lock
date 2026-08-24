@@ -3210,7 +3210,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "rand 0.8.5",
+ "rand 0.10.2",
  "reqwest",
  "rstest",
  "serde",
