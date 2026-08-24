@@ -24,6 +24,12 @@ pub struct InlineConsole {
     stdout: Arc<Mutex<io::Stdout>>,
 }
 
+impl Default for InlineConsole {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InlineConsole {
     /// Create a new inline console bound to stdout.
     #[must_use]
@@ -146,7 +152,8 @@ fn resolve_panel_width() -> usize {
         .map(|(w, _)| usize::from(w))
         .unwrap_or(DEFAULT_MAX_WIDTH);
 
-    terminal_width.min(DEFAULT_MAX_WIDTH).max(MIN_PANEL_WIDTH)
+    // MIN_PANEL_WIDTH < DEFAULT_MAX_WIDTH, so clamp cannot panic here.
+    terminal_width.clamp(MIN_PANEL_WIDTH, DEFAULT_MAX_WIDTH)
 }
 
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
