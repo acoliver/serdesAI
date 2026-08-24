@@ -45,6 +45,9 @@ pub struct Verdict {
     pub complete: bool,
     /// Whether what was written actually works.
     pub correct: bool,
+    /// Whether the change is clean: no leftover debris, no unrelated edits, and
+    /// consistent with the surrounding code.
+    pub clean: bool,
     /// What the verifier found wrong.
     #[serde(default)]
     pub findings: Vec<Finding>,
@@ -56,10 +59,12 @@ pub struct Verdict {
 impl Verdict {
     /// Whether this verifier votes to accept.
     ///
-    /// Both axes must hold: work that is correct but incomplete has not been
-    /// done, and work that is complete but broken does not function.
+    /// All three axes must hold. Work that is correct but incomplete has not
+    /// been done; work that is complete but broken does not function; and work
+    /// that is both but leaves debug output, dead code or unrelated edits behind
+    /// is not something a reviewer would accept.
     pub fn passes(&self) -> bool {
-        self.complete && self.correct
+        self.complete && self.correct && self.clean
     }
 
     /// JSON schema for the verdict submission tool.
@@ -74,6 +79,12 @@ impl Verdict {
                 "correct": {
                     "type": "boolean",
                     "description": "Does what was written actually work?"
+                },
+                "clean": {
+                    "type": "boolean",
+                    "description": "Is the change clean? No leftover debug output, commented-out \
+                                    code or dead code; no edits unrelated to the request; and \
+                                    consistent with the conventions of the surrounding code."
                 },
                 "findings": {
                     "type": "array",
@@ -96,31 +107,9 @@ impl Verdict {
                     "description": "Brief reasoning for the verdict."
                 }
             },
-            "required": ["complete", "correct"]
+            "required": ["complete", "correct", "clean"]
         })
     }
-}
-
-/// The distinct angle one verifier is asked to take.
-///
-/// Independent verifiers running the same prompt tend to produce the same
-/// opinion, which makes a quorum theatre rather than a check. Each verifier is
-/// pointed at a different way the work could be wrong; beyond the list, lenses
-/// repeat.
-pub const LENSES: [&str; 4] = [
-    "Focus on completeness: walk the plan step by step and confirm each one is \
-     actually present in the diff. Work that was silently skipped is your priority.",
-    "Focus on correctness: read the changed code closely for bugs, unhandled \
-     cases, and mistakes that the tests would not catch.",
-    "Focus on regressions: consider what previously worked and might now be \
-     broken, including callers of anything whose behaviour changed.",
-    "Focus on verification: check that what the plan claimed would prove the work \
-     — tests, commands — exists and actually passes. Run it yourself.",
-];
-
-/// The lens for verifier `index`.
-pub fn lens_for(index: usize) -> &'static str {
-    LENSES[index % LENSES.len()]
 }
 
 /// The outcome of one gate round.
@@ -228,25 +217,45 @@ impl GateOutcome {
     }
 }
 
-/// Build the prompt for one verifier.
-pub fn verifier_prompt(plan: &Plan, evidence: &Evidence, lens_index: usize) -> String {
+/// Build the prompt every verifier receives.
+///
+/// Each verifier is given the same complete job rather than a slice of it:
+/// splitting the question across specialists means no single verifier ever
+/// answers "is this done", and the tally aggregates partial opinions instead of
+/// independent judgements. Independence comes from the models differing, not
+/// from the questions differing.
+pub fn verifier_prompt(request: &str, plan: &Plan, evidence: &Evidence) -> String {
     let mut out = String::new();
 
     out.push_str(
-        "Judge whether the following approved plan was correctly and completely implemented.\n\n",
+        "Decide whether the work below was successfully completed, and whether it \
+         is clean.\n\n",
     );
-    out.push_str("# The approved plan\n\n");
+
+    out.push_str("# What the user originally asked for\n\n");
+    let _ = writeln!(out, "{request}");
+
+    out.push_str("\n# The plan that was approved\n\n");
     let _ = writeln!(out, "{plan}");
 
-    out.push_str("\n# Evidence\n\n");
+    out.push_str("\n# Evidence of what actually happened\n\n");
     out.push_str(&evidence.render());
 
-    out.push_str("\n# Your lens\n\n");
-    out.push_str(lens_for(lens_index));
-
     out.push_str(
-        "\n\nThe evidence above is what actually happened. Any summary of the work \
-         written by the agents that did it is a claim, not evidence.\n\nCall ",
+        "\n# Your task\n\n\
+         Judge three things independently.\n\n\
+         - complete: does the work satisfy BOTH the original request and every step \
+         of the approved plan? A plan followed to the letter that misses what the \
+         user actually asked for is not complete.\n\
+         - correct: does what was written actually work? Read the changed code and \
+         run whatever you need to.\n\
+         - clean: is the change free of leftover debug output, commented-out code, \
+         dead code and edits unrelated to the request, and does it follow the \
+         conventions of the code around it?\n\n\
+         You have read and shell access. Verify independently rather than taking \
+         anything on trust: if the plan says a test was added, find it and run it.\n\n\
+         The evidence above is what actually happened. Any summary written by the \
+         agents that did the work is a claim, not evidence.\n\nCall ",
     );
     out.push_str(VERDICT_TOOL);
     out.push_str(" with your judgement.");
@@ -260,9 +269,14 @@ mod tests {
     use crate::plan::PlanStep;
 
     fn verdict(complete: bool, correct: bool) -> Verdict {
+        judgement(complete, correct, true)
+    }
+
+    fn judgement(complete: bool, correct: bool, clean: bool) -> Verdict {
         Verdict {
             complete,
             correct,
+            clean,
             findings: Vec::new(),
             summary: String::new(),
         }
@@ -277,11 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn a_verdict_passes_only_when_complete_and_correct() {
-        assert!(verdict(true, true).passes());
-        assert!(!verdict(true, false).passes());
-        assert!(!verdict(false, true).passes());
-        assert!(!verdict(false, false).passes());
+    fn a_verdict_passes_only_when_all_three_axes_hold() {
+        assert!(judgement(true, true, true).passes());
+        assert!(!judgement(true, false, true).passes());
+        assert!(!judgement(false, true, true).passes());
+        assert!(
+            !judgement(true, true, false).passes(),
+            "working but messy work must not pass"
+        );
+        assert!(!judgement(false, false, false).passes());
     }
 
     #[test]
@@ -418,20 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn lenses_differ_across_the_first_verifiers() {
-        // Identical prompts would make the quorum theatre.
-        assert_ne!(lens_for(0), lens_for(1));
-        assert_ne!(lens_for(1), lens_for(2));
-        assert_ne!(lens_for(2), lens_for(3));
-    }
-
-    #[test]
-    fn lenses_wrap_for_large_verifier_counts() {
-        assert_eq!(lens_for(0), lens_for(LENSES.len()));
-    }
-
-    #[test]
-    fn the_verifier_prompt_carries_the_plan_the_evidence_and_the_lens() {
+    fn the_verifier_prompt_carries_the_request_the_plan_and_the_evidence() {
         let plan = Plan {
             summary: "Add a widget".to_string(),
             steps: vec![PlanStep {
@@ -448,23 +453,71 @@ mod tests {
             gaps: vec![],
         };
 
-        let prompt = verifier_prompt(&plan, &evidence, 0);
+        let prompt = verifier_prompt("I want a widget please", &plan, &evidence);
 
+        // The original request matters on its own: a plan can be followed
+        // faithfully and still miss what was asked for.
+        assert!(prompt.contains("I want a widget please"));
         assert!(prompt.contains("Add a widget"));
         assert!(prompt.contains("create widget.rs"));
         assert!(prompt.contains("+fn widget() {}"));
-        assert!(prompt.contains(lens_for(0)));
         assert!(prompt.contains(VERDICT_TOOL));
-        // The instruction that keeps the gate honest.
         assert!(prompt.contains("is a claim, not evidence"));
     }
 
     #[test]
+    fn the_verifier_prompt_asks_for_all_three_axes() {
+        let plan = Plan {
+            summary: "s".to_string(),
+            steps: vec![PlanStep {
+                description: "d".to_string(),
+                files: vec![],
+            }],
+            verification: vec![],
+            concerns: vec![],
+        };
+        let evidence = Evidence {
+            diff: None,
+            changed_files: vec![],
+            tests: None,
+            gaps: vec![],
+        };
+
+        let prompt = verifier_prompt("req", &plan, &evidence);
+
+        assert!(prompt.contains("complete:"));
+        assert!(prompt.contains("correct:"));
+        assert!(prompt.contains("clean:"));
+    }
+
+    #[test]
     fn verdict_deserializes_with_optional_fields_absent() {
-        let parsed: Verdict = serde_json::from_str(r#"{"complete":true,"correct":false}"#).unwrap();
+        // findings and summary are optional; models routinely omit empty ones.
+        let parsed: Verdict =
+            serde_json::from_str(r#"{"complete":true,"correct":false,"clean":true}"#).unwrap();
 
         assert!(parsed.complete);
         assert!(!parsed.correct);
+        assert!(parsed.clean);
         assert!(parsed.findings.is_empty());
+        assert!(parsed.summary.is_empty());
+    }
+
+    #[test]
+    fn a_verdict_missing_an_axis_is_rejected() {
+        // All three questions must be answered. Defaulting a missing axis would
+        // either silently reject good work or silently accept unjudged work; a
+        // parse failure instead drops the vote, which the tally counts against
+        // the quorum.
+        for partial in [
+            r#"{"correct":true,"clean":true}"#,
+            r#"{"complete":true,"clean":true}"#,
+            r#"{"complete":true,"correct":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Verdict>(partial).is_err(),
+                "should have been rejected: {partial}"
+            );
+        }
     }
 }

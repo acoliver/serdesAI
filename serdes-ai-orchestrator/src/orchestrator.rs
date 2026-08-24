@@ -213,7 +213,7 @@ impl Orchestrator {
             let id = AgentId::new();
             summary = self.run_orchestrator(id, prompt, cancel).await?;
 
-            let outcome = self.run_gate(&plan, round, cancel).await?;
+            let outcome = self.run_gate(task, &plan, round, cancel).await?;
 
             let _ = self.events.send(OrchestratorEvent::GateResult {
                 round,
@@ -246,12 +246,14 @@ impl Orchestrator {
     /// Run one gate round: gather evidence once, then vote on it.
     async fn run_gate(
         &self,
+        request: &str,
         plan: &Plan,
         round: u32,
         cancel: &CancellationToken,
     ) -> Result<GateOutcome, OrchestrationError> {
         let config = self.registry.config();
-        let verifier_count = config.gate.verifiers;
+        let verifier_models = config.gate.verifier_models.clone();
+        let verifier_count = verifier_models.len();
 
         let _ = self.events.send(OrchestratorEvent::GateRoundStart {
             round,
@@ -262,9 +264,13 @@ impl Orchestrator {
         // they are not voting on the same thing.
         let evidence = evidence::collect(&config.root, config.gate.test_command.as_deref()).await;
 
-        let votes = (0..verifier_count).map(|index| {
-            let prompt = gate::verifier_prompt(plan, &evidence, index);
-            async move { self.run_verifier(prompt, cancel).await }
+        // Every verifier is asked the same complete question; only the model
+        // behind it differs. That is where the quorum's independence comes from.
+        let prompt = gate::verifier_prompt(request, plan, &evidence);
+
+        let votes = verifier_models.iter().map(|model| {
+            let prompt = prompt.clone();
+            async move { self.run_verifier(model, prompt, cancel).await }
         });
 
         // Verifiers are independent, so they run concurrently.
@@ -284,9 +290,10 @@ impl Orchestrator {
         Ok(GateOutcome::tally(verdicts, verifier_count))
     }
 
-    /// Run one verifier and collect its verdict.
+    /// Run one verifier, on `model_spec`, and collect its verdict.
     async fn run_verifier(
         &self,
+        model_spec: &str,
         prompt: String,
         cancel: &CancellationToken,
     ) -> Result<Verdict, OrchestrationError> {
@@ -296,13 +303,13 @@ impl Orchestrator {
             }));
         }
 
-        let builder =
-            self.registry
-                .builder_for(Role::Verifier)
-                .map_err(|e| OrchestrationError::Build {
-                    role: Role::Verifier,
-                    message: e.to_string(),
-                })?;
+        let builder = self
+            .registry
+            .builder_with_model(Role::Verifier, model_spec)
+            .map_err(|e| OrchestrationError::Build {
+                role: Role::Verifier,
+                message: e.to_string(),
+            })?;
 
         // A verifier reads and runs tests but cannot write: it must not be able
         // to repair the work it is judging.
@@ -319,7 +326,7 @@ impl Orchestrator {
             id,
             parent: None,
             role: Role::Verifier,
-            task: "verify the work against the plan".to_string(),
+            task: format!("verify the work ({model_spec})"),
         });
 
         let result = agent.run(prompt, ()).await.map_err(|e| {
@@ -684,7 +691,7 @@ mod tests {
     #[test]
     fn an_invalid_gate_config_is_rejected_at_construction() {
         let config = OrchestratorConfig::new(".").with_gate(GateConfig {
-            verifiers: 1,
+            verifier_models: vec!["a:one".to_string()],
             ..Default::default()
         });
 

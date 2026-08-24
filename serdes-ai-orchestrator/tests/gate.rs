@@ -15,13 +15,19 @@ use support::{always_approve, git_commit_all, git_init, temp_root, ScriptedFacto
 
 /// A verifier turn casting the given vote.
 fn vote(complete: bool, correct: bool, note: &str) -> Vec<Turn> {
+    graded(complete, correct, true, note)
+}
+
+/// A verifier turn casting a vote on all three axes.
+fn graded(complete: bool, correct: bool, clean: bool, note: &str) -> Vec<Turn> {
     vec![Turn::Tool {
         name: "submit_verdict",
         args: serde_json::json!({
             "complete": complete,
             "correct": correct,
+            "clean": clean,
             "summary": note,
-            "findings": if complete && correct {
+            "findings": if complete && correct && clean {
                 serde_json::json!([])
             } else {
                 serde_json::json!([{
@@ -78,6 +84,11 @@ fn repo() -> std::path::PathBuf {
     fs::write(root.join("README.md"), "start\n").unwrap();
     git_commit_all(&root, "base");
     root
+}
+
+/// A gate with `n` distinct verifier models.
+fn models(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("provider{i}:model{i}")).collect()
 }
 
 fn orchestrator(
@@ -270,7 +281,7 @@ async fn every_verifier_votes_and_the_round_is_published() {
         &root,
         factory,
         GateConfig {
-            verifiers: 5,
+            verifier_models: models(5),
             ..Default::default()
         },
     );
@@ -331,4 +342,68 @@ async fn a_rejected_plan_never_reaches_the_gate() {
         !root.join("widget.rs").exists(),
         "no work may happen before the plan is approved"
     );
+}
+
+#[tokio::test]
+async fn each_verifier_runs_on_its_own_model() {
+    // The gate's independence comes from model diversity, so every configured
+    // model must actually be used exactly once per round.
+    let root = repo();
+    let factory = Arc::new(
+        working_scripts(ScriptedFactory::new())
+            .script_each(Role::Verifier, vec![vote(true, true, "ok")]),
+    );
+
+    let orch = Orchestrator::with_factory(
+        OrchestratorConfig::new(&root).with_gate(GateConfig {
+            verifier_models: models(4),
+            max_rounds: 1,
+            ..Default::default()
+        }),
+        factory.clone(),
+    )
+    .unwrap();
+
+    orch.run_workflow("make a widget", &always_approve(), CancellationToken::new())
+        .await
+        .expect("workflow errored");
+
+    let asked = factory.specs_for(Role::Verifier);
+    let mut unique = asked.clone();
+    unique.sort();
+    unique.dedup();
+
+    assert_eq!(asked.len(), 4, "every verifier should have been built");
+    assert_eq!(
+        unique.len(),
+        4,
+        "each verifier must use a distinct model, got {asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn work_that_is_unclean_does_not_pass() {
+    // Complete and correct but messy must still be rejected.
+    let root = repo();
+    let factory = working_scripts(ScriptedFactory::new()).script_each(
+        Role::Verifier,
+        vec![graded(true, true, false, "leftover debug output")],
+    );
+
+    let outcome = orchestrator(
+        &root,
+        factory,
+        GateConfig {
+            max_rounds: 1,
+            ..Default::default()
+        },
+    )
+    .run_workflow("make a widget", &always_approve(), CancellationToken::new())
+    .await
+    .expect("workflow errored");
+
+    assert!(!outcome.accepted, "unclean work must not pass the gate");
+    let gate = outcome.gate.expect("no gate outcome");
+    assert_eq!(gate.passed, 0);
+    assert!(gate.feedback().contains("leftover debug output"));
 }

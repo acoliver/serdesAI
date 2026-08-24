@@ -96,11 +96,24 @@ impl AgentRegistry {
 
     /// A builder for a role, without tools or an output type applied.
     ///
-    /// Used by the planner and verifiers, which need `output_type::<T>()` and so
-    /// cannot go through [`AgentRegistry::build`].
+    /// Used by the planner and verifiers, which need a structured output type and
+    /// so cannot go through [`AgentRegistry::build`].
     pub fn builder_for(&self, role: Role) -> Result<AgentBuilder<(), String>, ModelError> {
+        let model = self.config.role(role).model;
+        self.builder_with_model(role, &model)
+    }
+
+    /// A builder for `role` running on an explicitly chosen model.
+    ///
+    /// The gate uses this to put a different model behind each verifier, which is
+    /// where its independence comes from.
+    pub fn builder_with_model(
+        &self,
+        role: Role,
+        model_spec: &str,
+    ) -> Result<AgentBuilder<(), String>, ModelError> {
         let role_config = self.config.role(role);
-        let model = self.factory.model_for(role, &role_config.model)?;
+        let model = self.factory.model_for(role, model_spec)?;
 
         Ok(AgentBuilder::<(), String>::from_arc(model)
             .system_prompt(role_config.system_prompt)

@@ -415,6 +415,7 @@ mod tests {
             verdict: Verdict {
                 complete: false,
                 correct: true,
+                clean: true,
                 findings: vec![],
                 summary: "step 2 is missing".to_string(),
             },

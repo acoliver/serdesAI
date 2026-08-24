@@ -62,8 +62,12 @@ impl RoleConfig {
 /// Gate settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
-    /// How many verifiers vote. Must be at least 3.
-    pub verifiers: usize,
+    /// One model per verifier.
+    ///
+    /// The list length is the verifier count, and the entries must be distinct:
+    /// the gate's independence comes from genuinely different models judging the
+    /// same work, so several verifiers sharing a model would vote as one.
+    pub verifier_models: Vec<String>,
     /// How many times the orchestrator may be sent back before giving up.
     pub max_rounds: u32,
     /// Command used to gather build/test evidence, if any.
@@ -74,16 +78,35 @@ pub struct GateConfig {
 impl Default for GateConfig {
     fn default() -> Self {
         Self {
-            verifiers: 3,
+            verifier_models: default_verifier_models(),
             max_rounds: 3,
             test_command: None,
         }
     }
 }
 
+/// Three distinct models from three providers.
+///
+/// Cross-provider diversity is the point: two models from one family share
+/// training and tend to share blind spots, which is exactly what a quorum is
+/// meant to defend against. Running the default gate therefore needs credentials
+/// for all three.
+fn default_verifier_models() -> Vec<String> {
+    vec![
+        "anthropic:claude-opus-4-5".to_string(),
+        "openai:gpt-5.1".to_string(),
+        "google:gemini-3-pro".to_string(),
+    ]
+}
+
 impl GateConfig {
     /// Minimum permitted verifier count.
     pub const MIN_VERIFIERS: usize = 3;
+
+    /// How many verifiers will vote.
+    pub fn verifier_count(&self) -> usize {
+        self.verifier_models.len()
+    }
 
     /// Whether `passed` out of `total` clears the bar.
     ///
@@ -95,12 +118,25 @@ impl GateConfig {
 
     /// Reject a configuration that cannot produce a meaningful vote.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.verifiers < Self::MIN_VERIFIERS {
+        if self.verifier_count() < Self::MIN_VERIFIERS {
             return Err(ConfigError::TooFewVerifiers {
-                requested: self.verifiers,
+                requested: self.verifier_count(),
                 minimum: Self::MIN_VERIFIERS,
             });
         }
+
+        // Duplicates would let one model cast several votes, which is not a
+        // quorum of independent judgements.
+        let mut seen: Vec<&str> = Vec::new();
+        for model in &self.verifier_models {
+            if seen.contains(&model.as_str()) {
+                return Err(ConfigError::DuplicateVerifierModel {
+                    model: model.clone(),
+                });
+            }
+            seen.push(model);
+        }
+
         if self.max_rounds == 0 {
             return Err(ConfigError::ZeroRounds);
         }
@@ -118,6 +154,13 @@ pub enum ConfigError {
         requested: usize,
         /// The floor.
         minimum: usize,
+    },
+
+    /// The same model was listed for more than one verifier.
+    #[error("verifier model {model} is listed more than once; verifiers must use distinct models")]
+    DuplicateVerifierModel {
+        /// The repeated model.
+        model: String,
     },
 
     /// A gate that may never run is a gate that never gates.
@@ -223,24 +266,65 @@ mod tests {
     #[test]
     fn rejects_too_few_verifiers() {
         let gate = GateConfig {
-            verifiers: 2,
+            verifier_models: vec!["a:one".to_string(), "b:two".to_string()],
             ..Default::default()
         };
 
         assert!(matches!(
             gate.validate(),
-            Err(ConfigError::TooFewVerifiers { .. })
+            Err(ConfigError::TooFewVerifiers { requested: 2, .. })
         ));
     }
 
     #[test]
     fn accepts_more_than_three_verifiers() {
         let gate = GateConfig {
-            verifiers: 7,
+            verifier_models: (0..7).map(|i| format!("p:model{i}")).collect(),
             ..Default::default()
         };
 
         assert!(gate.validate().is_ok());
+        assert_eq!(gate.verifier_count(), 7);
+    }
+
+    #[test]
+    fn rejects_a_repeated_verifier_model() {
+        // Three verifiers on one model is one opinion counted three times.
+        let gate = GateConfig {
+            verifier_models: vec![
+                "a:one".to_string(),
+                "b:two".to_string(),
+                "a:one".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            gate.validate(),
+            Err(ConfigError::DuplicateVerifierModel { .. })
+        ));
+    }
+
+    #[test]
+    fn the_default_gate_uses_three_distinct_providers() {
+        let gate = GateConfig::default();
+
+        assert!(gate.validate().is_ok());
+        assert_eq!(gate.verifier_count(), 3);
+
+        let providers: Vec<&str> = gate
+            .verifier_models
+            .iter()
+            .map(|m| m.split(':').next().unwrap())
+            .collect();
+        let mut unique = providers.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            providers.len(),
+            "defaults should span providers, not just models"
+        );
     }
 
     #[test]

@@ -94,6 +94,8 @@ pub struct ScriptedFactory {
     counts: Mutex<HashMap<Role, usize>>,
     /// Roles that were asked for, in order.
     pub requested: Mutex<Vec<Role>>,
+    /// The model spec each build requested, paired with its role.
+    pub specs: Mutex<Vec<(Role, String)>>,
 }
 
 impl ScriptedFactory {
@@ -103,6 +105,7 @@ impl ScriptedFactory {
             sequences: Mutex::new(HashMap::new()),
             counts: Mutex::new(HashMap::new()),
             requested: Mutex::new(Vec::new()),
+            specs: Mutex::new(Vec::new()),
         }
     }
 
@@ -123,6 +126,17 @@ impl ScriptedFactory {
     pub fn count_for(&self, role: Role) -> usize {
         self.counts.lock().unwrap().get(&role).copied().unwrap_or(0)
     }
+
+    /// The model specs `role` was built with, in order.
+    pub fn specs_for(&self, role: Role) -> Vec<String> {
+        self.specs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, spec)| spec.clone())
+            .collect()
+    }
 }
 
 impl Default for ScriptedFactory {
@@ -132,8 +146,9 @@ impl Default for ScriptedFactory {
 }
 
 impl ModelFactory for ScriptedFactory {
-    fn model_for(&self, role: Role, _spec: &str) -> Result<Arc<dyn Model>, ModelError> {
+    fn model_for(&self, role: Role, spec: &str) -> Result<Arc<dyn Model>, ModelError> {
         self.requested.lock().unwrap().push(role);
+        self.specs.lock().unwrap().push((role, spec.to_string()));
 
         let nth = {
             let mut counts = self.counts.lock().unwrap();
