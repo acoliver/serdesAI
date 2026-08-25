@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
                 Err(join_err) if join_err.is_panic() => {
                     let panic_payload = join_err.into_panic();
                     let panic_msg = panic_payload_to_string(panic_payload);
-                    eprintln!("💥 Unexpected panic: {panic_msg}");
+                    eprintln!("Unexpected panic: {panic_msg}");
                     eprintln!("Please file an issue with steps to reproduce.");
                     std::process::exit(1);
                 }
@@ -35,10 +35,10 @@ async fn main() -> anyhow::Result<()> {
         signal_result = signal::ctrl_c() => {
             match signal_result {
                 Ok(()) => {
-                    eprintln!("\n🛑 Received Ctrl+C, shutting down gracefully...");
+                    eprintln!("\n Received Ctrl+C, shutting down gracefully...");
                 }
                 Err(err) => {
-                    eprintln!("\n⚠️ Failed to listen for Ctrl+C: {err}");
+                    eprintln!("\n Failed to listen for Ctrl+C: {err}");
                 }
             }
             app_task.abort();
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(err) => {
             error!(error = %err, "application exited with error");
-            eprintln!("❌ Error: {err}");
+            eprintln!("Error: {err}");
             std::process::exit(1);
         }
     }
@@ -91,7 +91,7 @@ fn install_panic_hook() {
         };
 
         error!(%location, %message, "application panicked");
-        eprintln!("💥 Whoops, the app panicked at {location}: {message}");
+        eprintln!("Whoops, the app panicked at {location}: {message}");
     }));
 }
 

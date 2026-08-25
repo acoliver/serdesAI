@@ -31,7 +31,7 @@ async fn run_onboarding_wizard() -> Result<()> {
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                                                              ║");
-    println!("║  🐶 Welcome to SerdesAI CLI!                                 ║");
+    println!("║  Welcome to SerdesAI CLI                                     ║");
     println!("║                                                              ║");
     println!("║  Your AI-powered coding assistant                            ║");
     println!("║                                                              ║");
@@ -39,7 +39,7 @@ async fn run_onboarding_wizard() -> Result<()> {
     println!();
 
     // Step 1: API Key setup
-    println!("📋 Step 1: API Key Configuration");
+    println!("Step 1: API Key Configuration");
     println!("─────────────────────────────────");
     println!("SerdesAI needs an API key to communicate with AI providers.");
     println!();
@@ -60,9 +60,9 @@ async fn run_onboarding_wizard() -> Result<()> {
 
     for (name, env_var, url) in &providers {
         if std::env::var(env_var).is_ok() {
-            println!("  ✅ {} API key found", name);
+            println!("  {} API key found", name);
         } else {
-            println!("  ❌ {} API key not set", name);
+            println!("  {} API key not set", name);
             println!("     Get one at: {}", url);
             println!("     Then run: export {}=<your-key>", env_var);
         }
@@ -73,7 +73,7 @@ async fn run_onboarding_wizard() -> Result<()> {
 
     // Step 2: Basic commands
     terminal::clear_screen();
-    println!("📋 Step 2: Basic Commands");
+    println!("Step 2: Basic Commands");
     println!("─────────────────────────────────");
     println!();
     println!("  /help          - Show all available commands");
@@ -90,21 +90,21 @@ async fn run_onboarding_wizard() -> Result<()> {
 
     // Step 3: Tips
     terminal::clear_screen();
-    println!("📋 Step 3: Pro Tips");
+    println!("Step 3: Pro Tips");
     println!("─────────────────────────────────");
     println!();
-    println!("  💡 Use Tab for command completion");
-    println!("  💡 Press Alt+M or F2 for multiline mode");
-    println!("  💡 Use @ to attach files: \"@main.rs explain this code\"");
-    println!("  💡 The agent can use tools: web_search, web_fetch, read_file, etc.");
-    println!("  💡 Press Ctrl+C to cancel, Ctrl+D to exit");
+    println!("  Use Tab for command completion");
+    println!("  Press Alt+M or F2 for multiline mode");
+    println!("  Use @ to attach files: \"@main.rs explain this code\"");
+    println!("  The agent can use tools: web_search, web_fetch, read_file, etc.");
+    println!("  Press Ctrl+C to cancel, Ctrl+D to exit");
     println!();
 
     wait_for_enter("Press Enter to start using SerdesAI!").await?;
 
     terminal::clear_screen();
 
-    bus::emit_info("👋 Onboarding complete! Type /help anytime for help.".to_string());
+    bus::emit_info("Onboarding complete! Type /help anytime for help.".to_string());
 
     Ok(())
 }

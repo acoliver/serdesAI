@@ -322,7 +322,7 @@ fn file_display_name(path: &Path, fallback_name: &std::ffi::OsStr) -> String {
 fn get_available_agents_with_info() -> Vec<AgentInfo> {
     let candidates = [
         (
-            "code-puppy",
+            "newcode",
             "Sassy coding assistant with tools and terminal workflow",
         ),
         ("default", "General-purpose helpful assistant"),

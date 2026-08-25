@@ -86,14 +86,10 @@ pub fn init() {
 }
 
 fn handle_show(_cmd: &str) -> CommandResult {
-    let puppy_name = config::get_config_value("puppy_name")
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(config::get_agent_name);
-    let owner_name = config::get_config_value("owner_name").unwrap_or_default();
     let current_agent = config::get_agent_name();
     let default_agent = config::get_config_value("default_agent")
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "code-puppy".to_string());
+        .unwrap_or_else(config::default_agent_name);
     let model = config::get_model_name();
     let yolo_mode = std::env::var("YOLO_MODE")
         .ok()
@@ -145,10 +141,8 @@ fn handle_show(_cmd: &str) -> CommandResult {
     let protected_tokens = format_number(config::get_protected_token_count());
     let threshold_pct = format!("{:.0}%", config::get_compaction_threshold() * 100.0);
 
-    bus::emit_info("🐶 Puppy Status".to_string());
+    bus::emit_info("Status".to_string());
     bus::emit_info("".to_string());
-    bus::emit_info(format_status_line("puppy_name", &puppy_name));
-    bus::emit_info(format_status_line("owner_name", &owner_name));
     bus::emit_info(format_status_line("current_agent", &current_agent));
     bus::emit_info(format_status_line("default_agent", &default_agent));
     bus::emit_info(format_status_line("model", &model));
@@ -221,10 +215,6 @@ fn handle_set(cmd: &str) -> CommandResult {
         "subagent_verbose" => parse_bool(value)
             .map(config::set_subagent_verbose)
             .map_err(|err| err.to_string()),
-        // Compatibility aliases requested by task; pass through generic setter if not first-class.
-        "puppy_name" | "owner_name" => {
-            config::set_config_value(&key_norm, value).map_err(|err| err.to_string())
-        }
         _ => config::set_config_value(&key_norm, value).map_err(|err| err.to_string()),
     };
 
@@ -233,18 +223,11 @@ fn handle_set(cmd: &str) -> CommandResult {
             bus::emit_success(format!("Set {} = {}", key_norm, value));
         }
         Err(err) => {
-            if key_norm == "puppy_name" || key_norm == "owner_name" {
-                bus::emit_error(format!(
-                    "Failed to set '{}': {}. This key may not be available in this config version.",
-                    key_norm, err
-                ));
-            } else {
-                let available = config::get_config_keys().join(", ");
-                bus::emit_error(format!(
-                    "Failed to set '{}': {}\nAvailable keys: {}",
-                    key_norm, err, available
-                ));
-            }
+            let available = config::get_config_keys().join(", ");
+            bus::emit_error(format!(
+                "Failed to set '{}': {}\nAvailable keys: {}",
+                key_norm, err, available
+            ));
         }
     }
 

@@ -47,7 +47,14 @@ pub fn set_model_name(model: &str) {
 }
 
 pub fn get_agent_name() -> String {
-    with_read(|cfg| cfg.agent.clone().unwrap_or_else(default_agent))
+    // Mapped on read, so a settings file naming the agent by its previous name
+    // resolves to the current one rather than failing validation.
+    with_read(|cfg| {
+        cfg.agent
+            .as_deref()
+            .map(super::canonical_agent_name)
+            .unwrap_or_else(default_agent)
+    })
 }
 
 pub fn set_agent_name(agent: &str) {

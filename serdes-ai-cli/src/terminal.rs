@@ -33,9 +33,9 @@ pub const fn is_linux() -> bool {
 /// Check if terminal supports truecolor and print warning if not
 pub fn print_truecolor_warning() {
     if !supports_truecolor() {
-        eprintln!("\n⚠️  Warning: Your terminal does not support truecolor (24-bit color).");
-        eprintln!("   Some visual features may not display correctly.");
-        eprintln!("   For best experience, use a modern terminal like:");
+        eprintln!("\n  Warning: Your terminal does not support truecolor (24-bit color).");
+        eprintln!("Some visual features may not display correctly.");
+        eprintln!("For best experience, use a modern terminal like:");
         eprintln!("   - iTerm2 (macOS)");
         eprintln!("   - Windows Terminal (Windows)");
         eprintln!("   - Alacritty, Kitty, or WezTerm (Linux/macOS)");

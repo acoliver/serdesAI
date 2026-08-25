@@ -194,7 +194,7 @@ impl RichConsoleRendererV2 {
     fn get_level_prefix(level: MessageLevel) -> &'static str {
         match level {
             MessageLevel::Error => "✗ ",
-            MessageLevel::Warning => "⚠ ",
+            MessageLevel::Warning => " ",
             MessageLevel::Success => "✓ ",
             MessageLevel::Info => "ℹ ",
             MessageLevel::Debug => "• ",
@@ -216,22 +216,6 @@ impl RichConsoleRendererV2 {
         }
 
         format!("{value:.1} {}", UNITS[unit_idx])
-    }
-
-    fn get_file_icon(path: &str) -> &'static str {
-        if path.ends_with(".rs") {
-            "🦀"
-        } else if path.ends_with(".py") {
-            "🐍"
-        } else if path.ends_with(".md") {
-            "📝"
-        } else if path.ends_with(".json") {
-            "🧾"
-        } else if path.ends_with(".toml") {
-            "⚙️"
-        } else {
-            "📄"
-        }
     }
 
     fn format_banner(&self, banner_name: &str, text: &str) -> String {
@@ -273,7 +257,7 @@ impl RichConsoleRendererV2 {
         }
 
         self.print_markup_line(&format!(
-            "  ├─ 📂 [bold cyan]{}[/bold cyan] [dim](recursive={})[/dim]",
+            "  ├─  [bold cyan]{}[/bold cyan] [dim](recursive={})[/dim]",
             Self::escape_markup(&msg.directory),
             msg.recursive
         ));
@@ -307,7 +291,7 @@ impl RichConsoleRendererV2 {
         }
 
         self.print_markup_line(&format!(
-            "  ├─ 📂 [bold cyan]{}[/bold cyan]{}",
+            "  ├─  [bold cyan]{}[/bold cyan]{}",
             Self::escape_markup(&msg.path),
             line_info
         ));
@@ -326,7 +310,7 @@ impl RichConsoleRendererV2 {
         }
 
         self.print_markup_line(&format!(
-            "  ├─ 📂 [dim]{} for '{}'[/dim]",
+            "  ├─  [dim]{} for '{}'[/dim]",
             Self::escape_markup(&msg.directory),
             Self::escape_markup(&msg.search_term)
         ));
@@ -355,7 +339,7 @@ impl RichConsoleRendererV2 {
         }
 
         self.print_markup_line(&format!(
-            "  ├─ ✏️ [bold cyan]{}[/bold cyan] [green]+{}[/green] [red]-{}[/red]",
+            "  ├─ [bold cyan]{}[/bold cyan] [green]+{}[/green] [red]-{}[/red]",
             Self::escape_markup(&msg.file_path),
             msg.additions,
             msg.deletions
@@ -375,11 +359,11 @@ impl RichConsoleRendererV2 {
         }
 
         self.print_markup_line(&format!(
-            "  ├─ 🚀 [dim]$ {}[/dim]",
+            "  ├─  [dim]$ {}[/dim]",
             Self::escape_markup(&msg.command)
         ));
         self.print_markup_line(&format!(
-            "  │  [dim]📂 Working directory: {}[/dim]",
+            "  │  [dim] Working directory: {}[/dim]",
             Self::escape_markup(&msg.cwd)
         ));
 
@@ -425,7 +409,7 @@ impl RichConsoleRendererV2 {
         let (style, icon) = match msg.status_type {
             StatusType::Info => ("cyan", "ℹ"),
             StatusType::Success => ("green", "✓"),
-            StatusType::Warning => ("yellow", "⚠"),
+            StatusType::Warning => ("yellow", ""),
             StatusType::Error => ("red", "✗"),
         };
 
@@ -530,7 +514,7 @@ impl RichConsoleRendererV2 {
                 self.print_plain_line("");
                 continue;
             }
-            self.print_line("dim", &format!("🧠 {}", Self::escape_markup(line)));
+            self.print_line("dim", &format!(" {}", Self::escape_markup(line)));
         }
 
         Ok(())
@@ -744,10 +728,5 @@ impl RichConsoleRendererV2 {
     #[allow(dead_code)]
     pub fn active_spinner_count(&self) -> usize {
         self.spinners.values().filter(|s| s.active).count()
-    }
-
-    #[allow(dead_code)]
-    pub fn get_file_icon_public(path: &str) -> &'static str {
-        Self::get_file_icon(path)
     }
 }

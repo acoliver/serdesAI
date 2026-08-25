@@ -62,10 +62,10 @@ async fn handle_mcp_async(cmd: &str) -> anyhow::Result<()> {
                 bus::emit_info("Configured MCP servers:".to_string());
                 for (name, status) in servers {
                     let status_str = match status {
-                        ServerStatus::Running => "🟢 running",
-                        ServerStatus::Starting => "🟡 starting",
-                        ServerStatus::Stopped => "⚪ stopped",
-                        ServerStatus::Error(_) => "🔴 error",
+                        ServerStatus::Running => " running",
+                        ServerStatus::Starting => " starting",
+                        ServerStatus::Stopped => " stopped",
+                        ServerStatus::Error(_) => " error",
                     };
                     bus::emit_info(format!("  {} - {}", name, status_str));
                 }

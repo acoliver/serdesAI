@@ -7,7 +7,7 @@ use crate::register_command;
 
 const DEFAULT_MOTD: &str = r#"
 ╔══════════════════════════════════════════════════════════════╗
-║  🐶 Welcome to SerdesAI CLI!                                   ║
+║   Welcome to SerdesAI CLI!                                   ║
 ║                                                              ║
 ║  Type /help for available commands                           ║
 ║  Type @filename to attach files to your prompt              ║

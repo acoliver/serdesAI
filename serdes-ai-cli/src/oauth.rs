@@ -252,7 +252,7 @@ pub async fn run_chatgpt_oauth() -> Result<()> {
     let config = chatgpt_oauth_config();
     let token = start_oauth_flow(&config).await?;
     save_oauth_token("chatgpt", &token)?;
-    println!("✅ ChatGPT authentication successful!");
+    println!("ChatGPT authentication successful.");
     Ok(())
 }
 
@@ -261,7 +261,7 @@ pub async fn run_claude_oauth() -> Result<()> {
     let config = claude_oauth_config();
     let token = start_oauth_flow(&config).await?;
     save_oauth_token("claude", &token)?;
-    println!("✅ Claude authentication successful!");
+    println!("Claude authentication successful.");
     Ok(())
 }
 

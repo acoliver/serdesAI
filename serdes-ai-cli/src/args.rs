@@ -20,7 +20,7 @@ pub enum RunMode {
     version = env!("CARGO_PKG_VERSION"),
     author = env!("CARGO_PKG_AUTHORS"),
     disable_version_flag = true,
-    after_help = "Examples:\n  serdes-ai -i\n      Run in interactive mode\n\n  serdes-ai -p \"refactor this function\"\n      Execute a single prompt and exit\n\n  serdes-ai -a code-puppy -m gpt-5 -p \"write tests\"\n      Select agent/model and run one prompt\n\n  serdes-ai fix failing tests\n      Deprecated positional command form (use -p instead)",
+    after_help = "Examples:\n  serdes-ai -i\n      Run in interactive mode\n\n  serdes-ai -p \"refactor this function\"\n      Execute a single prompt and exit\n\n  serdes-ai -a newcode -m gpt-5 -p \"write tests\"\n      Select agent/model and run one prompt\n\n  serdes-ai fix failing tests\n      Deprecated positional command form (use -p instead)",
 )]
 pub struct Cli {
     /// Show version and exit
@@ -35,7 +35,7 @@ pub struct Cli {
     #[arg(short = 'p', long = "prompt", value_name = "TEXT")]
     pub prompt: Option<String>,
 
-    /// Specify which agent to use (e.g., --agent code-puppy)
+    /// Specify which agent to use (e.g., --agent newcode)
     #[arg(short = 'a', long = "agent", value_name = "NAME")]
     pub agent: Option<String>,
 
@@ -167,9 +167,9 @@ mod tests {
 
     #[test]
     fn trims_agent_and_model() {
-        let mut cli = Cli::parse_from(["serdes-ai", "-a", "  code-puppy  ", "-m", "  gpt-5  "]);
+        let mut cli = Cli::parse_from(["serdes-ai", "-a", "  newcode  ", "-m", "  gpt-5  "]);
         cli.normalize();
-        assert_eq!(cli.get_agent(), Some("code-puppy"));
+        assert_eq!(cli.get_agent(), Some("newcode"));
         assert_eq!(cli.get_model(), Some("gpt-5"));
     }
 

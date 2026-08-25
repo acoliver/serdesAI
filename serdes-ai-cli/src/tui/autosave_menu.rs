@@ -110,7 +110,7 @@ impl AutosaveMenu {
             ])
             .split(area);
 
-        let title = Paragraph::new("💾 Autosaved Sessions")
+        let title = Paragraph::new("Autosaved Sessions")
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
@@ -175,7 +175,7 @@ impl AutosaveMenu {
 
     fn render_session_item(&self, session: &SessionInfo, selected: bool) -> ListItem<'_> {
         let date_str = session.updated_at.format("%Y-%m-%d %H:%M").to_string();
-        let prefix = if selected { "→ " } else { "  " };
+        let prefix = if selected { "→ " } else { " " };
         let style = if selected {
             self.theme.selected_style()
         } else {

@@ -136,7 +136,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 
     if migrated || migrated_data {
         bus.emit_success(
-            "📦 Settings carried over from ~/.code_puppy to ~/.newcode (the old copy was left in place).".to_string(),
+            "Settings carried over from ~/.code_puppy to ~/.newcode (the old copy was left in place).".to_string(),
         );
     }
 
@@ -152,7 +152,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             // Set for the process rather than saved, so a one-off run against a
             // local server does not silently repoint every later session.
             std::env::set_var("SERDES_AI_BASE_URL", base_url);
-            bus.emit_success(format!("🔌 Using endpoint: {base_url}"));
+            bus.emit_success(format!("Using endpoint: {base_url}"));
         }
 
         if cli.yes {
@@ -162,13 +162,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         if let Some(model) = cli.get_model() {
             validate_model(model)?;
             config::set_model_name(model);
-            bus.emit_success(format!("🎯 Using model: {model}"));
+            bus.emit_success(format!("Using model: {model}"));
         }
 
         if let Some(agent_name) = cli.get_agent() {
             validate_agent(agent_name)?;
-            config::set_agent_name(agent_name);
-            bus.emit_success(format!("🤖 Using agent: {agent_name}"));
+            config::set_agent_name(&config::canonical_agent_name(agent_name));
+            bus.emit_success(format!("Using agent: {agent_name}"));
         }
 
         run_startup_callbacks(&bus).await?;
@@ -525,12 +525,14 @@ pub fn validate_model(model: &str) -> Result<()> {
 }
 
 pub fn validate_agent(agent: &str) -> Result<()> {
-    let normalized = agent.trim().to_ascii_lowercase();
+    // The previous name resolves to the current one, so a saved setting or a
+    // script that still names it keeps working.
+    let normalized = config::canonical_agent_name(agent).to_ascii_lowercase();
     if normalized.is_empty() {
         return Err(anyhow!("agent cannot be empty"));
     }
 
-    let supported = ["code-puppy", "default"];
+    let supported = [config::DEFAULT_AGENT, "default"];
     if !supported.contains(&normalized.as_str()) {
         return Err(anyhow!(
             "agent '{}' not found. Available agents: {}",
@@ -579,7 +581,7 @@ pub async fn get_current_agent() -> Result<Agent> {
 /// Get system prompt based on agent name.
 fn get_system_prompt(agent_name: &str) -> String {
     match agent_name {
-        "code-puppy" => r#"You are Code Puppy, a helpful coding assistant.
+        config::DEFAULT_AGENT => r#"You are NewCode, a helpful coding assistant.
 
 Your capabilities:
 - Write and explain code in any programming language
@@ -754,11 +756,11 @@ async fn execute_with_wiggum(
                     result.output
                 ));
                 current_run_opts = RunOptions::default().message_history(result.messages.clone());
-                bus.emit_info(format!("🍩 Wiggum iteration {}...", iteration));
+                bus.emit_info(format!("Wiggum iteration {}...", iteration));
                 continue;
             }
 
-            bus.emit_success("🍩 Wiggum loop complete!");
+            bus.emit_success("Wiggum loop complete!");
             wiggum::stop_wiggum();
         }
 
@@ -1048,14 +1050,14 @@ async fn maybe_run_onboarding(bus: &MessageBus) -> Result<()> {
     match run_tutorial_wizard() {
         Ok(TutorialResult::Completed) => {
             mark_tutorial_complete();
-            bus.emit_success("🎉 Tutorial complete! Welcome to Serdes AI!".to_string());
+            bus.emit_success("Tutorial complete! Welcome to Serdes AI!".to_string());
         }
         Ok(TutorialResult::Skipped) => {
             bus.emit_info("Tutorial skipped. Run /tutorial anytime!".to_string());
         }
         Err(err) => {
             bus.emit_warning(format!("Tutorial failed to launch: {err}"));
-            bus.emit_info("👋 Welcome! Type /help to see available commands.".to_string());
+            bus.emit_info("Welcome! Type /help to see available commands.".to_string());
             bus.emit_info("Tip: prefix file paths with @ to attach them to a prompt.".to_string());
         }
     }

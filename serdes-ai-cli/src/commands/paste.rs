@@ -27,7 +27,7 @@ fn handle_paste(_cmd: &str) -> CommandResult {
     match clipboard::capture_clipboard_image_to_pending() {
         Some(placeholder) => {
             let count = clipboard::get_pending_count();
-            bus::emit_success(format!("📋 Captured: {}", placeholder));
+            bus::emit_success(format!("Captured: {}", placeholder));
             bus::emit_info(format!("Total pending images: {}", count));
         }
         None => {

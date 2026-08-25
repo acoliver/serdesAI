@@ -9,7 +9,7 @@ use crate::wiggum;
 
 const MOTD_CONTENT: &str = concat!(
     "╔══════════════════════════════════════════════════════════════╗\n",
-    "║  🐶 Welcome to SerdesAI CLI                                  ║\n",
+    "║   Welcome to SerdesAI CLI                                  ║\n",
     "╠══════════════════════════════════════════════════════════════╣\n",
     "║  Version: ",
     env!("CARGO_PKG_VERSION"),
@@ -180,7 +180,7 @@ fn handle_paste(_cmd: &str) -> CommandResult {
     match clipboard::capture_clipboard_image_to_pending() {
         Some(placeholder) => {
             let count = clipboard::get_pending_count();
-            bus::emit_success(format!("📋 Captured: {}", placeholder));
+            bus::emit_success(format!("Captured: {}", placeholder));
             bus::emit_info(format!("Total pending images: {}", count));
         }
         None => {
@@ -227,7 +227,7 @@ fn handle_tutorial(_cmd: &str) -> CommandResult {
     match run_tutorial_wizard() {
         Ok(TutorialResult::Completed) => {
             mark_tutorial_complete();
-            bus::emit_success("🎉 Tutorial complete! Welcome to Serdes AI!".to_string());
+            bus::emit_success("Tutorial complete! Welcome to Serdes AI!".to_string());
         }
         Ok(TutorialResult::Skipped) => {
             bus::emit_info("Tutorial skipped. Run /tutorial anytime!".to_string());
@@ -262,7 +262,7 @@ fn handle_generate_pr_description(cmd: &str) -> CommandResult {
 
     // Return the prompt as a CommandResult::Prompt
     // This will be processed by the agent
-    bus::emit_info("📝 Generating PR description...".to_string());
+    bus::emit_info("Generating PR description...".to_string());
     bus::emit_info(
         "The agent will analyze your git changes and create a PR description.".to_string(),
     );

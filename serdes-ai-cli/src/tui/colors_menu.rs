@@ -174,7 +174,7 @@ impl ColorsMenu {
             ])
             .split(area);
 
-        let title = Paragraph::new("🎨 Color Configuration")
+        let title = Paragraph::new("Color Configuration")
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
@@ -211,7 +211,7 @@ impl ColorsMenu {
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
 
         spans.push(Span::styled(
@@ -318,7 +318,7 @@ impl DiffMenu {
             ])
             .split(area);
 
-        let title = Paragraph::new("🧩 Diff Display Mode")
+        let title = Paragraph::new("Diff Display Mode")
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);

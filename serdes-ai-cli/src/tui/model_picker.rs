@@ -177,9 +177,9 @@ impl ModelPicker {
 
         let current_model = self.models.iter().find(|m| m.is_current);
         let title_text = if let Some(model) = current_model {
-            format!("🤖 Select a Model | Current: {}", model.name)
+            format!("Select a Model | Current: {}", model.name)
         } else {
-            "🤖 Select a Model".to_string()
+            "Select a Model".to_string()
         };
 
         let title = Paragraph::new(title_text)
@@ -248,7 +248,7 @@ impl ModelPicker {
         let mut spans = Vec::new();
 
         let current_marker = if model.is_current { "✓" } else { " " };
-        let pin_marker = if model.is_pinned { "📌" } else { " " };
+        let pin_marker = if model.is_pinned { "" } else { " " };
         spans.push(Span::raw(format!("{} {} ", current_marker, pin_marker)));
 
         let provider_color = provider_color(&model.provider);

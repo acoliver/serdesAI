@@ -63,14 +63,14 @@ pub async fn check_for_updates() -> Result<VersionInfo> {
 /// Print version info
 pub fn print_version_info(info: &VersionInfo) {
     if info.update_available {
-        println!("\n📦 Update available!");
-        println!("   Current: {}", info.current_version);
+        println!("\n Update available!");
+        println!("Current: {}", info.current_version);
         println!(
-            "   Latest:  {}",
+            "Latest:  {}",
             info.latest_version.as_deref().unwrap_or("unknown")
         );
         if let Some(url) = &info.download_url {
-            println!("   Download: {}", url);
+            println!("Download: {}", url);
         }
         println!();
     }

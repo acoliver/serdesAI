@@ -167,7 +167,7 @@ pub fn list_sessions(base_dir: &Path) -> Result<Vec<SessionInfo>> {
         });
     }
 
-    infos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    infos.sort_by_key(|info| std::cmp::Reverse(info.updated_at));
     Ok(infos)
 }
 
@@ -217,7 +217,7 @@ pub fn cleanup_old_sessions(max_count: usize, base_dir: &Path) -> Result<usize> 
     }
 
     // Keep newest N (list_sessions returns descending updated_at), delete the tail.
-    infos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    infos.sort_by_key(|info| std::cmp::Reverse(info.updated_at));
     let stale = infos.into_iter().skip(max_count);
 
     let mut removed = 0usize;

@@ -148,7 +148,7 @@ impl AgentPicker {
             ])
             .split(area);
 
-        let title = Paragraph::new("🤖 Select an Agent")
+        let title = Paragraph::new("Select an Agent")
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
@@ -201,7 +201,7 @@ impl AgentPicker {
         if agent.is_current {
             spans.push(Span::styled("✓ ", Style::default().fg(Color::Green)));
         } else {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
 
         let name_style = if selected {

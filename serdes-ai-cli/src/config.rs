@@ -29,7 +29,9 @@ const MODELS_FILE_NAME: &str = "models.json";
 const EXTRA_MODELS_FILE_NAME: &str = "extra_models.json";
 const AUTOSAVE_DIR_NAME: &str = "autosaves";
 const COMMAND_HISTORY_FILE_NAME: &str = "command_history.txt";
-const CONFIG_SECTION_PUPPY: &str = "puppy";
+const CONFIG_SECTION: &str = "newcode";
+/// The section name used when the application was called Code Puppy.
+const LEGACY_CONFIG_SECTION: &str = "puppy";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -303,7 +305,13 @@ impl Config {
 
         match fs::read_to_string(get_config_file()) {
             Ok(raw) => {
-                let section = parse_ini_section(&raw, CONFIG_SECTION_PUPPY);
+                // Fall back to the old section name so a settings file written
+                // by an earlier version is still read rather than silently
+                // replaced by defaults.
+                let mut section = parse_ini_section(&raw, CONFIG_SECTION);
+                if section.is_empty() {
+                    section = parse_ini_section(&raw, LEGACY_CONFIG_SECTION);
+                }
                 let mut cfg = Self::default();
                 apply_ini_values(&mut cfg, &section);
                 cfg.sync_legacy_fields();
@@ -702,7 +710,7 @@ fn apply_ini_values(cfg: &mut Config, values: &HashMap<String, String>) {
 }
 
 fn serialize_ini_config(cfg: &Config) -> serde_json::Result<String> {
-    let mut out = String::from("[puppy]\n");
+    let mut out = format!("[{CONFIG_SECTION}]\n");
 
     write_kv(
         &mut out,
@@ -948,7 +956,30 @@ pub(crate) fn default_model() -> String {
 }
 
 pub(crate) fn default_agent() -> String {
-    "code-puppy".to_string()
+    default_agent_name()
+}
+
+/// The agent used when none is chosen.
+pub fn default_agent_name() -> String {
+    DEFAULT_AGENT.to_string()
+}
+
+/// The built-in agent's name.
+pub const DEFAULT_AGENT: &str = "newcode";
+
+/// The name the built-in agent had when the application was called Code Puppy.
+///
+/// Still accepted, so a saved setting or a script naming it keeps working.
+pub const LEGACY_AGENT: &str = "code-puppy";
+
+/// Resolve an agent name, mapping the previous name onto the current one.
+pub fn canonical_agent_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.eq_ignore_ascii_case(LEGACY_AGENT) {
+        DEFAULT_AGENT.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub(crate) fn default_renderer() -> String {

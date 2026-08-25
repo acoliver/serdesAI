@@ -304,7 +304,7 @@ impl ModelSettingsEditor {
             .split(area);
 
         // Title
-        let title = Paragraph::new(format!("⚙️ Model Settings: {}", self.model_name))
+        let title = Paragraph::new(format!("Model Settings: {}", self.model_name))
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
@@ -365,7 +365,7 @@ impl ModelSettingsEditor {
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
 
         // Setting name

@@ -101,7 +101,7 @@ impl TutorialWizard {
             .split(area);
 
         // Title
-        let title = Paragraph::new("🎓 Serdes AI Tutorial")
+        let title = Paragraph::new("Serdes AI Tutorial")
             .style(self.theme.title_style())
             .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
@@ -174,7 +174,7 @@ impl TutorialWizard {
 3. Selecting a model
 4. Running your first prompt
 
-Serdes AI is a feature-complete port of Code Puppy with:
+Serdes AI provides:
 - Interactive TUIs for selection
 - Session management with autosave
 - Rich console rendering
@@ -196,9 +196,7 @@ Supported providers:
 
 Set keys via environment variables:
   export OPENAI_API_KEY="sk-..."
-  export ANTHROPIC_API_KEY="sk-..."
-
-Or run /tutorial again and select OAuth for browser-based auth.
+  export ANTHROPIC_API_KEY="sk-..."Or run /tutorial again and select OAuth for browser-based auth.
 
 Press 'n' to continue."#
             .to_string();
@@ -209,14 +207,14 @@ Press 'n' to continue."#
         let title = "Step 2: Choose an Agent".to_string();
         let body = r#"Agents are specialized assistants for different tasks:
 
-• code-puppy: General purpose coding assistant (default)
+• newcode: General purpose coding assistant (default)
 • code-reviewer: Focused on code review
 • python-programmer: Python-specific expert
 • javascript-reviewer: JavaScript specialist
 
 Use /agent to switch agents anytime.
 
-The default 'code-puppy' is great for most tasks!
+The default 'newcode' suits most tasks.
 
 Press 'n' to continue."#
             .to_string();
@@ -251,15 +249,13 @@ Press 'n' to continue."#
 Example prompts:
   "Create a Python script to download images"
   "Review this code for bugs"
-  "Explain how async works in Rust"
-
-Press 'n' to finish the tutorial!"#
+  "Explain how async works in Rust"Press 'n' to finish the tutorial!"#
             .to_string();
         (title, body)
     }
 
     fn render_complete(&self) -> (String, String) {
-        let title = "🎉 Tutorial Complete!".to_string();
+        let title = "Tutorial Complete!".to_string();
         let body = r#"You're ready to use Serdes AI!
 
 Quick reference:
@@ -269,7 +265,7 @@ Quick reference:
 • /session - Session info
 • Ctrl+C - Cancel current operation
 
-Happy coding! 🐶"#
+Happy coding! "#
             .to_string();
         (title, body)
     }
