@@ -110,16 +110,22 @@ fn a_screen_can_be_opened_twice() {
     let mut app = at_prompt();
 
     for visit in 0..2 {
-        // Count first: the previous visit's output is still in the transcript,
-        // and waiting for the marker to appear "anywhere" would match that stale
-        // copy and dismiss a screen that had not drawn yet.
-        let before = app.transcript().matches("olor").count();
-
         app.type_line("/colors").expect("could not open the screen");
-        app.wait_for_additional("olor", before)
+
+        // Judged from the screen, not the transcript. The transcript keeps every
+        // redraw, so a count-based wait is satisfied by output from the previous
+        // visit and Escape then dismisses a screen that has not drawn — leaving
+        // the next command to be typed into a screen that is still open.
+        app.wait_for_on_screen("olor")
             .unwrap_or_else(|e| panic!("the screen did not draw on visit {visit}: {e}"));
+
         app.send_key(Key::Esc)
             .expect("could not dismiss the screen");
+
+        // Settling is the signal that it closed. "olor" cannot be waited on: the
+        // typed "/colors" stays in the scrollback, so it never disappears.
+        app.wait_until_idle(std::time::Duration::from_millis(300))
+            .unwrap_or_else(|e| panic!("the screen did not close on visit {visit}: {e}"));
     }
 
     app.type_line("still working?")

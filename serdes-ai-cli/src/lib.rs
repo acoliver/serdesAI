@@ -4,6 +4,7 @@ pub mod config;
 pub mod messages;
 pub mod orchestration;
 pub mod renderer;
+pub mod screen;
 pub mod stream_render;
 pub mod streaming;
 pub mod tui;

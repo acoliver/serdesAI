@@ -42,14 +42,39 @@ const NON_INTERACTIVE: &[&str] = &[
     "/api",
     "/mcp",
     "/uc",
-    "/model",
-    "/agent",
     "/autosave",
     "/dump_context",
     "/wiggum_stop",
     "/unpin",
     "/diff",
 ];
+
+/// Commands that take over the terminal and wait for a choice.
+///
+/// They were in the sweep above until the test harness began answering
+/// cursor-position queries, at which point they started opening properly and
+/// swallowing the sweep's follow-up typing as filter text.
+const PICKERS: &[(&str, &str)] = &[("/model", "Select a model"), ("/agent", "Select an agent")];
+
+#[test]
+fn a_picker_opens_and_can_be_dismissed() {
+    for (command, heading) in PICKERS {
+        let mut app = at_prompt("PICKER-ALIVE");
+
+        app.type_line(command)
+            .unwrap_or_else(|e| panic!("{command} was never echoed: {e}"));
+        app.wait_for(heading)
+            .unwrap_or_else(|e| panic!("{command} did not open its picker: {e}"));
+
+        app.send_key(harness::Key::Esc)
+            .unwrap_or_else(|e| panic!("could not dismiss {command}: {e}"));
+
+        app.type_line("still there?")
+            .unwrap_or_else(|e| panic!("{command} left the prompt unusable: {e}"));
+        app.wait_for("PICKER-ALIVE")
+            .unwrap_or_else(|e| panic!("{command} left the session unresponsive: {e}"));
+    }
+}
 
 #[test]
 fn every_non_interactive_command_leaves_the_session_usable() {

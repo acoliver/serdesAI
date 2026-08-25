@@ -905,19 +905,12 @@ async fn stream_agent_prompt(
     })
 }
 
-/// Write rendered output straight to the terminal.
+/// Hand rendered output to whatever owns the terminal.
 ///
-/// Not through the message bus: that renders whole messages, and streaming is
-/// the one place where a partial line has to reach the screen.
+/// An interactive session keeps an input area pinned at the bottom, so this
+/// cannot write past it; a one-shot run falls through to plain stdout.
 fn write_out(text: &str) {
-    if text.is_empty() {
-        return;
-    }
-
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
-    let _ = write!(stdout, "{text}");
-    let _ = stdout.flush();
+    crate::screen::emit(text);
 }
 
 fn parse_prompt_attachments(raw: &str) -> ParsedPrompt {

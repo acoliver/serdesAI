@@ -4,8 +4,7 @@
 //! It prints inline as events happen so interactive workflows and logs can
 //! coexist naturally.
 
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::io::{self};
 
 use crossterm::{
     style::{Color, Print, ResetColor, SetForegroundColor},
@@ -19,32 +18,29 @@ const MIN_PANEL_WIDTH: usize = 10;
 ///
 /// Similar in spirit to Python rich.Console usage, but focused on
 /// append-only inline rendering and simple styled primitives.
-#[derive(Debug, Clone)]
-pub struct InlineConsole {
-    stdout: Arc<Mutex<io::Stdout>>,
-}
+///
+/// Output is built up and then handed to [`crate::screen`] rather than written
+/// straight to stdout: an interactive session keeps an input area pinned at the
+/// bottom, and anything writing past it would land on the line being typed.
+#[derive(Debug, Clone, Default)]
+pub struct InlineConsole;
 
-impl Default for InlineConsole {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Pass finished output to whatever owns the terminal.
+fn hand_to_screen(bytes: Vec<u8>) -> io::Result<()> {
+    crate::screen::emit(&String::from_utf8_lossy(&bytes));
+    Ok(())
 }
 
 impl InlineConsole {
     /// Create a new inline console bound to stdout.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            stdout: Arc::new(Mutex::new(io::stdout())),
-        }
+        Self
     }
 
     /// Print text inline, optionally with a foreground color.
     pub fn print(&mut self, text: &str, color: Option<Color>) -> io::Result<()> {
-        let mut stdout = self
-            .stdout
-            .lock()
-            .expect("stdout lock poisoned in InlineConsole::print");
+        let mut stdout = Vec::new();
 
         if let Some(c) = color {
             stdout.queue(SetForegroundColor(c))?;
@@ -56,7 +52,7 @@ impl InlineConsole {
             stdout.queue(ResetColor)?;
         }
 
-        stdout.flush()
+        hand_to_screen(stdout)
     }
 
     /// Print a newline-terminated status message using a named style.
@@ -69,15 +65,12 @@ impl InlineConsole {
             _ => Color::White,
         };
 
-        let mut stdout = self
-            .stdout
-            .lock()
-            .expect("stdout lock poisoned in InlineConsole::print_status");
+        let mut stdout = Vec::new();
         stdout.queue(SetForegroundColor(color))?;
         stdout.queue(Print(text))?;
         stdout.queue(Print("\n"))?;
         stdout.queue(ResetColor)?;
-        stdout.flush()
+        hand_to_screen(stdout)
     }
 
     /// Print an inline panel box with title and content.
@@ -96,10 +89,7 @@ impl InlineConsole {
         let title_line = truncate_to_width(title, inner_width);
         let wrapped_content = wrap_text(content, inner_width);
 
-        let mut stdout = self
-            .stdout
-            .lock()
-            .expect("stdout lock poisoned in InlineConsole::print_panel");
+        let mut stdout = Vec::new();
 
         stdout.queue(SetForegroundColor(border_color))?;
 
@@ -143,7 +133,7 @@ impl InlineConsole {
         stdout.queue(Print("┘\n"))?;
 
         stdout.queue(ResetColor)?;
-        stdout.flush()
+        hand_to_screen(stdout)
     }
 }
 

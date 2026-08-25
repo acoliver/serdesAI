@@ -9,7 +9,12 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
+use std::time::Duration;
+
 use harness::{says, TerminalApp};
+
+/// The pause after which the application is taken to have finished drawing.
+const SETTLED: Duration = Duration::from_millis(250);
 
 /// An app sitting at the prompt, ready to be typed into.
 fn at_prompt() -> TerminalApp {
@@ -49,6 +54,9 @@ fn dropdown_entries_all_start_at_the_same_column() {
 
     app.send("/").expect("could not type");
     app.wait_for("Show help").expect("no dropdown");
+
+    // The region redraws per keystroke; reading it mid-draw sees a partial list.
+    app.wait_until_idle(SETTLED).expect("never settled");
 
     let rows = entry_rows(&app);
     assert!(rows.len() > 1, "expected several entries, got {rows:?}");
@@ -114,6 +122,7 @@ fn the_prompt_keeps_showing_the_active_model() {
     app.wait_for(">>>").expect("no prompt appeared");
     app.send("/").expect("could not type");
     app.wait_for("Show help").expect("no dropdown");
+    app.wait_until_idle(SETTLED).expect("never settled");
 
     let screen = app.screen_text();
     assert!(
@@ -156,6 +165,7 @@ fn the_dropdown_hangs_below_the_line_being_typed() {
 
     app.send("/").expect("could not type");
     app.wait_for("Show help").expect("no dropdown");
+    app.wait_until_idle(SETTLED).expect("never settled");
 
     let rows: Vec<String> = app
         .screen()

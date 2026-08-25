@@ -22,6 +22,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the screen is re-checked while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// How long output must be quiet before the application is taken to be idle.
+const SETTLE_FOR: Duration = Duration::from_millis(150);
+
 /// How many applications may run at once, across every UI suite.
 ///
 /// Each test spawns a real process on its own pseudo-terminal. Cargo runs the
@@ -280,9 +283,14 @@ fn binary_path() -> anyhow::Result<PathBuf> {
     Ok(candidate)
 }
 
+/// How many cursor-position queries (`ESC [ 6 n`) a chunk contains.
+fn count_queries(chunk: &[u8]) -> usize {
+    chunk.windows(4).filter(|w| w == b"\x1b[6n").count()
+}
+
 /// A running CLI process attached to a pseudo-terminal.
 pub struct TerminalApp {
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<vt100::Parser>>,
     /// Everything the process ever wrote.
     ///
@@ -328,7 +336,7 @@ impl TerminalApp {
         })?;
 
         let child = pty.slave.spawn_command(cmd)?;
-        let writer = pty.master.take_writer()?;
+        let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
         let mut reader = pty.master.try_clone_reader()?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
@@ -339,17 +347,36 @@ impl TerminalApp {
         // its buffer fills, which would look like a hang rather than a failure.
         let sink = Arc::clone(&parser);
         let log = Arc::clone(&raw);
+        let responder = Arc::clone(&writer);
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        let chunk = &buf[..n];
+
                         if let Ok(mut parser) = sink.lock() {
-                            parser.process(&buf[..n]);
+                            parser.process(chunk);
+
+                            // Answer cursor-position queries, as a real terminal
+                            // does. vt100 only parses; it never replies. Anything
+                            // that measures the screen before drawing — an inline
+                            // viewport reserving rows, a full-screen picker —
+                            // waits forever without this, which reads as a hang
+                            // rather than a missing feature.
+                            for _ in 0..count_queries(chunk) {
+                                let (row, col) = parser.screen().cursor_position();
+                                let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+                                if let Ok(mut writer) = responder.lock() {
+                                    let _ = writer.write_all(reply.as_bytes());
+                                    let _ = writer.flush();
+                                }
+                            }
                         }
+
                         if let Ok(mut log) = log.lock() {
-                            log.extend_from_slice(&buf[..n]);
+                            log.extend_from_slice(chunk);
                         }
                         // Best-effort wake-up; a full channel is not a problem.
                         let _ = tx.send(());
@@ -379,6 +406,48 @@ impl TerminalApp {
     /// actually persisted rather than only held in memory.
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Wait until `needle` is on the visible screen.
+    pub fn wait_for_on_screen(&self, needle: &str) -> anyhow::Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+
+        while Instant::now() < deadline {
+            if self.screen_text().contains(needle) {
+                return Ok(());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+
+        anyhow::bail!(
+            "timed out after {DEFAULT_TIMEOUT:?} waiting for {needle:?} on screen.\n\
+             ---- screen ----\n{}",
+            self.screen_text()
+        )
+    }
+
+    /// Wait until the application has stopped writing.
+    ///
+    /// Readiness cannot be judged by counting text in the transcript: the input
+    /// region redraws on every keystroke and after every message, so any given
+    /// string appears an unpredictable number of times. Quiet output is the
+    /// reliable signal that the application has finished drawing and is waiting
+    /// for input.
+    pub fn wait_until_idle(&self, quiet_for: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+
+        while Instant::now() < deadline {
+            // Nothing arrived within the quiet period, so it has settled.
+            if self.output.recv_timeout(quiet_for).is_err() {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "timed out after {DEFAULT_TIMEOUT:?} waiting for output to settle.\n\
+             ---- screen ----\n{}",
+            self.screen_text()
+        )
     }
 
     /// Wait until `needle` is no longer on the visible screen.
@@ -454,8 +523,9 @@ impl TerminalApp {
     pub fn send(&mut self, input: impl AsRef<str>) -> anyhow::Result<()> {
         let input = input.as_ref();
         self.submitted += input.matches('\r').count() + input.matches('\n').count();
-        self.writer.write_all(input.as_bytes())?;
-        self.writer.flush()?;
+        let mut writer = self.writer.lock().expect("writer lock poisoned");
+        writer.write_all(input.as_bytes())?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -478,18 +548,19 @@ impl TerminalApp {
     pub fn type_line(&mut self, line: impl AsRef<str>) -> anyhow::Result<()> {
         let line = line.as_ref();
 
-        // Wait for a fresh prompt first. Output is written by a separate bus, so
-        // a command's text can still be streaming when its echo appears; typing
-        // into that gap interleaves with the output and the resulting Enter
-        // lands on a clobbered line, which never submits.
-        self.wait_for_prompt()?;
+        // Wait for the application to settle first. Between turns it is briefly
+        // not reading, and a byte sent into that gap is discarded when raw mode
+        // is re-enabled. Readiness cannot be judged by counting prompts in the
+        // transcript: the input region redraws on every keystroke and after
+        // every message, so a prompt appears there many times per turn.
+        self.wait_until_idle(SETTLE_FOR)?;
 
-        // Count occurrences first: the same text is often already on screen from
-        // an earlier turn, and waiting for it to appear "anywhere" would match
-        // that stale copy and return before the application had read anything.
-        let before = self.transcript().matches(line).count();
         self.send(line)?;
-        self.wait_for_additional(line, before)?;
+
+        // Confirm the characters reached the input line before committing them.
+        // Judged from the screen rather than the transcript: the transcript
+        // holds every redraw, so it matches partial and stale copies.
+        self.wait_for_on_screen(line)?;
         self.send_key(Key::Enter)
     }
 

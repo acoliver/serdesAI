@@ -5,7 +5,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
-    ExecutableCommand, QueueableCommand,
+    QueueableCommand,
 };
 use std::io::{self, Write};
 
@@ -287,6 +287,43 @@ impl CompletingInput {
         }
     }
 
+    /// Hand the current state to whatever draws the input region.
+    pub fn show(&self, draw: &dyn Fn(crate::screen::InputView)) {
+        draw(self.view());
+    }
+
+    /// What the input region should show.
+    pub fn view(&self) -> crate::screen::InputView {
+        let entries = if self.show_completions {
+            self.completions
+                .iter()
+                .take(crate::screen::MAX_ENTRIES)
+                .map(|comp| format!("{} - {}", comp.display, comp.description))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        crate::screen::InputView {
+            prompt: self.prompt.clone(),
+            buffer: self.buffer.clone(),
+            cursor_column: u16::try_from(UnicodeWidthStr::width(&self.buffer[..self.cursor_pos]))
+                .unwrap_or(u16::MAX),
+            entries,
+            selected: self.selected,
+        }
+    }
+
+    /// Put the finished line into the scrollback.
+    ///
+    /// The region is reused for the next prompt, so without this the line the
+    /// user just entered would be overwritten and the session would lose its
+    /// transcript.
+    pub fn commit_to_scrollback(&self) {
+        crate::screen::set_input(crate::screen::InputView::default());
+        crate::screen::emit(&format!("{}{}\n", self.prompt, self.buffer));
+    }
+
     /// Draw the prompt, what has been typed, and any completions.
     ///
     /// Raw mode does almost nothing on its own: a newline moves down a row but
@@ -371,42 +408,49 @@ pub fn read_input_with_completion() -> io::Result<Option<String>> {
 }
 
 /// Read a line, drawing `prompt` in front of it.
+///
+/// The line is drawn into the region [`crate::screen`] keeps at the bottom, so
+/// output arriving while the user types is placed above it rather than over it.
 pub fn read_input_with_prompt(prompt: &str) -> io::Result<Option<String>> {
-    let mut stdout = io::stdout();
     let mut input = CompletingInput::with_prompt(prompt);
 
     terminal::enable_raw_mode()?;
-    stdout.execute(cursor::Show)?;
+    crate::screen::activate()?;
+
+    // Anything that took the whole terminal since the last prompt — a picker,
+    // the colour chooser — has wiped the region without telling it.
+    crate::screen::invalidate();
+
+    let finish = |outcome: io::Result<Option<String>>| -> io::Result<Option<String>> {
+        // The finished line is pushed into the scrollback so the session reads
+        // as a transcript, and the region is released for the next prompt.
+        let _ = terminal::disable_raw_mode();
+        outcome
+    };
 
     loop {
-        input.render(&mut stdout)?;
+        input.show(&crate::screen::set_input);
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match input.handle_key_event(key) {
                     Some(InputOutcome::Submitted(result)) => {
-                        terminal::disable_raw_mode()?;
-                        stdout.queue(Print("\n"))?;
-                        stdout.flush()?;
-                        return Ok(Some(result));
+                        input.commit_to_scrollback();
+                        return finish(Ok(Some(result)));
                     }
                     // Cancelling one line is not the end of the session: the
                     // caller prints a notice and prompts again.
                     Some(InputOutcome::Cancelled) => {
-                        terminal::disable_raw_mode()?;
-                        stdout.queue(Print("\n"))?;
-                        stdout.flush()?;
-                        return Err(io::Error::new(
+                        input.commit_to_scrollback();
+                        return finish(Err(io::Error::new(
                             io::ErrorKind::Interrupted,
                             "input cancelled by the user",
-                        ));
+                        )));
                     }
                     // End of input means the session is over.
                     Some(InputOutcome::EndOfInput) => {
-                        terminal::disable_raw_mode()?;
-                        stdout.queue(Print("\n"))?;
-                        stdout.flush()?;
-                        return Ok(None);
+                        input.commit_to_scrollback();
+                        return finish(Ok(None));
                     }
                     None => {}
                 }
