@@ -28,7 +28,7 @@ struct ModelDefinition {
 
 type ModelsFile = std::collections::HashMap<String, ModelDefinition>;
 
-pub fn load_models_from_code_puppy() -> Vec<String> {
+pub fn load_models_from_config() -> Vec<String> {
     let mut models = Vec::new();
 
     models.extend(load_model_file(&config::get_models_file()));
@@ -52,7 +52,7 @@ pub fn default_models() -> Vec<String> {
 
 pub fn available_models() -> Vec<String> {
     let mut all = default_models();
-    all.extend(load_models_from_code_puppy());
+    all.extend(load_models_from_config());
     all.push(config::get_model_name());
     dedupe_sorted(all)
 }

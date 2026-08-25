@@ -1,6 +1,6 @@
 //! Terminal UI tests for configuration and per-agent model pinning.
 //!
-//! Configuration lives in `~/.code_puppy/puppy.cfg`. Every test here gets its
+//! Configuration lives in `~/.newcode/config.cfg`. Every test here gets its
 //! own HOME, so these exercise the real file without touching the developer's.
 
 #[path = "ui/harness.rs"]
@@ -52,7 +52,7 @@ fn a_pin_survives_into_the_configuration_file() {
     app.type_line("/exit").unwrap();
     app.wait_for_exit().expect("did not exit");
 
-    let config = app.home().join(".code_puppy/puppy.cfg");
+    let config = app.home().join(".newcode/config.cfg");
     let contents = std::fs::read_to_string(&config)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", config.display()));
 
@@ -113,7 +113,7 @@ fn unpinning_restores_the_session_model() {
     app.wait_for_exit().expect("did not exit");
 
     let contents =
-        std::fs::read_to_string(app.home().join(".code_puppy/puppy.cfg")).unwrap_or_default();
+        std::fs::read_to_string(app.home().join(".newcode/config.cfg")).unwrap_or_default();
 
     assert!(
         !contents.contains("openai:temporary"),
@@ -141,7 +141,7 @@ fn pinning_one_agent_leaves_the_others_alone() {
     app.wait_for_exit().expect("did not exit");
 
     let contents =
-        std::fs::read_to_string(app.home().join(".code_puppy/puppy.cfg")).unwrap_or_default();
+        std::fs::read_to_string(app.home().join(".newcode/config.cfg")).unwrap_or_default();
     let session_model = contents
         .lines()
         .find(|l| l.trim_start().starts_with("model ="))
@@ -192,4 +192,102 @@ fn a_saved_endpoint_is_used_without_a_flag() {
     // address rather than silently reaching the real provider.
     app.wait_for("127.0.0.1:9")
         .expect("the saved endpoint was ignored");
+}
+
+#[test]
+fn an_existing_code_puppy_install_is_carried_over() {
+    // Renaming the settings directory must not look to an existing user like
+    // their configuration was wiped.
+    let mut app = TerminalApp::builder()
+        .legacy_config("[puppy]\nonboarding_complete = true\nmodel = openai:carried-over\n")
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    let contents = std::fs::read_to_string(app.home().join(".newcode/config.cfg"))
+        .expect("settings were not carried over to the new location");
+
+    assert!(
+        contents.contains("carried-over"),
+        "the previous model setting was lost in the move:\n{contents}"
+    );
+}
+
+#[test]
+fn carrying_settings_over_is_announced() {
+    // A silent move leaves a user unsure whether their settings survived.
+    let app = TerminalApp::builder()
+        .legacy_config("[puppy]\nonboarding_complete = true\n")
+        .args(["-p", "hello"])
+        .script(says("answered"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(".newcode")
+        .expect("the move was never mentioned");
+}
+
+#[test]
+fn the_previous_settings_are_left_in_place() {
+    // Copying rather than moving keeps a downgrade non-destructive.
+    let mut app = TerminalApp::builder()
+        .legacy_config("[puppy]\nonboarding_complete = true\nmodel = openai:carried-over\n")
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    assert!(
+        app.home().join(".code_puppy/puppy.cfg").exists(),
+        "the previous settings were removed rather than copied"
+    );
+}
+
+#[test]
+fn settings_already_at_the_new_location_are_not_overwritten() {
+    // Once moved, a stale copy left at the old path must not come back and
+    // undo later changes.
+    let mut app = TerminalApp::builder()
+        .legacy_config("[puppy]\nonboarding_complete = true\nmodel = openai:stale-old\n")
+        .config_line("model = openai:current")
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    let contents =
+        std::fs::read_to_string(app.home().join(".newcode/config.cfg")).unwrap_or_default();
+
+    assert!(
+        !contents.contains("stale-old"),
+        "settings at the old path overwrote the current ones:\n{contents}"
+    );
+}
+
+#[test]
+fn a_fresh_install_writes_only_to_the_new_location() {
+    let mut app = TerminalApp::builder()
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    assert!(app.home().join(".newcode/config.cfg").exists());
+    assert!(
+        !app.home().join(".code_puppy").exists(),
+        "a fresh install recreated the old settings directory"
+    );
 }

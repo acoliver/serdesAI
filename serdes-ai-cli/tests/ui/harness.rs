@@ -73,6 +73,7 @@ pub struct AppBuilder {
     script: Option<String>,
     onboarded: bool,
     config_lines: Vec<String>,
+    legacy_config: Option<String>,
     _fixture: Option<tempfile::TempDir>,
 }
 
@@ -87,6 +88,7 @@ impl AppBuilder {
             script: None,
             onboarded: true,
             config_lines: Vec::new(),
+            legacy_config: None,
             _fixture: None,
         }
     }
@@ -105,6 +107,14 @@ impl AppBuilder {
     /// For settings that have no flag and no command — a stored endpoint, a
     /// pre-existing pin — where the point of the test is that the application
     /// reads them from the file it was started with.
+    /// Seed a settings directory under the previous name, as an existing
+    /// Code Puppy install would have.
+    pub fn legacy_config(mut self, contents: impl Into<String>) -> Self {
+        self.legacy_config = Some(contents.into());
+        self.onboarded = false;
+        self
+    }
+
     pub fn config_line(mut self, line: impl Into<String>) -> Self {
         self.config_lines.push(line.into());
         self.onboarded = true;
@@ -172,7 +182,7 @@ impl AppBuilder {
         }
 
         // Every run gets its own HOME. Without this the tests read and write the
-        // real ~/.code_puppy: they would depend on the developer's settings and,
+        // real ~/.newcode: they would depend on the developer's settings and,
         // worse, could overwrite them.
         let sandbox = tempfile::tempdir()?;
         let home = sandbox.path().join("home");
@@ -182,8 +192,14 @@ impl AppBuilder {
         cmd.env("XDG_CONFIG_HOME", home.join(".config"));
         cmd.env("XDG_DATA_HOME", home.join(".local/share"));
 
+        if let Some(contents) = &self.legacy_config {
+            let legacy = home.join(".code_puppy");
+            std::fs::create_dir_all(&legacy)?;
+            std::fs::write(legacy.join("puppy.cfg"), contents)?;
+        }
+
         if self.onboarded {
-            let config_dir = home.join(".code_puppy");
+            let config_dir = home.join(".newcode");
             std::fs::create_dir_all(&config_dir)?;
 
             let mut config = String::from("[puppy]\nonboarding_complete = true\n");
@@ -191,7 +207,7 @@ impl AppBuilder {
                 config.push_str(line);
                 config.push('\n');
             }
-            std::fs::write(config_dir.join("puppy.cfg"), config)?;
+            std::fs::write(config_dir.join("config.cfg"), config)?;
         }
 
         if let Some(json) = &self.script {
@@ -345,7 +361,7 @@ impl TerminalApp {
     /// This run's sandboxed HOME.
     ///
     /// Configuration written by the application lands under
-    /// `home()/.code_puppy/`, which is how a test checks that a setting was
+    /// `home()/.newcode/`, which is how a test checks that a setting was
     /// actually persisted rather than only held in memory.
     pub fn home(&self) -> &Path {
         &self.home

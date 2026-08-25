@@ -37,7 +37,7 @@ app.wait_for("done")?;
 Each of these solves a failure that actually happened while building it.
 
 **Runs are hermetic.** Every spawn gets its own `HOME`, so tests never read or
-write the developer's real `~/.code_puppy`. Without it they depended on local
+write the developer's real `~/.newcode`. Without it they depended on local
 settings and could overwrite them. `fresh_install()` opts into first-run
 behaviour when a test wants to exercise onboarding.
 

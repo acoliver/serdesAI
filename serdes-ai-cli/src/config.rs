@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod runtime;
 pub use runtime::*;
@@ -11,7 +11,20 @@ pub use runtime::*;
 const QUALIFIER: &str = "";
 const ORGANIZATION: &str = "";
 const APPLICATION: &str = "serdes-ai";
-const CONFIG_FILE_NAME: &str = "puppy.cfg";
+
+/// The directory settings live in, under the user's home.
+const APP_DIR_NAME: &str = ".newcode";
+/// The data subdirectory, used under XDG_DATA_HOME when that is set.
+const APP_DATA_NAME: &str = "newcode";
+const CONFIG_FILE_NAME: &str = "config.cfg";
+
+/// Where settings lived when the application was called Code Puppy.
+///
+/// Kept so an existing install is carried over on first run rather than
+/// silently reverting to defaults.
+const LEGACY_DIR_NAME: &str = ".code_puppy";
+const LEGACY_CONFIG_FILE_NAME: &str = "puppy.cfg";
+const LEGACY_DATA_NAME: &str = "code_puppy";
 const MODELS_FILE_NAME: &str = "models.json";
 const EXTRA_MODELS_FILE_NAME: &str = "extra_models.json";
 const AUTOSAVE_DIR_NAME: &str = "autosaves";
@@ -327,11 +340,11 @@ impl Config {
 }
 
 pub fn get_config_dir() -> PathBuf {
-    get_code_puppy_dir()
+    get_app_dir()
 }
 
 pub fn get_data_dir() -> PathBuf {
-    get_code_puppy_data_dir()
+    get_app_data_dir()
 }
 
 pub fn get_cache_dir() -> PathBuf {
@@ -357,15 +370,80 @@ pub fn get_extra_models_file() -> PathBuf {
     get_data_dir().join(EXTRA_MODELS_FILE_NAME)
 }
 
-pub fn get_code_puppy_dir() -> PathBuf {
-    user_home_dir().join(".code_puppy")
+pub fn get_app_dir() -> PathBuf {
+    user_home_dir().join(APP_DIR_NAME)
 }
 
-pub fn get_code_puppy_data_dir() -> PathBuf {
+pub fn get_app_data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(get_code_puppy_dir)
-        .join("code_puppy")
+        .unwrap_or_else(get_app_dir)
+        .join(APP_DATA_NAME)
+}
+
+/// The directory settings lived in under the previous name.
+fn legacy_app_dir() -> PathBuf {
+    user_home_dir().join(LEGACY_DIR_NAME)
+}
+
+/// Carry an install forward from `~/.code_puppy` to `~/.newcode`.
+///
+/// Renaming the directory would otherwise look to an existing user like their
+/// settings, pins, and saved endpoints had been wiped. Copies rather than
+/// moves, so anything still reading the old location keeps working and a
+/// downgrade is not destructive.
+///
+/// Runs once: the presence of the new directory means the move already
+/// happened, or the user is new and has nothing to carry over.
+pub fn migrate_legacy_config() -> std::io::Result<bool> {
+    let (old, new) = (legacy_app_dir(), get_app_dir());
+
+    if new.exists() || !old.is_dir() {
+        return Ok(false);
+    }
+
+    copy_dir(&old, &new)?;
+
+    // The configuration file was renamed along with the directory.
+    let legacy_config = new.join(LEGACY_CONFIG_FILE_NAME);
+    if legacy_config.is_file() && !new.join(CONFIG_FILE_NAME).exists() {
+        std::fs::rename(&legacy_config, new.join(CONFIG_FILE_NAME))?;
+    }
+
+    Ok(true)
+}
+
+/// Carry the data directory forward when XDG_DATA_HOME puts it outside the
+/// home directory, where copying `~/.code_puppy` would not reach it.
+pub fn migrate_legacy_data_dir() -> std::io::Result<bool> {
+    let Some(root) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) else {
+        return Ok(false);
+    };
+
+    let (old, new) = (root.join(LEGACY_DATA_NAME), root.join(APP_DATA_NAME));
+    if new.exists() || !old.is_dir() {
+        return Ok(false);
+    }
+
+    copy_dir(&old, &new)?;
+    Ok(true)
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn get_autosave_dir() -> PathBuf {

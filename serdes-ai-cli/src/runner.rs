@@ -115,12 +115,29 @@ impl AutosaveState {
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
+    // Before anything reads or creates configuration: ensure_config_exists()
+    // would otherwise write a fresh default file at the new location, and the
+    // migration would then see settings already there and decline to carry the
+    // old ones over. A failure here is reported but not fatal — starting with
+    // default settings beats refusing to start at all.
+    let migrated = config::migrate_legacy_config().unwrap_or_else(|err| {
+        tracing::warn!("could not carry settings over from ~/.code_puppy: {err}");
+        false
+    });
+    let migrated_data = config::migrate_legacy_data_dir().unwrap_or(false);
+
     config::ensure_config_exists().context("failed to ensure config exists")?;
     config::load_api_keys_to_environment().context("failed to load API keys")?;
     terminal::enable_ansi_support();
     commands::init_all();
 
     let bus = Arc::new(MessageBus::new());
+
+    if migrated || migrated_data {
+        bus.emit_success(
+            "📦 Settings carried over from ~/.code_puppy to ~/.newcode (the old copy was left in place).".to_string(),
+        );
+    }
 
     let run_result = async {
         // Applied before the model is validated: an endpoint is what makes an

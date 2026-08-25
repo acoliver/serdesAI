@@ -174,7 +174,7 @@ impl TutorialWizard {
 3. Selecting a model
 4. Running your first prompt
 
-Serdes AI is a feature-complete port of code_puppy with:
+Serdes AI is a feature-complete port of Code Puppy with:
 - Interactive TUIs for selection
 - Session management with autosave
 - Rich console rendering

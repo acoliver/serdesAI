@@ -630,9 +630,8 @@ fn sanitize_context_name(name: &str) -> Result<String> {
 }
 
 fn resolve_context_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".code_puppy").join("contexts")
+    // Via the shared helper rather than rebuilding the path: this had its own
+    // copy of the directory name, so it kept pointing at the old location when
+    // the application was renamed.
+    crate::config::get_config_dir().join("contexts")
 }
