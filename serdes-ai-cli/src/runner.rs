@@ -123,6 +123,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let bus = Arc::new(MessageBus::new());
 
     let run_result = async {
+        // Applied before the model is validated: an endpoint is what makes an
+        // otherwise unrecognised provider addressable, so validation has to be
+        // able to see it.
+        if let Some(base_url) = cli.base_url.as_deref() {
+            let base_url = base_url.trim();
+            if base_url.is_empty() {
+                return Err(anyhow!("--base-url cannot be empty"));
+            }
+            // Set for the process rather than saved, so a one-off run against a
+            // local server does not silently repoint every later session.
+            std::env::set_var("SERDES_AI_BASE_URL", base_url);
+            bus.emit_success(format!("🔌 Using endpoint: {base_url}"));
+        }
+
         if let Some(model) = cli.get_model() {
             validate_model(model)?;
             config::set_model_name(model);
@@ -453,8 +467,19 @@ pub fn validate_model(model: &str) -> Result<()> {
     ];
 
     if !allowed.contains(&provider) {
+        // The provider selects which wire protocol is spoken, not merely which
+        // address is used, so a made-up name has no implementation behind it.
+        // A self-hosted or proxied server almost always speaks the OpenAI
+        // protocol, which is reachable by naming that provider and pointing it
+        // somewhere else.
         return Err(anyhow!(
-            "unknown provider '{provider}' in model '{candidate}'. Use provider:model format."
+            "unknown provider '{provider}' in model '{candidate}'.\n\
+             For an OpenAI-compatible server use the openai provider and point it \
+             at your endpoint:\n    \
+             serdes-ai --base-url <URL> -m openai:{model_name}\n\
+             Built-in providers: {}",
+            allowed.join(", "),
+            model_name = candidate.split(':').nth(1).unwrap_or(candidate)
         ));
     }
 

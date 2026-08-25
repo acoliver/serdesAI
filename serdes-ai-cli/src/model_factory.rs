@@ -154,12 +154,47 @@ fn load_api_key(provider: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// The endpoint to talk to for `provider`.
+///
+/// Order of precedence, most specific first:
+///
+/// 1. `SERDES_AI_BASE_URL` — applies whatever the provider is, for a one-off
+///    against a local or proxied server.
+/// 2. `<PROVIDER>_BASE_URL`, e.g. `OPENAI_BASE_URL`, so different providers can
+///    be pointed at different endpoints in the same shell.
+/// 3. The `base_urls` entry saved in the configuration.
+/// 4. The provider's own default, which for most is whatever the SDK uses and
+///    for Ollama is the local daemon.
+///
+/// This is what makes an OpenAI-compatible server usable: point the `openai`
+/// provider at it and give the model whatever name that server expects.
 fn load_base_url(provider: &str) -> Option<String> {
-    match provider {
-        "ollama" => std::env::var("OLLAMA_HOST")
+    let from_env = |name: &str| {
+        std::env::var(name)
             .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| Some("http://localhost:11434".to_string())),
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    if let Some(url) = from_env("SERDES_AI_BASE_URL") {
+        return Some(url);
+    }
+
+    let provider_var = format!("{}_BASE_URL", provider.to_uppercase());
+    if let Some(url) = from_env(&provider_var) {
+        return Some(url);
+    }
+
+    if let Some(url) = config::get_base_url(provider) {
+        let url = url.trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
+        }
+    }
+
+    match provider {
+        // Ollama runs locally and its address is not something the SDK knows.
+        "ollama" => from_env("OLLAMA_HOST").or_else(|| Some("http://localhost:11434".to_string())),
         _ => None,
     }
 }
@@ -198,11 +233,20 @@ pub fn validate_model_spec(spec: &str) -> Result<()> {
         return Err(anyhow!("model name cannot be empty in spec '{}'.", spec));
     }
 
+    // The provider chooses the wire protocol, so an unrecognised one has no
+    // implementation to run. Custom and self-hosted servers are reached by
+    // naming the protocol they speak — nearly always openai — and pointing it
+    // at their address.
     let valid = list_providers();
     if !valid.contains(&provider.as_str()) {
         return Err(anyhow!(
-            "unknown provider '{}'. Valid: {}",
+            "unknown provider '{}'.\n\
+             For an OpenAI-compatible server use the openai provider and point it \
+             at your endpoint:\n    \
+             serdes-ai --base-url <URL> -m openai:{}\n\
+             Built-in providers: {}",
             provider,
+            model_name,
             valid.join(", ")
         ));
     }

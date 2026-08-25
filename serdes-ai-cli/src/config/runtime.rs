@@ -74,6 +74,38 @@ pub fn get_api_key(name: &str) -> Option<String> {
     })
 }
 
+/// The configured endpoint override for `provider`, if any.
+pub fn get_base_url(provider: &str) -> Option<String> {
+    let key = provider.trim().to_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+
+    with_read(|cfg| {
+        cfg.base_urls
+            .as_ref()
+            .and_then(|urls| urls.get(&key).cloned())
+    })
+}
+
+/// Point `provider` at `url`. An empty url clears the override.
+pub fn set_base_url(provider: &str, url: &str) {
+    let key = provider.trim().to_lowercase();
+    let url = url.trim();
+    if key.is_empty() {
+        return;
+    }
+
+    with_write(|cfg| {
+        let urls = cfg.base_urls.get_or_insert_with(Default::default);
+        if url.is_empty() {
+            urls.remove(&key);
+        } else {
+            urls.insert(key.clone(), url.to_string());
+        }
+    });
+}
+
 pub fn set_api_key(name: &str, value: &str) {
     let key = name.trim().to_lowercase();
     let value = value.trim();

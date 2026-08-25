@@ -48,6 +48,11 @@ pub struct Cli {
     #[arg(long = "mode", value_name = "MODE", default_value = "single")]
     pub mode: RunMode,
 
+    /// Send requests to this endpoint instead of the provider's default, for
+    /// an OpenAI-compatible server (vLLM, LiteLLM, llama.cpp, a proxy)
+    #[arg(long = "base-url", value_name = "URL")]
+    pub base_url: Option<String>,
+
     /// Run a single command (deprecated, use -p instead)
     #[arg(value_name = "COMMAND", num_args = 0..)]
     pub command: Vec<String>,

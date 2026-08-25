@@ -58,6 +58,10 @@ pub struct Config {
     pub diff: DiffConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_keys: Option<HashMap<String, String>>,
+
+    /// Per-provider endpoint overrides, for OpenAI-compatible servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_urls: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +203,7 @@ impl Default for Config {
             general,
             diff: DiffConfig::default(),
             api_keys: None,
+            base_urls: None,
             request_timeout_secs: None,
             temperature: None,
             max_tokens: None,
@@ -560,6 +565,10 @@ fn apply_ini_values(cfg: &mut Config, values: &HashMap<String, String>) {
         cfg.general.enable_streaming = parse_bool(v, cfg.general.enable_streaming);
     }
 
+    if let Some(v) = values.get("base_urls") {
+        cfg.base_urls = serde_json::from_str::<HashMap<String, String>>(v).ok();
+    }
+
     if let Some(v) = values.get("api_keys") {
         cfg.api_keys = serde_json::from_str::<HashMap<String, String>>(v).ok();
     }
@@ -727,6 +736,9 @@ fn serialize_ini_config(cfg: &Config) -> serde_json::Result<String> {
     let model_settings = serde_json::to_string(&cfg.model_settings)?;
     let pinned_models = serde_json::to_string(&cfg.pinned_models)?;
     write_kv(&mut out, "api_keys", &api_keys);
+
+    let base_urls = serde_json::to_string(&cfg.base_urls.clone().unwrap_or_default())?;
+    write_kv(&mut out, "base_urls", &base_urls);
     write_kv(&mut out, "model_settings", &model_settings);
     write_kv(&mut out, "pinned_models", &pinned_models);
 
