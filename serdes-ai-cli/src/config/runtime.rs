@@ -688,3 +688,8 @@ pub fn get_gate_max_rounds() -> Option<u32> {
 pub fn get_gate_test_command() -> Option<String> {
     with_read(|cfg| cfg.gate_test_command.clone())
 }
+
+/// Whether answers are shown as they arrive rather than all at once.
+pub fn get_enable_streaming() -> bool {
+    with_read(|cfg| cfg.general.enable_streaming)
+}

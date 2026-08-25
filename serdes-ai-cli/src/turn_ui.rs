@@ -100,6 +100,53 @@ impl Turn {
         }));
     }
 
+    /// Emit the answer for a turn that was not streamed.
+    ///
+    /// The streaming path prints as it goes; this is the non-streaming
+    /// equivalent, so both end by emitting only the cost panel.
+    pub fn answered(&self, result: &AgentRunResult<String>) {
+        if let Some(reasoning) = extract_reasoning(result) {
+            self.bus
+                .emit(AnyMessage::AgentReasoning(AgentReasoningMessage {
+                    base: BaseMessage::new(MessageCategory::Agent, None),
+                    reasoning,
+                }));
+        }
+
+        self.bus
+            .emit(AnyMessage::AgentResponse(AgentResponseMessage {
+                base: BaseMessage::new(MessageCategory::Agent, None),
+                content: result.output.clone(),
+                is_markdown: true,
+                is_streaming: false,
+            }));
+    }
+
+    /// Close the turn when the answer was already shown as it arrived.
+    ///
+    /// The streaming path prints the answer itself, so only the closing cost
+    /// panel is left to emit; emitting the answer again here would print it
+    /// twice.
+    pub fn finish_streamed(self, usage: &serdes_ai_agent::RunUsage) {
+        self.stop_spinner();
+
+        self.bus.emit(AnyMessage::StatusPanel(StatusPanelMessage {
+            base: BaseMessage::new(MessageCategory::System, None),
+            title: "Turn".to_string(),
+            content: summarise_usage(usage, self.started.elapsed()),
+            status_type: StatusType::Info,
+        }));
+    }
+
+    /// Stop the waiting indicator because output has started.
+    ///
+    /// The first token is the point at which the user can see progress, so the
+    /// spinner has served its purpose and would otherwise fight with the text
+    /// being written.
+    pub fn output_started(&self) {
+        self.stop_spinner();
+    }
+
     /// Close the turn after a failure.
     ///
     /// The spinner has to stop either way: a turn that errored while the
@@ -152,7 +199,11 @@ fn extract_reasoning(result: &AgentRunResult<String>) -> Option<String> {
 
 /// What the turn cost, for the closing panel.
 fn summarise(result: &AgentRunResult<String>, elapsed: std::time::Duration) -> String {
-    let usage = &result.usage;
+    summarise_usage(&result.usage, elapsed)
+}
+
+/// What a turn cost, from its usage alone.
+fn summarise_usage(usage: &serdes_ai_agent::RunUsage, elapsed: std::time::Duration) -> String {
     let mut lines = Vec::new();
 
     // Providers do not all report usage. Saying "not reported" is honest;

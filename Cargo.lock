@@ -4261,6 +4261,8 @@ dependencies = [
  "serdes-ai-streaming",
  "serdes-ai-tools",
  "sha2",
+ "streamdown-parser",
+ "streamdown-render",
  "syntect",
  "tempfile",
  "thiserror 2.0.18",
@@ -4760,6 +4762,75 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "streamdown-ansi"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "crossterm 0.28.1",
+ "regex",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "streamdown-config"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "crossterm 0.28.1",
+ "directories",
+ "serde",
+ "streamdown-ansi",
+ "streamdown-core",
+ "toml",
+]
+
+[[package]]
+name = "streamdown-core"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "regex",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "streamdown-parser"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "regex",
+ "streamdown-ansi",
+ "streamdown-core",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "streamdown-render"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "base64",
+ "crossterm 0.28.1",
+ "serde",
+ "streamdown-ansi",
+ "streamdown-config",
+ "streamdown-core",
+ "streamdown-parser",
+ "streamdown-syntax",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "streamdown-syntax"
+version = "0.1.4"
+source = "git+https://github.com/fed-stew/streamdown-rs?rev=c72d9e3#c72d9e313e00b26ab88505d48755d40b33cd7815"
+dependencies = [
+ "streamdown-core",
+ "syntect",
+]
 
 [[package]]
 name = "string_cache"

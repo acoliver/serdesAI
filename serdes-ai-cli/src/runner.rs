@@ -24,6 +24,7 @@ use crate::messages::{
 };
 use crate::model_factory;
 use crate::session;
+use crate::stream_render::StreamRenderer;
 use crate::terminal;
 use crate::tools;
 use crate::tui::{
@@ -406,6 +407,29 @@ pub async fn run_prompt_with_attachments(
 
     let turn = Turn::begin(Arc::clone(bus));
 
+    let result = if config::get_enable_streaming() {
+        stream_agent_prompt(agent, content, RunOptions::default(), &turn).await
+    } else {
+        let run = run_to_completion_cancellable(agent, content).await;
+        if let Ok(result) = &run {
+            turn.answered(result);
+        }
+        run
+    };
+
+    match &result {
+        Ok(run) => turn.finish_streamed(&run.usage),
+        Err(err) => turn.fail(&err.to_string()),
+    }
+
+    result
+}
+
+/// Run to completion without streaming, still answering Ctrl-C.
+async fn run_to_completion_cancellable(
+    agent: &Agent,
+    content: UserContent,
+) -> anyhow::Result<AgentResult> {
     let cancel_token = serdes_ai_agent::CancellationToken::new();
     let run = AgentRun::new_with_cancel(
         agent,
@@ -419,7 +443,7 @@ pub async fn run_prompt_with_attachments(
 
     let mut run_future = Box::pin(run.run_to_completion());
 
-    let result = tokio::select! {
+    tokio::select! {
         run_result = &mut run_future => {
             run_result.map_err(|err| anyhow!(err.to_string()))
         }
@@ -427,14 +451,7 @@ pub async fn run_prompt_with_attachments(
             cancel_token.cancel();
             Err(anyhow!("agent execution cancelled by user"))
         }
-    };
-
-    match &result {
-        Ok(run) => turn.finish(run),
-        Err(err) => turn.fail(&err.to_string()),
     }
-
-    result
 }
 
 pub fn print_intro_banner() {
@@ -763,17 +780,144 @@ async fn execute_agent_prompt(
     // no path can leave the spinner running.
     let turn = Turn::begin(Arc::clone(bus));
 
-    let result = agent
-        .run_with_options(content, (), run_opts)
-        .await
-        .map_err(|err| anyhow!(err.to_string()));
+    let result = if config::get_enable_streaming() {
+        stream_agent_prompt(agent, content, run_opts, &turn).await
+    } else {
+        let run = agent
+            .run_with_options(content, (), run_opts)
+            .await
+            .map_err(|err| anyhow!(err.to_string()));
+        if let Ok(result) = &run {
+            turn.answered(result);
+        }
+        run
+    };
 
     match &result {
-        Ok(run) => turn.finish(run),
+        Ok(run) => turn.finish_streamed(&run.usage),
         Err(err) => turn.fail(&err.to_string()),
     }
 
     result
+}
+
+/// Run a turn, showing the answer as it arrives.
+///
+/// The non-streaming path waits for the whole run and then prints it, which for
+/// anything slower than a moment reads as a hang. Here each delta is rendered as
+/// markdown the moment its line is complete.
+async fn stream_agent_prompt(
+    agent: &Agent,
+    content: UserContent,
+    run_opts: RunOptions,
+    turn: &Turn,
+) -> anyhow::Result<AgentResult> {
+    use futures::StreamExt;
+    use serdes_ai_agent::AgentStreamEvent;
+
+    let mut stream = agent
+        .run_stream_with_options(content, (), run_opts)
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+
+    let mut markdown = StreamRenderer::new();
+    let mut output = String::new();
+    let mut messages = Vec::new();
+    let mut usage = serdes_ai_agent::RunUsage::default();
+    let mut run_id = String::new();
+    let mut started = false;
+
+    loop {
+        // Ctrl-C has to be answered while the stream is running, not only
+        // between turns, or a long answer cannot be interrupted.
+        let next = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                write_out(&markdown.finish());
+                return Err(anyhow!("agent execution cancelled by user"));
+            }
+            next = stream.next() => next,
+        };
+
+        let Some(event) = next else { break };
+
+        match event {
+            Ok(AgentStreamEvent::TextDelta { text }) => {
+                // The first token is where the user can see progress, so the
+                // waiting indicator has done its job.
+                if !started {
+                    turn.output_started();
+                    started = true;
+                }
+
+                output.push_str(&text);
+                write_out(&markdown.push(&text));
+            }
+
+            // Anything else that writes to the terminal has to wait for a line
+            // boundary, or it lands in the middle of a sentence.
+            Ok(AgentStreamEvent::ToolCallStart { .. })
+            | Ok(AgentStreamEvent::ToolExecuted { .. }) => {
+                if markdown.has_partial_line() {
+                    write_out(&markdown.flush_for_interruption());
+                }
+            }
+
+            Ok(AgentStreamEvent::RunComplete {
+                run_id: id,
+                messages: history,
+                usage: totals,
+            }) => {
+                run_id = id;
+                messages = history;
+                usage = totals;
+            }
+
+            Ok(AgentStreamEvent::Error { message }) => {
+                write_out(&markdown.finish());
+                return Err(anyhow!(message));
+            }
+
+            Ok(_) => {}
+
+            Err(err) => {
+                write_out(&markdown.finish());
+                return Err(anyhow!(err.to_string()));
+            }
+        }
+    }
+
+    // Tables and fenced blocks are held until complete, so without this the end
+    // of an answer can simply be missing.
+    write_out(&markdown.finish());
+    if markdown.wrote_anything() {
+        write_out("\n");
+    }
+
+    Ok(AgentResult {
+        output,
+        messages,
+        responses: Vec::new(),
+        usage,
+        run_id,
+        finish_reason: serdes_ai_core::FinishReason::Stop,
+        metadata: None,
+    })
+}
+
+/// Write rendered output straight to the terminal.
+///
+/// Not through the message bus: that renders whole messages, and streaming is
+/// the one place where a partial line has to reach the screen.
+fn write_out(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "{text}");
+    let _ = stdout.flush();
 }
 
 fn parse_prompt_attachments(raw: &str) -> ParsedPrompt {

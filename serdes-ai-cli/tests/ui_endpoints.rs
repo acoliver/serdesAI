@@ -60,6 +60,21 @@ impl StubServer {
     }
 }
 
+/// Break a reply into a few chunks, as a real provider would.
+fn split_for_streaming(reply: &str) -> Vec<String> {
+    if reply.len() < 4 {
+        return vec![reply.to_string()];
+    }
+
+    let middle = reply
+        .char_indices()
+        .nth(reply.chars().count() / 2)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    vec![reply[..middle].to_string(), reply[middle..].to_string()]
+}
+
 fn handle(mut stream: TcpStream, reply: &str) -> Option<Request> {
     let mut raw = Vec::new();
     let mut buf = [0u8; 4096];
@@ -103,25 +118,66 @@ fn handle(mut stream: TcpStream, reply: &str) -> Option<Request> {
         .unwrap_or("")
         .to_string();
 
-    let payload = serde_json::json!({
-        "id": "stub",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "stub",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": reply},
-            "finish_reason": "stop"
-        }],
-        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
-    })
-    .to_string();
+    // Answers in whichever protocol was asked for. Streaming is the default, so
+    // a stub that only spoke the non-streaming form would fail every test for
+    // reasons that have nothing to do with what is being tested.
+    let wants_stream = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["stream"].as_bool())
+        .unwrap_or(false);
 
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-        payload.len(),
-        payload
-    );
+    let response = if wants_stream {
+        let mut payload = String::new();
+
+        // Split across chunks: a renderer that only worked when the whole
+        // answer arrived at once would still pass a single-chunk stub.
+        for piece in split_for_streaming(reply) {
+            let chunk = serde_json::json!({
+                "id": "stub",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "stub",
+                "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": null}],
+            });
+            payload.push_str(&format!("data: {chunk}\n\n"));
+        }
+
+        let last = serde_json::json!({
+            "id": "stub",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "stub",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        });
+        payload.push_str(&format!("data: {last}\n\ndata: [DONE]\n\n"));
+
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+    } else {
+        let payload = serde_json::json!({
+            "id": "stub",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": reply},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+        })
+        .to_string();
+
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+    };
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
 
