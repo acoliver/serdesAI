@@ -518,11 +518,30 @@ impl Orchestrator {
 
         Ok(builder
             .parallel_tool_calls(true)
-            .tool_fn_async(
+            .tool_fn_async_with_schema(
                 "spawn_agent",
                 "Delegate a self-contained task to a subagent. \
                  role is one of: code, reviewer, explore. \
                  The subagent sees only what you put in task and context.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": ["code", "reviewer", "explore"],
+                            "description": "Which kind of subagent to delegate to.",
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "The task, stated so it can be carried out with no other context.",
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Any background the subagent needs. It sees nothing else.",
+                        },
+                    },
+                    "required": ["role", "task"],
+                }),
                 move |_c: &RunContext<()>, args: SpawnArgs| {
                     // Cloned per call: the closure is Fn and the future must be
                     // 'static, so nothing may be borrowed from here or from _c.

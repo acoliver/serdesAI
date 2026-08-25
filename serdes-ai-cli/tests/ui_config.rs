@@ -311,3 +311,49 @@ fn a_model_with_its_own_endpoint_is_accepted_without_a_provider() {
     app.wait_for("my-local-model").expect("no response");
     app.assert_not_contains("unknown provider");
 }
+
+#[test]
+fn the_gate_verifiers_can_be_named_in_the_configuration() {
+    // The gate otherwise defaults to three models from three providers, which
+    // needs credentials for all three — unusable against a single endpoint.
+    let mut app = TerminalApp::builder()
+        .config_line(r#"gate_verifier_models = ["a-model", "b-model", "c-model"]"#)
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    let contents =
+        std::fs::read_to_string(app.home().join(".newcode/config.cfg")).unwrap_or_default();
+
+    assert!(
+        contents.contains("a-model") && contents.contains("c-model"),
+        "the configured verifiers were not kept:\n{contents}"
+    );
+}
+
+#[test]
+fn gate_verifiers_may_be_written_as_a_plain_list() {
+    // This is usually typed by hand, where JSON brackets and quotes are easy to
+    // get wrong.
+    let mut app = TerminalApp::builder()
+        .config_line("gate_verifier_models = a-model, b-model, c-model")
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/exit").unwrap();
+    app.wait_for_exit().expect("did not exit");
+
+    let contents =
+        std::fs::read_to_string(app.home().join(".newcode/config.cfg")).unwrap_or_default();
+
+    assert!(
+        contents.contains("a-model") && contents.contains("c-model"),
+        "a comma-separated list was not understood:\n{contents}"
+    );
+}

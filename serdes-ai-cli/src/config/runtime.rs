@@ -665,3 +665,26 @@ pub fn reload_runtime_config() {
 pub fn snapshot_config() -> Config {
     with_read(Clone::clone)
 }
+
+/// The models to run the gate's verifiers on, if configured.
+///
+/// Unset means the orchestrator's own default, which names three models from
+/// three providers.
+pub fn get_gate_verifier_models() -> Option<Vec<String>> {
+    with_read(|cfg| {
+        cfg.gate_verifier_models
+            .as_ref()
+            .filter(|models| !models.is_empty())
+            .cloned()
+    })
+}
+
+/// How many rounds the gate may send work back, if configured.
+pub fn get_gate_max_rounds() -> Option<u32> {
+    with_read(|cfg| cfg.gate_max_rounds)
+}
+
+/// The command the gate runs to gather evidence, if configured.
+pub fn get_gate_test_command() -> Option<String> {
+    with_read(|cfg| cfg.gate_test_command.clone())
+}

@@ -70,6 +70,23 @@ struct BashArgs {
     timeout_seconds: Option<u64>,
 }
 
+/// A JSON Schema object for a tool's parameters.
+///
+/// Written out rather than derived: the model is told the argument names from
+/// this alone, so a tool registered without one is effectively uncallable —
+/// the model guesses names and the call fails to deserialize.
+fn params(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}
+
+fn string_prop(description: &str) -> serde_json::Value {
+    serde_json::json!({"type": "string", "description": description})
+}
+
 /// Register the coding tools on `builder`.
 pub fn register(
     builder: AgentBuilder<(), String>,
@@ -89,9 +106,13 @@ fn register_read(
     ctx: ToolContext,
 ) -> AgentBuilder<(), String> {
     let (read_bus, read_ctx) = (Arc::clone(&bus), ctx.clone());
-    let builder = builder.tool_fn_async(
+    let builder = builder.tool_fn_async_with_schema(
         "read_file",
         "Read a file's contents, relative to the working directory.",
+        params(
+            serde_json::json!({"path": string_prop("Path to the file, relative to the working directory.")}),
+            &["path"],
+        ),
         move |_c: &RunContext<()>, args: PathArgs| {
             let (bus, ctx) = (Arc::clone(&read_bus), read_ctx.clone());
             async move {
@@ -116,9 +137,13 @@ fn register_read(
     );
 
     let (list_bus, list_ctx) = (Arc::clone(&bus), ctx.clone());
-    let builder = builder.tool_fn_async(
+    let builder = builder.tool_fn_async_with_schema(
         "list_files",
         "List the entries in a directory. Directories are marked.",
+        params(
+            serde_json::json!({"path": string_prop("Directory to list. Defaults to the working directory.")}),
+            &[],
+        ),
         move |_c: &RunContext<()>, args: ListArgs| {
             let (bus, ctx) = (Arc::clone(&list_bus), list_ctx.clone());
             async move {
@@ -162,9 +187,16 @@ fn register_read(
     );
 
     let (grep_bus, grep_ctx) = (bus, ctx);
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "grep",
         "Search files under a directory for a literal string.",
+        params(
+            serde_json::json!({
+                "pattern": string_prop("The literal string to search for."),
+                "path": string_prop("Directory to search. Defaults to the working directory."),
+            }),
+            &["pattern"],
+        ),
         move |_c: &RunContext<()>, args: GrepArgs| {
             let (bus, ctx) = (Arc::clone(&grep_bus), grep_ctx.clone());
             async move {
@@ -200,9 +232,16 @@ fn register_write(
     ctx: ToolContext,
 ) -> AgentBuilder<(), String> {
     let (write_bus, write_ctx) = (Arc::clone(&bus), ctx.clone());
-    let builder = builder.tool_fn_async(
+    let builder = builder.tool_fn_async_with_schema(
         "write_file",
         "Create or overwrite a file. Parent directories are created as needed.",
+        params(
+            serde_json::json!({
+                "path": string_prop("Path to the file, relative to the working directory."),
+                "content": string_prop("The complete contents to write."),
+            }),
+            &["path", "content"],
+        ),
         move |_c: &RunContext<()>, args: WriteArgs| {
             let (bus, ctx) = (Arc::clone(&write_bus), write_ctx.clone());
             async move {
@@ -228,10 +267,18 @@ fn register_write(
     );
 
     let (edit_bus, edit_ctx) = (bus, ctx);
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "edit_file",
         "Replace an exact string in a file. old_string must occur exactly once — \
          include surrounding context to make it unique.",
+        params(
+            serde_json::json!({
+                "path": string_prop("Path to the file, relative to the working directory."),
+                "old_string": string_prop("The exact text to replace. Must occur exactly once."),
+                "new_string": string_prop("The text to put in its place."),
+            }),
+            &["path", "old_string", "new_string"],
+        ),
         move |_c: &RunContext<()>, args: EditArgs| {
             let (bus, ctx) = (Arc::clone(&edit_bus), edit_ctx.clone());
             async move {
@@ -256,10 +303,17 @@ fn register_shell(
     bus: Arc<MessageBus>,
     ctx: ToolContext,
 ) -> AgentBuilder<(), String> {
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "bash",
         "Run a shell command in the working directory. A non-zero exit status is \
          returned as output, not as an error.",
+        params(
+            serde_json::json!({
+                "command": string_prop("The shell command to run."),
+                "timeout_seconds": {"type": "integer", "description": "How long to allow before giving up."},
+            }),
+            &["command"],
+        ),
         move |_c: &RunContext<()>, args: BashArgs| {
             let (bus, ctx) = (Arc::clone(&bus), ctx.clone());
             async move {

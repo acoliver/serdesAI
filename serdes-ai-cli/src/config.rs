@@ -75,6 +75,23 @@ pub struct Config {
     /// Per-provider endpoint overrides, for OpenAI-compatible servers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_urls: Option<HashMap<String, String>>,
+
+    /// One model per gate verifier, for workflow mode.
+    ///
+    /// The default names three models from three providers, which needs
+    /// credentials for all three. Anyone running against a single endpoint has
+    /// to be able to say which models to use instead, or workflow mode is
+    /// simply unavailable to them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_verifier_models: Option<Vec<String>>,
+
+    /// How many times the gate may send work back before giving up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_max_rounds: Option<u32>,
+
+    /// Command the gate runs to gather build and test evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_test_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +234,9 @@ impl Default for Config {
             diff: DiffConfig::default(),
             api_keys: None,
             base_urls: None,
+            gate_verifier_models: None,
+            gate_max_rounds: None,
+            gate_test_command: None,
             request_timeout_secs: None,
             temperature: None,
             max_tokens: None,
@@ -647,6 +667,28 @@ fn apply_ini_values(cfg: &mut Config, values: &HashMap<String, String>) {
         cfg.base_urls = serde_json::from_str::<HashMap<String, String>>(v).ok();
     }
 
+    if let Some(v) = values.get("gate_verifier_models") {
+        // Accepts a JSON array or a plain comma-separated list, since this is
+        // most often typed by hand.
+        cfg.gate_verifier_models = serde_json::from_str::<Vec<String>>(v).ok().or_else(|| {
+            let models: Vec<String> = v
+                .split(',')
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+            (!models.is_empty()).then_some(models)
+        });
+    }
+
+    if let Some(v) = values.get("gate_max_rounds") {
+        cfg.gate_max_rounds = v.trim().parse::<u32>().ok();
+    }
+
+    if let Some(v) = values.get("gate_test_command") {
+        let command = v.trim();
+        cfg.gate_test_command = (!command.is_empty()).then(|| command.to_string());
+    }
+
     if let Some(v) = values.get("api_keys") {
         cfg.api_keys = serde_json::from_str::<HashMap<String, String>>(v).ok();
     }
@@ -817,6 +859,20 @@ fn serialize_ini_config(cfg: &Config) -> serde_json::Result<String> {
 
     let base_urls = serde_json::to_string(&cfg.base_urls.clone().unwrap_or_default())?;
     write_kv(&mut out, "base_urls", &base_urls);
+
+    if let Some(models) = &cfg.gate_verifier_models {
+        write_kv(
+            &mut out,
+            "gate_verifier_models",
+            &serde_json::to_string(models)?,
+        );
+    }
+    if let Some(rounds) = cfg.gate_max_rounds {
+        write_kv(&mut out, "gate_max_rounds", &rounds.to_string());
+    }
+    if let Some(command) = &cfg.gate_test_command {
+        write_kv(&mut out, "gate_test_command", command);
+    }
     write_kv(&mut out, "model_settings", &model_settings);
     write_kv(&mut out, "pinned_models", &pinned_models);
 

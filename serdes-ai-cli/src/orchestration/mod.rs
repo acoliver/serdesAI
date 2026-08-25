@@ -65,16 +65,17 @@ fn render_with(
         }
 
         OrchestratorEvent::PlanDrafted { plan, attempt } => {
-            let heading = if *attempt == 0 {
-                "Proposed plan".to_string()
-            } else {
-                format!("Revised plan (attempt {})", attempt + 1)
-            };
-            bus.emit(AnyMessage::Text(TextMessage {
-                base: BaseMessage::new(MessageCategory::Agent, None),
-                level: MessageLevel::Info,
-                text: format!("{heading}\n\n{plan}"),
-            }));
+            // Rendered here only when nobody is being asked to approve it. The
+            // approver prints the plan itself before prompting: this runs in a
+            // separate task, so relying on it to land first put the question
+            // "Proceed with this plan?" above the plan it referred to.
+            if !approval_is_interactive() {
+                bus.emit(AnyMessage::Text(TextMessage {
+                    base: BaseMessage::new(MessageCategory::Agent, None),
+                    level: MessageLevel::Info,
+                    text: format!("{}\n\n{plan}", plan_heading(*attempt)),
+                }));
+            }
         }
 
         OrchestratorEvent::PlanDecision { decision } => match decision {
@@ -219,13 +220,17 @@ fn status(bus: &MessageBus, agent_id: String, agent_name: String, status: SubAge
 /// Asks the user to approve a plan through the CLI's existing prompts.
 pub struct CliApprover {
     input: UserInputSystem,
+    bus: Arc<MessageBus>,
+    attempts: std::sync::atomic::AtomicU32,
 }
 
 impl CliApprover {
     /// Create an approver bound to `bus`.
     pub fn new(bus: Arc<MessageBus>) -> Self {
         Self {
-            input: UserInputSystem::new(bus),
+            input: UserInputSystem::new(Arc::clone(&bus)),
+            bus,
+            attempts: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -256,11 +261,60 @@ impl CliApprover {
     }
 }
 
+/// The heading a plan is shown under.
+fn plan_heading(attempt: u32) -> String {
+    if attempt == 0 {
+        "Proposed plan".to_string()
+    } else {
+        format!("Revised plan (attempt {})", attempt + 1)
+    }
+}
+
+/// Whether there is anyone available to answer an approval prompt.
+///
+/// A one-shot `-p` run has no reader on standard input, so the prompt cannot be
+/// answered and the run would always end at plan approval.
+fn approval_is_interactive() -> bool {
+    !auto_approve_enabled() && std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
+/// Whether plans are approved without asking.
+pub fn auto_approve_enabled() -> bool {
+    AUTO_APPROVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Approve plans without asking, for a run that cannot be answered.
+pub fn set_auto_approve(enabled: bool) {
+    AUTO_APPROVE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+static AUTO_APPROVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[async_trait]
 impl PlanApprover for CliApprover {
-    async fn approve(&self, _plan: &Plan) -> ApprovalDecision {
-        // The plan itself is already on screen: the orchestrator publishes
-        // PlanDrafted before asking, and forward_events renders it.
+    async fn approve(&self, plan: &Plan) -> ApprovalDecision {
+        if !approval_is_interactive() {
+            self.bus.emit_info(
+                "Plan approved automatically: nothing is available to answer an approval prompt."
+                    .to_string(),
+            );
+            return ApprovalDecision::Approve;
+        }
+
+        // The plan carries no attempt number — that lives on the event — so it
+        // is counted here: each call to approve is one more time round.
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Printed here rather than from the event stream so it is guaranteed to
+        // appear above the question that refers to it.
+        self.bus.emit(AnyMessage::Text(TextMessage {
+            base: BaseMessage::new(MessageCategory::Agent, None),
+            level: MessageLevel::Info,
+            text: format!("{}\n\n{plan}", plan_heading(attempt)),
+        }));
+
         match self.ask().await {
             Ok(decision) => decision,
             // A broken prompt must not be read as consent.

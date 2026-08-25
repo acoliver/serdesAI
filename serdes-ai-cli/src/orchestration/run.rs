@@ -81,6 +81,19 @@ pub async fn run(bus: Arc<MessageBus>, mode: RunMode, task: &str) -> Result<Stri
         orchestrator_config = orchestrator_config.with_model(role, model.clone());
     }
 
+    // The gate's verifiers otherwise default to three models from three
+    // providers, which needs credentials for all three — unusable for anyone
+    // running against a single endpoint.
+    if let Some(models) = config::get_gate_verifier_models() {
+        orchestrator_config.gate.verifier_models = models;
+    }
+    if let Some(rounds) = config::get_gate_max_rounds() {
+        orchestrator_config.gate.max_rounds = rounds;
+    }
+    if let Some(command) = config::get_gate_test_command() {
+        orchestrator_config.gate.test_command = Some(command);
+    }
+
     let factory = Arc::new(CliModelFactory::new()?);
     let orchestrator = Orchestrator::with_factory(orchestrator_config, factory)
         .map_err(|e| anyhow!("could not start the orchestrator: {e}"))?;

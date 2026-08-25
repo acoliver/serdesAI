@@ -485,12 +485,18 @@ where
         self
     }
 
-    /// Add a tool from a sync function.
+    /// Add a tool from a function, describing its parameters.
+    ///
+    /// The schema is what tells the model which arguments the tool takes. A
+    /// tool registered without one advertises no parameters at all, so a model
+    /// has to guess the argument names and the call is rejected when it guesses
+    /// differently — see [`Self::tool_fn`].
     #[must_use]
-    pub fn tool_fn<F, Args>(
+    pub fn tool_fn_with_schema<F, Args>(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
+        parameters: JsonValue,
         f: F,
     ) -> Self
     where
@@ -498,7 +504,8 @@ where
         Args: DeserializeOwned + Send + 'static,
     {
         let tool_name = name.into();
-        let definition = ToolDefinition::new(tool_name.clone(), description.into());
+        let definition =
+            ToolDefinition::new(tool_name.clone(), description.into()).with_parameters(parameters);
 
         let executor = SyncFnExecutor {
             func: Arc::new(move |ctx, args: JsonValue| {
@@ -519,10 +526,11 @@ where
 
     /// Add a tool from an async function.
     #[must_use]
-    pub fn tool_fn_async<F, Fut, Args>(
+    pub fn tool_fn_async_with_schema<F, Fut, Args>(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
+        parameters: JsonValue,
         f: F,
     ) -> Self
     where
@@ -531,7 +539,8 @@ where
         Args: DeserializeOwned + Send + 'static,
     {
         let tool_name = name.into();
-        let definition = ToolDefinition::new(tool_name.clone(), description.into());
+        let definition =
+            ToolDefinition::new(tool_name.clone(), description.into()).with_parameters(parameters);
 
         let executor = AsyncFnExecutor {
             func: Arc::new(f),
@@ -545,6 +554,44 @@ where
             max_retries: self.max_tool_retries,
         });
         self
+    }
+
+    /// Add a tool from a function.
+    ///
+    /// The tool advertises **no parameters**. Prefer
+    /// [`Self::tool_fn_with_schema`] for any tool that takes arguments: without
+    /// a schema the model is not told what to pass, and a call built from
+    /// guessed argument names fails to deserialize.
+    #[must_use]
+    pub fn tool_fn<F, Args>(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        f: F,
+    ) -> Self
+    where
+        F: Fn(&RunContext<Deps>, Args) -> Result<ToolReturn, ToolError> + Send + Sync + 'static,
+        Args: DeserializeOwned + Send + 'static,
+    {
+        self.tool_fn_with_schema(name, description, empty_parameters(), f)
+    }
+
+    /// Add a tool from an async function.
+    ///
+    /// The tool advertises **no parameters** — see [`Self::tool_fn`].
+    #[must_use]
+    pub fn tool_fn_async<F, Fut, Args>(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        f: F,
+    ) -> Self
+    where
+        F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + 'static,
+        Args: DeserializeOwned + Send + 'static,
+    {
+        self.tool_fn_async_with_schema(name, description, empty_parameters(), f)
     }
 
     /// Set custom output schema.
@@ -879,6 +926,11 @@ pub fn agent_with_deps<Deps: Send + Sync + 'static, M: Model + 'static>(
     model: M,
 ) -> AgentBuilder<Deps, String> {
     AgentBuilder::new(model)
+}
+
+/// The schema for a tool that takes no arguments.
+fn empty_parameters() -> JsonValue {
+    serde_json::json!({"type": "object", "properties": {}})
 }
 
 #[cfg(test)]

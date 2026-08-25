@@ -48,6 +48,14 @@ pub struct Cli {
     #[arg(long = "mode", value_name = "MODE", default_value = "single")]
     pub mode: RunMode,
 
+    /// Approve workflow plans without asking.
+    ///
+    /// A one-shot run has nothing available to answer the approval prompt, so
+    /// plans are approved automatically there in any case; this makes the same
+    /// choice explicit for an interactive session.
+    #[arg(long = "yes", short = 'y')]
+    pub yes: bool,
+
     /// Send requests to this endpoint instead of the provider's default, for
     /// an OpenAI-compatible server (vLLM, LiteLLM, llama.cpp, a proxy)
     #[arg(long = "base-url", value_name = "URL")]

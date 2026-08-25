@@ -440,3 +440,85 @@ fn a_defined_models_endpoint_tolerates_a_trailing_slash() {
     app.wait_for("REPLY-DESPITE-SLASH")
         .expect("a trailing slash in the definition broke the request");
 }
+
+#[test]
+fn tools_tell_the_model_what_arguments_they_take() {
+    // Without a parameter schema a tool advertises no arguments at all, so the
+    // model has to guess the names and every call fails to deserialize. This
+    // made write_file and edit_file unusable against a real model.
+    let server = StubServer::start("ok");
+
+    let app = TerminalApp::builder()
+        .args([
+            "--base-url",
+            &server.url(),
+            "-m",
+            "openai:local-model",
+            "-p",
+            "hello",
+        ])
+        .env("OPENAI_API_KEY", "not-needed")
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("ok").expect("no answer");
+
+    let body = server.first_request().body;
+    let request: serde_json::Value = serde_json::from_str(&body).expect("the body was not JSON");
+    let tools = request["tools"].as_array().expect("no tools were offered");
+
+    for tool in tools {
+        let function = tool.get("function").unwrap_or(tool);
+        let name = function["name"].as_str().unwrap_or("<unnamed>");
+        let properties = &function["parameters"]["properties"];
+
+        assert!(
+            properties.as_object().is_some_and(|p| !p.is_empty()),
+            "tool '{name}' advertises no parameters, so a model cannot call it correctly"
+        );
+    }
+}
+
+#[test]
+fn no_tool_is_offered_twice() {
+    // Two tools sharing a name leaves the model choosing between them blind.
+    let server = StubServer::start("ok");
+
+    let app = TerminalApp::builder()
+        .args([
+            "--base-url",
+            &server.url(),
+            "-m",
+            "openai:local-model",
+            "-p",
+            "hello",
+        ])
+        .env("OPENAI_API_KEY", "not-needed")
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("ok").expect("no answer");
+
+    let request: serde_json::Value =
+        serde_json::from_str(&server.first_request().body).expect("the body was not JSON");
+    let mut names: Vec<&str> = request["tools"]
+        .as_array()
+        .expect("no tools were offered")
+        .iter()
+        .map(|t| {
+            t.get("function").unwrap_or(t)["name"]
+                .as_str()
+                .unwrap_or("")
+        })
+        .collect();
+
+    let before = names.len();
+    names.sort_unstable();
+    names.dedup();
+
+    assert_eq!(
+        before,
+        names.len(),
+        "a tool name was offered more than once"
+    );
+}

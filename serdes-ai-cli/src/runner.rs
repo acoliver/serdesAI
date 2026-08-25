@@ -154,6 +154,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             bus.emit_success(format!("🔌 Using endpoint: {base_url}"));
         }
 
+        if cli.yes {
+            crate::orchestration::set_auto_approve(true);
+        }
+
         if let Some(model) = cli.get_model() {
             validate_model(model)?;
             config::set_model_name(model);

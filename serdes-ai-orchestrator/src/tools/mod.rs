@@ -151,14 +151,35 @@ pub fn register_for_role(
     builder
 }
 
+/// A JSON Schema object for a tool's parameters.
+///
+/// Written out rather than derived: this is the only thing that tells the model
+/// which arguments a tool takes. A tool registered without one advertises no
+/// parameters, so the model guesses the names and the call fails to parse.
+fn params(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}
+
+fn string_prop(description: &str) -> serde_json::Value {
+    serde_json::json!({"type": "string", "description": description})
+}
+
 fn register_read_only(
     builder: AgentBuilder<(), String>,
     ctx: ToolContext,
 ) -> AgentBuilder<(), String> {
     let read_ctx = ctx.clone();
-    let builder = builder.tool_fn_async(
+    let builder = builder.tool_fn_async_with_schema(
         "read_file",
         "Read the full contents of a file, relative to the workspace root.",
+        params(
+            serde_json::json!({"path": string_prop("Path to the file, relative to the workspace root.")}),
+            &["path"],
+        ),
         move |_c: &RunContext<()>, args: ReadArgs| {
             let ctx = read_ctx.clone();
             async move {
@@ -169,9 +190,13 @@ fn register_read_only(
     );
 
     let list_ctx = ctx;
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "list_files",
         "List the entries directly under a directory. Directories end with '/'.",
+        params(
+            serde_json::json!({"path": string_prop("Directory to list, relative to the workspace root.")}),
+            &["path"],
+        ),
         move |_c: &RunContext<()>, args: ListArgs| {
             let ctx = list_ctx.clone();
             async move {
@@ -184,9 +209,16 @@ fn register_read_only(
 
 fn register_write(builder: AgentBuilder<(), String>, ctx: ToolContext) -> AgentBuilder<(), String> {
     let write_ctx = ctx.clone();
-    let builder = builder.tool_fn_async(
+    let builder = builder.tool_fn_async_with_schema(
         "write_file",
         "Create or overwrite a file with the given content. Parent directories are created automatically.",
+        params(
+            serde_json::json!({
+                "path": string_prop("Path to the file, relative to the workspace root."),
+                "content": string_prop("The complete contents to write."),
+            }),
+            &["path", "content"],
+        ),
         move |_c: &RunContext<()>, args: WriteArgs| {
             let ctx = write_ctx.clone();
             async move {
@@ -201,10 +233,18 @@ fn register_write(builder: AgentBuilder<(), String>, ctx: ToolContext) -> AgentB
     );
 
     let edit_ctx = ctx;
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "edit_file",
         "Replace an exact string in a file. old_string must occur exactly once — \
          include surrounding context to make it unique.",
+        params(
+            serde_json::json!({
+                "path": string_prop("Path to the file, relative to the workspace root."),
+                "old_string": string_prop("The exact text to replace. Must occur exactly once."),
+                "new_string": string_prop("The text to put in its place."),
+            }),
+            &["path", "old_string", "new_string"],
+        ),
         move |_c: &RunContext<()>, args: EditArgs| {
             let ctx = edit_ctx.clone();
             async move {
@@ -219,10 +259,17 @@ fn register_write(builder: AgentBuilder<(), String>, ctx: ToolContext) -> AgentB
 }
 
 fn register_shell(builder: AgentBuilder<(), String>, ctx: ToolContext) -> AgentBuilder<(), String> {
-    builder.tool_fn_async(
+    builder.tool_fn_async_with_schema(
         "bash",
         "Run a shell command in the workspace root and return its output. \
          A non-zero exit status is returned as output, not as an error.",
+        params(
+            serde_json::json!({
+                "command": string_prop("The shell command to run."),
+                "timeout_seconds": {"type": "integer", "description": "How long to allow before giving up."},
+            }),
+            &["command"],
+        ),
         move |_c: &RunContext<()>, args: BashArgs| {
             let ctx = ctx.clone();
             async move {

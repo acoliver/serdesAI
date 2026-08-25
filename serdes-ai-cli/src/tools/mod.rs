@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serdes_ai_agent::{AgentBuilder, RunContext};
-use serdes_ai_tools::{Tool, ToolError, ToolReturn};
+use serdes_ai_tools::{Tool, ToolReturn};
 use tracing::{debug, info};
 
 mod coding;
@@ -51,9 +51,17 @@ impl CliToolRegistry {
         let mut builder = coding::register(builder, Arc::clone(&self.bus), root);
 
         // web_search
-        builder = builder.tool_fn_async(
+        builder = builder.tool_fn_async_with_schema(
             "web_search",
             "Search the web for information",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for."},
+                    "max_results": {"type": "integer", "description": "How many results to return."},
+                },
+                "required": ["query"],
+            }),
             |_ctx: &RunContext<()>, args: WebSearchArgs| async move {
                 let tool = DuckDuckGoSearchTool::new();
                 let tool_ctx = serdes_ai_tools::RunContext::minimal("serdes-ai-cli");
@@ -69,9 +77,17 @@ impl CliToolRegistry {
         );
 
         // web_fetch
-        builder = builder.tool_fn_async(
+        builder = builder.tool_fn_async_with_schema(
             "web_fetch",
             "Fetch content from a URL",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch."},
+                    "max_length": {"type": "integer", "description": "Maximum number of characters to return."},
+                },
+                "required": ["url"],
+            }),
             |_ctx: &RunContext<()>, args: WebFetchArgs| async move {
                 let tool = WebFetchTool::new();
                 let tool_ctx = serdes_ai_tools::RunContext::minimal("serdes-ai-cli");
@@ -87,9 +103,19 @@ impl CliToolRegistry {
         );
 
         // file_search
-        builder = builder.tool_fn_async(
+        builder = builder.tool_fn_async_with_schema(
             "file_search",
             "Search files using semantic similarity",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to look for."},
+                    "file_extensions": {"type": "array", "items": {"type": "string"},
+                                        "description": "Restrict the search to these extensions."},
+                    "max_results": {"type": "integer", "description": "How many results to return."},
+                },
+                "required": ["query"],
+            }),
             |_ctx: &RunContext<()>, args: FileSearchArgs| async move {
                 Ok(ToolReturn::json(serde_json::json!({
                     "query": args.query,
@@ -102,9 +128,18 @@ impl CliToolRegistry {
         );
 
         // code_execution
-        builder = builder.tool_fn_async(
+        builder = builder.tool_fn_async_with_schema(
             "code_execution",
             "Execute code in a sandbox",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "The code to run."},
+                    "language": {"type": "string", "description": "The language the code is written in."},
+                    "stdin": {"type": "string", "description": "Input to supply on standard input."},
+                },
+                "required": ["code", "language"],
+            }),
             |_ctx: &RunContext<()>, args: CodeExecutionArgs| async move {
                 Ok(ToolReturn::json(serde_json::json!({
                     "language": args.language,
@@ -116,117 +151,10 @@ impl CliToolRegistry {
             },
         );
 
-        // read_file
-        builder = builder.tool_fn_async(
-            "read_file",
-            "Read contents of a file",
-            |_ctx: &RunContext<()>, args: ReadFileArgs| async move {
-                match tokio::fs::read_to_string(&args.path).await {
-                    Ok(content) => Ok(ToolReturn::text(content)),
-                    Err(err) => Ok(ToolReturn::error(format!(
-                        "Error reading file '{}': {}",
-                        args.path, err
-                    ))),
-                }
-            },
-        );
-
-        // list_files (minimal safe implementation)
-        builder =
-            builder.tool_fn_async(
-                "list_files",
-                "List files in a directory",
-                |_ctx: &RunContext<()>, args: ListFilesArgs| async move {
-                    let path = args.path.unwrap_or_else(|| ".".to_string());
-                    let mut entries = tokio::fs::read_dir(&path).await.map_err(|e| {
-                        ToolError::execution_failed(format!("read_dir failed: {e}"))
-                    })?;
-
-                    let mut items = Vec::new();
-                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                        ToolError::execution_failed(format!("next_entry failed: {e}"))
-                    })? {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let ty = entry.file_type().await.map_err(|e| {
-                            ToolError::execution_failed(format!("file_type failed: {e}"))
-                        })?;
-                        let kind = if ty.is_dir() { "dir" } else { "file" };
-                        items.push(serde_json::json!({ "name": name, "kind": kind }));
-                    }
-
-                    let output = serde_json::json!({
-                        "path": path,
-                        "recursive": args.recursive.unwrap_or(false),
-                        "items": items,
-                    });
-
-                    Ok(ToolReturn::json(output))
-                },
-            );
-
-        // grep (text contains search for now)
-        builder = builder.tool_fn_async(
-            "grep",
-            "Search for patterns in files",
-            |_ctx: &RunContext<()>, args: GrepArgs| async move {
-                let base = std::path::PathBuf::from(args.path.unwrap_or_else(|| ".".to_string()));
-                let mut stack = vec![base];
-                let mut matches = Vec::new();
-
-                while let Some(dir) = stack.pop() {
-                    let mut rd = match tokio::fs::read_dir(&dir).await {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    while let Ok(Some(entry)) = rd.next_entry().await {
-                        let path = entry.path();
-                        let file_type = match entry.file_type().await {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-
-                        if file_type.is_dir() {
-                            stack.push(path);
-                            continue;
-                        }
-
-                        if !file_type.is_file() {
-                            continue;
-                        }
-
-                        let content = match tokio::fs::read_to_string(&path).await {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-
-                        for (idx, line) in content.lines().enumerate() {
-                            if line.contains(&args.pattern) {
-                                matches.push(serde_json::json!({
-                                    "file_path": path.display().to_string(),
-                                    "line_number": idx + 1,
-                                    "line_content": line,
-                                }));
-                            }
-
-                            if matches.len() >= 200 {
-                                break;
-                            }
-                        }
-
-                        if matches.len() >= 200 {
-                            break;
-                        }
-                    }
-
-                    if matches.len() >= 200 {
-                        break;
-                    }
-                }
-
-                Ok(ToolReturn::json(serde_json::json!({ "matches": matches })))
-            },
-        );
+        // read_file, list_files and grep are deliberately not registered here:
+        // coding::register above provides working, display-emitting versions.
+        // Registering these too put each name in the tool list twice, leaving
+        // the model to pick between two tools with the same name.
 
         debug!("Applied CLI tools to agent builder");
         builder
@@ -262,26 +190,6 @@ struct CodeExecutionArgs {
     code: String,
     #[serde(default)]
     stdin: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadFileArgs {
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListFilesArgs {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    recursive: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GrepArgs {
-    pattern: String,
-    #[serde(default)]
-    path: Option<String>,
 }
 
 impl From<WebSearchArgs> for JsonValue {
