@@ -220,5 +220,14 @@ fn a_control_key_is_never_typed_into_the_buffer() {
     app.type_line("clean").unwrap();
 
     app.wait_for("echoed back").expect("no reply");
-    app.assert_not_contains("abc");
+
+    // Asked of the screen, not the transcript. The transcript holds every
+    // redraw, so typing "ab" then "clean" leaves "aab" and "cclclecleaclean"
+    // adjacent in it, and a substring search finds an "abc" that was never in
+    // the buffer. What the line actually contained is what is displayed.
+    let screen = app.screen_text();
+    assert!(
+        !screen.contains("abc"),
+        "a control character was typed into the buffer:\n{screen}"
+    );
 }

@@ -13,12 +13,10 @@ pub async fn get_input_with_completion(
     let prompt_owned = prompt.to_string();
 
     tokio::task::spawn_blocking(move || {
-        if !prompt_owned.is_empty() {
-            print!("{prompt_owned}");
-            io::stdout().flush()?;
-        }
-
-        completion::read_input_with_completion()
+        // The prompt is handed to the reader rather than printed here: every
+        // redraw rewrites the whole line, so a prompt printed first is erased
+        // by the first keystroke.
+        completion::read_input_with_prompt(&prompt_owned)
     })
     .await
     .map_err(|e| io::Error::other(format!("input task failed: {e}")))?

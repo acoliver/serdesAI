@@ -381,6 +381,29 @@ impl TerminalApp {
         &self.home
     }
 
+    /// Wait until `needle` is no longer on the visible screen.
+    ///
+    /// The counterpart to [`wait_for`](Self::wait_for), for changes whose only
+    /// visible effect is something disappearing — a completion list narrowing,
+    /// a panel being dismissed.
+    pub fn wait_until_gone(&self, needle: &str) -> anyhow::Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+
+        while Instant::now() < deadline {
+            if !self.screen_text().contains(needle) {
+                return Ok(());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+
+        anyhow::bail!(
+            "timed out after {:?} waiting for {:?} to disappear.\n---- screen ----\n{}",
+            DEFAULT_TIMEOUT,
+            needle,
+            self.screen_text()
+        )
+    }
+
     /// The visible screen, one entry per row, trailing spaces trimmed.
     pub fn screen(&self) -> Vec<String> {
         let parser = self.parser.lock().expect("parser lock poisoned");

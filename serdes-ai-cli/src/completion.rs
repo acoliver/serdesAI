@@ -9,6 +9,8 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
+use unicode_width::UnicodeWidthStr;
+
 /// Command completion entry
 #[derive(Clone, Debug)]
 pub struct Completion {
@@ -95,17 +97,47 @@ pub struct CompletingInput {
     completions: Vec<Completion>,
     selected: usize,
     show_completions: bool,
+    /// The prompt the caller asked for.
+    ///
+    /// Held rather than printed by the caller: every redraw rewrites the line,
+    /// so a prompt printed once elsewhere is erased by the first redraw and
+    /// replaced by whatever this draws instead.
+    prompt: String,
+    /// Whether the prompt has been drawn for this line.
+    ///
+    /// It is written once and then left alone: reprinting it on every keystroke
+    /// makes the terminal flicker and fills the scrollback with one copy of the
+    /// prompt per character typed.
+    prompt_drawn: bool,
 }
 
 impl CompletingInput {
     pub fn new() -> Self {
+        Self::with_prompt("serdes-ai > ")
+    }
+
+    /// An input line that draws `prompt` in front of what is typed.
+    pub fn with_prompt(prompt: impl Into<String>) -> Self {
         Self {
             buffer: String::new(),
             cursor_pos: 0,
             completions: Vec::new(),
             selected: 0,
             show_completions: false,
+            prompt: prompt.into(),
+            prompt_drawn: false,
         }
+    }
+
+    /// How many columns the cursor sits from the left edge.
+    ///
+    /// `cursor_pos` is a byte offset, which is not a column: any character
+    /// outside ASCII would put the cursor in the wrong place.
+    fn cursor_column(&self) -> u16 {
+        let width = UnicodeWidthStr::width(self.prompt.as_str())
+            + UnicodeWidthStr::width(&self.buffer[..self.cursor_pos]);
+
+        u16::try_from(width).unwrap_or(u16::MAX)
     }
 }
 
@@ -255,45 +287,75 @@ impl CompletingInput {
         }
     }
 
-    /// Render current state
-    pub fn render(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        // Clear line and redraw
-        stdout.queue(cursor::MoveToColumn(0))?;
-        stdout.queue(Clear(ClearType::UntilNewLine))?;
+    /// Draw the prompt, what has been typed, and any completions.
+    ///
+    /// Raw mode does almost nothing on its own: a newline moves down a row but
+    /// does not return to the first column, and nothing is erased unless it is
+    /// erased here. Both were missing, so the list arrived as a diagonal
+    /// staircase with the previous, longer list still visible underneath it.
+    pub fn render(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
+        let prompt_width =
+            u16::try_from(UnicodeWidthStr::width(self.prompt.as_str())).unwrap_or(u16::MAX);
 
-        // Print prompt + buffer
-        stdout.queue(SetForegroundColor(Color::Cyan))?;
-        stdout.queue(Print("serdes-ai > "))?;
-        stdout.queue(ResetColor)?;
-        stdout.queue(Print(&self.buffer))?;
-
-        // Show completions dropdown
-        if self.show_completions {
-            stdout.queue(Print("\n"))?;
-            for (i, comp) in self.completions.iter().take(8).enumerate() {
-                if i == self.selected {
-                    stdout.queue(SetForegroundColor(Color::Green))?;
-                    stdout.queue(Print(format!(
-                        "> {} - {}\n",
-                        comp.display, comp.description
-                    )))?;
-                    stdout.queue(ResetColor)?;
-                } else {
-                    stdout.queue(Print(format!(
-                        "  {} - {}\n",
-                        comp.display, comp.description
-                    )))?;
-                }
-            }
-            // Move cursor back up
-            let lines = self.completions.len().min(8) + 1;
-            for _ in 0..lines {
-                stdout.queue(cursor::MoveUp(1))?;
-            }
-            stdout.queue(cursor::MoveToColumn(13 + self.cursor_pos as u16))?;
+        if self.prompt_drawn {
+            // Redraw only what can have changed. Everything from here down goes,
+            // so a completion list that has grown shorter leaves no tail behind.
+            stdout.queue(cursor::MoveToColumn(prompt_width))?;
+            stdout.queue(Clear(ClearType::FromCursorDown))?;
+        } else {
+            stdout.queue(cursor::MoveToColumn(0))?;
+            stdout.queue(Clear(ClearType::FromCursorDown))?;
+            stdout.queue(SetForegroundColor(Color::Cyan))?;
+            stdout.queue(Print(&self.prompt))?;
+            stdout.queue(ResetColor)?;
+            self.prompt_drawn = true;
         }
 
+        stdout.queue(Print(&self.buffer))?;
+
+        if self.show_completions {
+            let shown = self.visible_completions();
+
+            for (i, comp) in self.completions.iter().take(shown).enumerate() {
+                // The carriage return is what puts each entry back at column 0.
+                stdout.queue(Print("\r\n"))?;
+
+                if i == self.selected {
+                    stdout.queue(SetForegroundColor(Color::Green))?;
+                    stdout.queue(Print(format!("> {} - {}", comp.display, comp.description)))?;
+                    stdout.queue(ResetColor)?;
+                } else {
+                    stdout.queue(Print(format!("  {} - {}", comp.display, comp.description)))?;
+                }
+            }
+
+            // Back to the line being edited, so typing continues where the user
+            // is looking.
+            if shown > 0 {
+                stdout.queue(cursor::MoveUp(u16::try_from(shown).unwrap_or(u16::MAX)))?;
+            }
+        }
+
+        stdout.queue(cursor::MoveToColumn(self.cursor_column()))?;
         stdout.flush()
+    }
+
+    /// How many entries there is room for below the prompt.
+    ///
+    /// Drawing past the last row scrolls the terminal, which moves the prompt
+    /// out from under the cursor and leaves the next redraw erasing the wrong
+    /// lines.
+    fn visible_completions(&self) -> usize {
+        const MAX_ENTRIES: usize = 8;
+
+        let room = match cursor::position().map(|(_, row)| row) {
+            Ok(row) => terminal::size()
+                .map(|(_, rows)| rows.saturating_sub(row + 1) as usize)
+                .unwrap_or(MAX_ENTRIES),
+            Err(_) => MAX_ENTRIES,
+        };
+
+        self.completions.len().min(MAX_ENTRIES).min(room)
     }
 }
 
@@ -305,8 +367,13 @@ impl Default for CompletingInput {
 
 /// Read input with live completion
 pub fn read_input_with_completion() -> io::Result<Option<String>> {
+    read_input_with_prompt("serdes-ai > ")
+}
+
+/// Read a line, drawing `prompt` in front of it.
+pub fn read_input_with_prompt(prompt: &str) -> io::Result<Option<String>> {
     let mut stdout = io::stdout();
-    let mut input = CompletingInput::new();
+    let mut input = CompletingInput::with_prompt(prompt);
 
     terminal::enable_raw_mode()?;
     stdout.execute(cursor::Show)?;

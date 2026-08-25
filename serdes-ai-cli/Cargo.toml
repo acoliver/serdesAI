@@ -21,6 +21,8 @@ path = "src/main.rs"
 # Streaming markdown rendering. Not published to crates.io, so pinned by
 # revision rather than version: a floating branch would change the rendering
 # under us without any change here.
+unicode-width = "0.2"
+
 streamdown-parser = { git = "https://github.com/fed-stew/streamdown-rs", rev = "c72d9e3" }
 streamdown-render = { git = "https://github.com/fed-stew/streamdown-rs", rev = "c72d9e3" }
 
