@@ -28,9 +28,15 @@ use crate::messages::{
 /// Returns when the event stream closes, which happens once the orchestrator is
 /// dropped.
 pub async fn forward_events(mut rx: broadcast::Receiver<OrchestratorEvent>, bus: Arc<MessageBus>) {
+    // Events carry an agent id; the role and whether it is the root agent are
+    // only stated when it spawns. Remembering them is what lets a reply be
+    // labelled with the agent that produced it.
+    let mut agents: std::collections::HashMap<String, AgentIdentity> =
+        std::collections::HashMap::new();
+
     loop {
         match rx.recv().await {
-            Ok(event) => render(&event, &bus),
+            Ok(event) => render_with(&event, &bus, &mut agents),
             // A slow consumer misses events rather than stalling the run; say so
             // instead of silently showing an incomplete picture.
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -41,7 +47,18 @@ pub async fn forward_events(mut rx: broadcast::Receiver<OrchestratorEvent>, bus:
     }
 }
 
-fn render(event: &OrchestratorEvent, bus: &MessageBus) {
+/// What is known about one agent in the run.
+struct AgentIdentity {
+    role: String,
+    /// The root agent's output is the run's answer, printed by the caller.
+    is_root: bool,
+}
+
+fn render_with(
+    event: &OrchestratorEvent,
+    bus: &MessageBus,
+    agents: &mut std::collections::HashMap<String, AgentIdentity>,
+) {
     match event {
         OrchestratorEvent::ModeStarted { mode, task } => {
             bus.emit_info(format!("Starting {mode} mode: {task}"));
@@ -74,6 +91,14 @@ fn render(event: &OrchestratorEvent, bus: &MessageBus) {
             role,
             task,
         } => {
+            agents.insert(
+                id.to_string(),
+                AgentIdentity {
+                    role: role.to_string(),
+                    is_root: parent.is_none(),
+                },
+            );
+
             bus.emit(AnyMessage::SubAgentInvocation(SubAgentInvocationMessage {
                 base: BaseMessage::new(MessageCategory::Agent, None),
                 agent_id: Some(id.to_string()),
@@ -104,30 +129,37 @@ fn render(event: &OrchestratorEvent, bus: &MessageBus) {
         } => {
             if matches!(phase, ToolPhase::Executed) {
                 match success {
-                    Some(false) => bus.emit_warning(format!("{tool} failed")),
-                    _ => bus.emit_info(tool.to_string()),
+                    Some(false) => bus.emit_warning(format!("  ✗ {tool}")),
+                    _ => bus.emit_info(format!("  · {tool}")),
                 }
             }
         }
 
         OrchestratorEvent::AgentFinished { id, output } => {
-            bus.emit(AnyMessage::SubAgentResponse(SubAgentResponseMessage {
-                base: BaseMessage::new(MessageCategory::Agent, None),
-                agent_id: Some(id.to_string()),
-                agent_name: String::new(),
-                response: output.clone(),
-            }));
-            status(
-                bus,
-                id.to_string(),
-                String::new(),
-                SubAgentStatus::Completed,
-            );
+            let identity = agents.get(&id.to_string());
+            let role = identity.map(|a| a.role.clone()).unwrap_or_default();
+
+            // The root agent's output is the run's answer and is printed by the
+            // caller; emitting it here too would show the same text twice.
+            if !identity.map(|a| a.is_root).unwrap_or(false) {
+                bus.emit(AnyMessage::SubAgentResponse(SubAgentResponseMessage {
+                    base: BaseMessage::new(MessageCategory::Agent, None),
+                    agent_id: Some(id.to_string()),
+                    agent_name: role.clone(),
+                    response: output.clone(),
+                }));
+            }
+
+            status(bus, id.to_string(), role, SubAgentStatus::Completed);
         }
 
         OrchestratorEvent::AgentFailed { id, error } => {
+            let role = agents
+                .get(&id.to_string())
+                .map(|a| a.role.clone())
+                .unwrap_or_default();
             bus.emit_error(format!("Agent failed: {error}"));
-            status(bus, id.to_string(), String::new(), SubAgentStatus::Failed);
+            status(bus, id.to_string(), role, SubAgentStatus::Failed);
         }
 
         OrchestratorEvent::GateRoundStart { round, verifiers } => {
@@ -163,10 +195,12 @@ fn render(event: &OrchestratorEvent, bus: &MessageBus) {
         }
 
         OrchestratorEvent::RunFinished { success, summary } => {
+            // The summary is printed by the caller as the answer, so repeating
+            // it here showed the same text twice.
             if *success {
-                bus.emit_success(format!("Run complete. {summary}"));
+                bus.emit_success("Run complete.".to_string());
             } else {
-                bus.emit_error(format!("Run did not complete. {summary}"));
+                bus.emit_error(format!("Run did not complete: {summary}"));
             }
         }
     }
@@ -248,7 +282,8 @@ mod tests {
 
     fn rendered(event: OrchestratorEvent) -> Vec<AnyMessage> {
         let bus = bus();
-        render(&event, &bus);
+        let mut agents = std::collections::HashMap::new();
+        render_with(&event, &bus, &mut agents);
         bus.get_buffered_messages()
     }
 

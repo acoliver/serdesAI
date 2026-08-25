@@ -59,11 +59,19 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Quiet by default, and never on stdout. The default subscriber writes to
+    // stdout at info level, which put log lines straight through the rendered
+    // interface — boxes and answers interleaved with startup chatter. Warnings
+    // and errors still surface, and RUST_LOG turns detail back on when wanted.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr),
+        )
         .init();
 }
 

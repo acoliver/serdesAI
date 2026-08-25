@@ -170,14 +170,17 @@ fn a_write_outside_the_working_directory_is_refused() {
 fn bash_runs_a_command_and_shows_its_output() {
     let dir = workspace().unwrap();
 
+    // The command itself is echoed by the shell panel, so asserting on a marker
+    // that appears in the command would pass even if the output were dropped —
+    // which it was. The marker here can only come from what the command printed.
     let app = run_tool(
         dir.path(),
         "bash",
-        serde_json::json!({"command": "echo SHELL-OUTPUT-MARKER"}),
+        serde_json::json!({"command": "printf 'PRODUCED-%s\\n' OUTPUT"}),
         "RAN-IT",
     );
 
-    app.wait_for("SHELL-OUTPUT-MARKER")
+    app.wait_for("PRODUCED-OUTPUT")
         .expect("shell output was not displayed");
     app.wait_for("RAN-IT").expect("the run never finished");
 }

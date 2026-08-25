@@ -316,6 +316,56 @@ impl MessageBus {
                 let title = msg.title.as_deref().unwrap_or("────────────────");
                 let _ = renderer.print(&format!("\n{title}\n"), Some(Color::DarkGrey));
             }
+            // Delegation has to be visible. Without these a multi-agent run
+            // looks identical to a single agent doing everything itself, and
+            // there is no way to tell which agent is responsible for a change.
+            AnyMessage::SubAgentInvocation(msg) => {
+                let task = msg.prompt.replace('\n', " ");
+                let task = if task.chars().count() > 100 {
+                    format!("{}…", task.chars().take(99).collect::<String>())
+                } else {
+                    task
+                };
+                let _ = renderer.print(
+                    &format!("\n▸ {} agent: {}\n", msg.agent_name, task),
+                    Some(Color::Magenta),
+                );
+            }
+            AnyMessage::SubAgentResponse(msg) => {
+                if !msg.response.trim().is_empty() {
+                    let label = if msg.agent_name.is_empty() {
+                        "agent".to_string()
+                    } else {
+                        msg.agent_name.clone()
+                    };
+                    let _ = renderer.print_panel(&label, &msg.response, Color::Magenta);
+                }
+            }
+            AnyMessage::SubAgentStatus(msg) => {
+                // Only failures are worth a line of their own; start and finish
+                // are already visible from the invocation and the reply.
+                if matches!(msg.status, crate::messages::SubAgentStatus::Failed) {
+                    let name = if msg.agent_name.is_empty() {
+                        "agent"
+                    } else {
+                        &msg.agent_name
+                    };
+                    let _ = renderer.print(&format!("✗ {name} failed\n"), Some(Color::Red));
+                }
+            }
+            AnyMessage::ShellOutput(msg) => {
+                // The command was already shown by ShellStart; this is what it
+                // actually produced, which was being dropped entirely.
+                if !msg.output.trim().is_empty() {
+                    let colour = if msg.success { Color::Grey } else { Color::Red };
+                    let _ = renderer.print(&format!("{}\n", msg.output.trim_end()), Some(colour));
+                }
+                if let Some(code) = msg.exit_code {
+                    if code != 0 {
+                        let _ = renderer.print(&format!("exit status {code}\n"), Some(Color::Red));
+                    }
+                }
+            }
             _ => {}
         }
     }
