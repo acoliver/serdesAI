@@ -41,6 +41,13 @@ pub fn create_model_sync(spec: &str) -> Result<Arc<dyn Model>> {
         return Ok(model);
     }
 
+    // A model the user defined with its own endpoint carries everything needed
+    // to reach it, so it is resolved before provider parsing: its selector is a
+    // name of the user's choosing and generally not a `provider:model` pair.
+    if let Some(custom) = crate::models::loader::custom_model(spec) {
+        return build_custom_model(&custom);
+    }
+
     let (provider, model_name) = if spec.contains(':') {
         let parts: Vec<&str> = spec.splitn(2, ':').collect();
         (parts[0].to_lowercase(), parts[1])
@@ -60,7 +67,7 @@ pub fn create_model_sync(spec: &str) -> Result<Arc<dyn Model>> {
     }
 
     if let Some(base_url) = load_base_url(&provider) {
-        model_config = model_config.with_base_url(base_url);
+        model_config = model_config.with_base_url(normalize_base_url(&base_url));
     }
 
     let timeout_secs = config::get_request_timeout();
@@ -72,6 +79,41 @@ pub fn create_model_sync(spec: &str) -> Result<Arc<dyn Model>> {
 
     debug!("Model created successfully from spec '{}'.", spec);
     Ok(model)
+}
+
+/// Build a model from a user-defined endpoint.
+///
+/// These speak the OpenAI protocol — that is what `custom_openai` means — so
+/// the openai implementation is used, pointed at the given address and asked
+/// for the name that server actually serves.
+fn build_custom_model(custom: &crate::models::loader::CustomModel) -> Result<Arc<dyn Model>> {
+    info!(
+        "Creating custom model '{}': model={} endpoint={}",
+        custom.id, custom.wire_name, custom.url
+    );
+
+    let mut model_config = ModelConfig::new(format!("openai:{}", custom.wire_name))
+        .with_base_url(normalize_base_url(&custom.url));
+
+    if !custom.api_key.trim().is_empty() {
+        model_config = model_config.with_api_key(custom.api_key.clone());
+    }
+
+    // An explicit endpoint on the command line is the more specific
+    // instruction, so it still overrides the saved one.
+    if let Some(override_url) = std::env::var("SERDES_AI_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        model_config = model_config.with_base_url(normalize_base_url(&override_url));
+    }
+
+    model_config = model_config.with_timeout(Duration::from_secs(config::get_request_timeout()));
+
+    model_config
+        .build_model()
+        .map_err(|e| anyhow!("failed to build custom model '{}': {}", custom.id, e))
 }
 
 /// Environment variable pointing at a scripted-model fixture.
@@ -199,6 +241,16 @@ fn load_base_url(provider: &str) -> Option<String> {
     }
 }
 
+/// Strip trailing slashes from an endpoint.
+///
+/// The request path is appended to this, so `https://host/v1/` would produce
+/// `https://host/v1//chat/completions` — which servers answer with a 404 that
+/// says nothing about the cause. Writing the trailing slash is natural enough
+/// that it should simply work.
+fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
 /// List available providers.
 pub fn list_providers() -> Vec<&'static str> {
     vec![
@@ -220,6 +272,12 @@ pub fn validate_model_spec(spec: &str) -> Result<()> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Err(anyhow!("model spec cannot be empty"));
+    }
+
+    // A user-defined model names itself and brings its own endpoint, so there
+    // is no provider to recognise.
+    if crate::models::loader::custom_model(spec).is_some() {
+        return Ok(());
     }
 
     let (provider, model_name) = if spec.contains(':') {

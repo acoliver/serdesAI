@@ -291,3 +291,23 @@ fn a_fresh_install_writes_only_to_the_new_location() {
         "a fresh install recreated the old settings directory"
     );
 }
+
+#[test]
+fn a_model_with_its_own_endpoint_is_accepted_without_a_provider() {
+    // Its selector is a name of the user's choosing, so provider validation
+    // must not reject it as an unknown provider.
+    let mut app = TerminalApp::builder()
+        .models_file(
+            r#"{"my-local-model": {"type": "custom_openai", "name": "served-as-this",
+                 "custom_endpoint": {"url": "http://127.0.0.1:9/v1", "api_key": "k"}}}"#,
+        )
+        .script(says("unused"))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for(">>>").expect("no prompt appeared");
+    app.type_line("/model my-local-model").unwrap();
+
+    app.wait_for("my-local-model").expect("no response");
+    app.assert_not_contains("unknown provider");
+}

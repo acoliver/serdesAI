@@ -74,6 +74,7 @@ pub struct AppBuilder {
     onboarded: bool,
     config_lines: Vec<String>,
     legacy_config: Option<String>,
+    models_file: Option<String>,
     _fixture: Option<tempfile::TempDir>,
 }
 
@@ -89,6 +90,7 @@ impl AppBuilder {
             onboarded: true,
             config_lines: Vec::new(),
             legacy_config: None,
+            models_file: None,
             _fixture: None,
         }
     }
@@ -112,6 +114,14 @@ impl AppBuilder {
     pub fn legacy_config(mut self, contents: impl Into<String>) -> Self {
         self.legacy_config = Some(contents.into());
         self.onboarded = false;
+        self
+    }
+
+    /// Provide model definitions, as `extra_models.json` in the settings
+    /// directory.
+    pub fn models_file(mut self, json: impl Into<String>) -> Self {
+        self.models_file = Some(json.into());
+        self.onboarded = true;
         self
     }
 
@@ -208,6 +218,10 @@ impl AppBuilder {
                 config.push('\n');
             }
             std::fs::write(config_dir.join("config.cfg"), config)?;
+
+            if let Some(models) = &self.models_file {
+                std::fs::write(config_dir.join("extra_models.json"), models)?;
+            }
         }
 
         if let Some(json) = &self.script {

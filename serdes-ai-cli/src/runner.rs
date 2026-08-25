@@ -603,8 +603,16 @@ async fn run_interactive_turn(
             return Ok(());
         }
 
-        if let Some(rest) = cleaned.strip_prefix("/mode") {
-            handle_mode_command(bus, rest.trim());
+        // Matched on the whole command word, not as a prefix: "/mode" is a
+        // prefix of "/model", so a prefix test swallowed /model and ran it as
+        // a mode change with the argument "l".
+        let (command_word, rest) = match cleaned.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim()),
+            None => (cleaned.as_str(), ""),
+        };
+
+        if command_word.eq_ignore_ascii_case("/mode") {
+            handle_mode_command(bus, rest);
             return Ok(());
         }
 

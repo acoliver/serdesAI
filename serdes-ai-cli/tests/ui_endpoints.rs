@@ -22,6 +22,7 @@ use harness::TerminalApp;
 struct Request {
     path: String,
     body: String,
+    headers: String,
 }
 
 /// An OpenAI-compatible server that answers once and reports what it received.
@@ -124,7 +125,17 @@ fn handle(mut stream: TcpStream, reply: &str) -> Option<Request> {
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
 
-    Some(Request { path, body })
+    let headers = text
+        .split_once("\r\n\r\n")
+        .map(|(h, _)| h)
+        .unwrap_or("")
+        .to_string();
+
+    Some(Request {
+        path,
+        body,
+        headers,
+    })
 }
 
 #[test]
@@ -312,4 +323,120 @@ fn usage_from_a_real_response_is_reported() {
         .expect("token usage from the provider was not reported");
     app.wait_for("(11 in, 7 out)")
         .expect("the split between input and output was not reported");
+}
+
+#[test]
+fn a_model_defined_with_its_own_endpoint_is_reached_there() {
+    // Definitions in extra_models.json carry a URL and key, but both were
+    // parsed and then discarded, so a model with its own server was listed and
+    // then quietly asked of the default provider instead.
+    let server = StubServer::start("REPLY-FROM-MY-SERVER");
+
+    let app = TerminalApp::builder()
+        .args(["-m", "my-own-model", "-p", "hello"])
+        .models_file(format!(
+            r#"{{"my-own-model": {{"type": "custom_openai", "name": "served-as-this",
+                 "custom_endpoint": {{"url": "{}", "api_key": "my-secret"}}}}}}"#,
+            server.url()
+        ))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("REPLY-FROM-MY-SERVER")
+        .expect("the model's own endpoint was never reached");
+}
+
+#[test]
+fn a_defined_model_is_asked_for_by_the_name_its_server_serves() {
+    // The selector is a name of the user's choosing; the server knows the model
+    // by whatever `name` says, which is frequently different.
+    let server = StubServer::start("ok");
+
+    let app = TerminalApp::builder()
+        .args(["-m", "my-own-model", "-p", "hello"])
+        .models_file(format!(
+            r#"{{"my-own-model": {{"type": "custom_openai", "name": "served-as-this",
+                 "custom_endpoint": {{"url": "{}", "api_key": "my-secret"}}}}}}"#,
+            server.url()
+        ))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("ok").expect("no answer");
+
+    let request = server.first_request();
+    assert!(
+        request.body.contains("served-as-this"),
+        "the server was asked for the selector rather than the name it serves: {}",
+        request.body
+    );
+}
+
+#[test]
+fn a_defined_model_authenticates_with_its_own_key() {
+    let server = StubServer::start("ok");
+
+    let app = TerminalApp::builder()
+        .args(["-m", "my-own-model", "-p", "hello"])
+        .models_file(format!(
+            r#"{{"my-own-model": {{"type": "custom_openai", "name": "served-as-this",
+                 "custom_endpoint": {{"url": "{}", "api_key": "the-defined-key"}}}}}}"#,
+            server.url()
+        ))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("ok").expect("no answer");
+
+    assert!(
+        server.first_request().headers.contains("the-defined-key"),
+        "the key from the definition was not used"
+    );
+}
+
+#[test]
+fn an_endpoint_written_with_a_trailing_slash_still_works() {
+    // The request path is appended, so a trailing slash yields a doubled slash
+    // and a 404 that says nothing about why.
+    let server = StubServer::start("REPLY-DESPITE-SLASH");
+
+    let app = TerminalApp::builder()
+        .args([
+            "--base-url",
+            &format!("{}/", server.url()),
+            "-m",
+            "openai:local-model",
+            "-p",
+            "hello",
+        ])
+        .env("OPENAI_API_KEY", "not-needed")
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("REPLY-DESPITE-SLASH")
+        .expect("a trailing slash on the endpoint broke the request");
+
+    assert_eq!(
+        server.first_request().path,
+        "/v1/chat/completions",
+        "the request path contained a doubled slash"
+    );
+}
+
+#[test]
+fn a_defined_models_endpoint_tolerates_a_trailing_slash() {
+    let server = StubServer::start("REPLY-DESPITE-SLASH");
+
+    let app = TerminalApp::builder()
+        .args(["-m", "my-own-model", "-p", "hello"])
+        .models_file(format!(
+            r#"{{"my-own-model": {{"type": "custom_openai", "name": "served-as-this",
+                 "custom_endpoint": {{"url": "{}/", "api_key": "k"}}}}}}"#,
+            server.url()
+        ))
+        .spawn()
+        .expect("failed to spawn");
+
+    app.wait_for("REPLY-DESPITE-SLASH")
+        .expect("a trailing slash in the definition broke the request");
 }
