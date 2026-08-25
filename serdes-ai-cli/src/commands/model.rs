@@ -68,9 +68,10 @@ fn handle_pin_model(cmd: &str) -> CommandResult {
         cache.insert(normalized_agent.clone(), model.clone());
     }
 
-    // Update config persistence + compatibility map
+    // Persist the pin, and only the pin. Setting the session-wide model here
+    // as well meant pinning one agent silently changed the model every other
+    // agent ran on, which is the opposite of what pinning is for.
     config::set_pinned_model(&normalized_agent, &model);
-    config::set_model_name(&model);
 
     bus::emit_success(format!(
         "Pinned model '{model}' to agent '{normalized_agent}'"

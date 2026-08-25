@@ -72,6 +72,7 @@ pub struct AppBuilder {
     rows: u16,
     script: Option<String>,
     onboarded: bool,
+    config_lines: Vec<String>,
     _fixture: Option<tempfile::TempDir>,
 }
 
@@ -85,6 +86,7 @@ impl AppBuilder {
             rows: DEFAULT_ROWS,
             script: None,
             onboarded: true,
+            config_lines: Vec::new(),
             _fixture: None,
         }
     }
@@ -95,6 +97,17 @@ impl AppBuilder {
     /// reach the prompt rather than exercise the tutorial.
     pub fn fresh_install(mut self) -> Self {
         self.onboarded = false;
+        self
+    }
+
+    /// Write a line into the `[puppy]` section of this run's configuration.
+    ///
+    /// For settings that have no flag and no command — a stored endpoint, a
+    /// pre-existing pin — where the point of the test is that the application
+    /// reads them from the file it was started with.
+    pub fn config_line(mut self, line: impl Into<String>) -> Self {
+        self.config_lines.push(line.into());
+        self.onboarded = true;
         self
     }
 
@@ -172,10 +185,13 @@ impl AppBuilder {
         if self.onboarded {
             let config_dir = home.join(".code_puppy");
             std::fs::create_dir_all(&config_dir)?;
-            std::fs::write(
-                config_dir.join("puppy.cfg"),
-                "[puppy]\nonboarding_complete = true\n",
-            )?;
+
+            let mut config = String::from("[puppy]\nonboarding_complete = true\n");
+            for line in &self.config_lines {
+                config.push_str(line);
+                config.push('\n');
+            }
+            std::fs::write(config_dir.join("puppy.cfg"), config)?;
         }
 
         if let Some(json) = &self.script {
@@ -204,7 +220,7 @@ impl AppBuilder {
             cmd.env(key, value);
         }
 
-        TerminalApp::launch(cmd, self.cols, self.rows, self._fixture)
+        TerminalApp::launch(cmd, self.cols, self.rows, self._fixture, home)
     }
 }
 
@@ -247,6 +263,8 @@ pub struct TerminalApp {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     output: Receiver<()>,
     _fixture: Option<tempfile::TempDir>,
+    /// This run's sandboxed HOME, so a test can inspect what was written to it.
+    home: PathBuf,
     cols: u16,
     rows: u16,
     /// How many lines have been submitted.
@@ -267,6 +285,7 @@ impl TerminalApp {
         cols: u16,
         rows: u16,
         fixture: Option<tempfile::TempDir>,
+        home: PathBuf,
     ) -> anyhow::Result<Self> {
         // Held until this application is dropped.
         acquire_slot();
@@ -316,10 +335,20 @@ impl TerminalApp {
             child,
             output,
             _fixture: fixture,
+            home,
             cols,
             rows,
             submitted: 0,
         })
+    }
+
+    /// This run's sandboxed HOME.
+    ///
+    /// Configuration written by the application lands under
+    /// `home()/.code_puppy/`, which is how a test checks that a setting was
+    /// actually persisted rather than only held in memory.
+    pub fn home(&self) -> &Path {
+        &self.home
     }
 
     /// The visible screen, one entry per row, trailing spaces trimmed.
