@@ -332,6 +332,15 @@ usage, and the agent surfaces that usage through `AgentStreamEvent`.
 
 ## [Unreleased]
 
+### Added
+- New `serdes-ai-responses` crate: serve any serdesAI `Model` through the OpenAI Responses API, following the Open Responses interoperability profile (#65):
+  - `POST /v1/responses` returns JSON responses, or SSE when `stream: true` (`data: {...}` frames ending with `data: [DONE]`); `POST /responses` is provided as an alias so the codex CLI can use the server as its `model_provider` `base_url` with `wire_api = "responses"`.
+  - `GET /v1/responses/{id}` retrieves stored responses; `GET /v1/responses` upgrades to the WebSocket transport, where clients send `{"type":"response.create","response":{...}}` frames and receive the same events as SSE, one turn at a time, with `sequence_number` restarting per turn.
+  - Stateful mode: `store: true` (the default) persists each response in a pluggable `ResponseStore` (in-memory implementation included) and later turns chain via `previous_response_id`, with instructions on chained turns replacing stored ones. `store: false` turns on a WebSocket connection keep their state in a connection-local cache: nothing is persisted globally, but chaining still works on that socket, matching how the codex CLI drives the API. A failed continuation evicts the referenced id so the client replays the full input.
+  - codex compatibility details: `store:false` + `instructions` + function-tool wire shapes, unprefixed mid-stream event names (`output_item.added`, `output_text.delta`, `function_call_arguments.delta`, ...), usage on `response.completed`, and error codes codex treats as retryable (`previous_response_not_found`, `websocket_connection_limit_reached` after the 60-minute connection lifetime, enforced between turns).
+  - Rejected on purpose: hosted tools (only client-side function tools are brokered), `background: true`, and `item_reference` inputs.
+- `serdes-ai` facade gains an `open-responses` feature (also part of `full`) re-exporting the crate as `serdes_ai::responses`.
+
 ### Planned
 - OpenAI Realtime API support
 - Cohere provider
