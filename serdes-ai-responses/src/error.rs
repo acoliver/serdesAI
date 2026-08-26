@@ -135,7 +135,7 @@ impl HttpErrorEnvelope {
 pub struct WsErrorEnvelope {
     /// Always `"error"`.
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub kind: String,
     /// HTTP-equivalent status code for the failure.
     pub status_code: u16,
     /// The error payload.
@@ -147,7 +147,7 @@ impl WsErrorEnvelope {
     #[must_use]
     pub fn from_error(err: &ResponsesError) -> Self {
         Self {
-            kind: "error",
+            kind: "error".to_string(),
             status_code: err.status(),
             error: err.body(),
         }

@@ -1,58 +1,57 @@
-//! OpenAI Responses API server support for serdesAI.
+//! Client for the OpenAI Responses API as spoken by the OpenAI codex CLI and
+//! [Open Responses](https://openresponses.org)-compatible servers.
 //!
-//! This crate exposes a serdesAI [`Model`] as an OpenAI
-//! [Responses API](https://platform.openai.com/docs/api-reference/responses)
-//! compatible service, following the Open Responses interoperability profile
-//! (<https://openresponses.org>):
+//! [`OpenResponsesModel`] is a serdesAI [`Model`](serdes_ai_models::Model)
+//! implementation that drives a Responses API endpoint:
 //!
-//! - `POST /v1/responses` returning JSON or SSE (`stream: true`)
-//! - `GET /v1/responses/{id}` retrieving stored responses
-//! - stateful chaining via `previous_response_id` backed by a
-//!   [`store::ResponseStore`]
-//! - a websocket transport on the same path where each connection holds its
-//!   own session state, including continuations for `store: false` turns
-//! - a `/responses` route alias so clients like the codex CLI (which posts to
-//!   `{base_url}/responses`) can use the server directly
-//!
-//! The server brokers client-side function tools only: hosted tools such as
-//! `web_search_preview` are rejected with a 400.
+//! - **WebSocket transport** (`wss://…/v1/responses`): sends
+//!   `{"type":"response.create","response":{…}}` frames and maps the event
+//!   stream onto `ModelResponseStreamEvent`s.
+//! - **Session-stateful mode**: the model keeps `previous_response_id` in the
+//!   socket session and sends `store: false` plus only the *new* input items
+//!   each turn, instead of replaying the full history every run. When a
+//!   continuation fails (`previous_response_not_found`) the cached id is
+//!   dropped and the full input replayed; when the server enforces its
+//!   connection lifetime (`websocket_connection_limit_reached`) the socket is
+//!   reconnected and the turn replayed, mirroring codex CLI behavior.
+//! - **HTTP stateful mode** (`POST /v1/responses`, `store: true` +
+//!   `previous_response_id`) for endpoints without websockets, including the
+//!   codex endpoint shape (`{base_url}/responses` with a bearer token, e.g.
+//!   `chatgpt.com/backend-api/codex`).
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use serdes_ai_models::mock::FunctionModel;
-//! use serdes_ai_responses::ResponsesEngine;
-//! use std::net::SocketAddr;
-//! use std::sync::Arc;
+//! use serdes_ai_responses::client::OpenResponsesModel;
 //!
-//! let engine = ResponsesEngine::new(Arc::new(FunctionModel::constant_text("hi")));
-//! let server = serdes_ai_responses::server::ResponsesServer::new(engine);
-//! let addr: SocketAddr = "127.0.0.1:8080".parse()?;
-//! server.serve(addr).await?;
+//! let model = OpenResponsesModel::new("gpt-5.1-codex-mini", "wss://host/v1/responses")
+//!     .bearer("sk-…");
+//! // use it like any other serdesAI model: agent.run(...) / agent.run_stream(...)
+//! # let _ = &model;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Streaming over SSE terminates with a `data: [DONE]` sentinel; the
-//! websocket transport terminates each turn with `response.completed`,
-//! `response.incomplete`, or `response.failed`.
+//! The `test-server` feature (off by default) compiles a wire-accurate local
+//! server used as a test rig for this crate's integration tests. It is not a
+//! product surface.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
+pub mod client;
 pub mod convert;
-pub mod engine;
 pub mod error;
-pub mod store;
 pub mod types;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "test-server")]
+pub mod engine;
+#[cfg(feature = "test-server")]
 pub mod server;
-#[cfg(feature = "server")]
+#[cfg(feature = "test-server")]
+pub mod store;
+#[cfg(feature = "test-server")]
 pub mod websocket;
 
-pub use engine::{PreparedTurn, ResponsesEngine, TurnOutput};
+pub use client::{OpenResponsesModel, Transport};
 pub use error::ResponsesError;
-pub use store::{InMemoryResponseStore, ResponseStore, SessionResponseCache, StoredResponse};
-pub use types::{
-    CreateResponseRequest, OutputItem, ResponseInput, ResponseObject, ResponseStatus, StreamEvent,
-};
+pub use types::{CreateResponseRequest, OutputItem, ResponseInput, ResponseObject, StreamEvent};

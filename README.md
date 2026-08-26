@@ -224,7 +224,7 @@ SerdesAI is organized as a workspace of focused crates:
 | `serdes-ai-graph`      | Graph-based workflows            |
 | `serdes-ai-evals`      | Evaluation framework      |
 | `serdes-ai-macros`     | Procedural macros         |
-| `serdes-ai-responses`  | OpenAI Responses API server (Open Responses profile) |
+| `serdes-ai-responses`  | OpenAI Responses API client (Open Responses profile: WebSocket session-stateful, HTTP stateful) |
 
 ## 🔌 Supported Providers
 
@@ -313,7 +313,7 @@ serdes-ai = { version = "0.1", features = ["full"] }
 | `graph`               | Graph workflows           |         |
 | `evals`               | Evaluation framework      |         |
 | `macros`              | Procedural macros         | [OK]       |
-| `open-responses`      | Serve models over the OpenAI Responses API (Open Responses profile: JSON, SSE, WebSocket, stateful sessions) |  |
+| `open-responses`      | OpenAI Responses API client `Model` (codex / Open Responses profile: WebSocket + HTTP, session-stateful turns) |  |
 | `tracing-integration` | Tracing support           |         |
 | `otel`                | OpenTelemetry support     |         |
 | `full`                | All features              |         |

@@ -88,6 +88,10 @@ pub async fn handle_socket(
 
     let session = SessionResponseCache::default();
     let connected_at = Instant::now();
+    // The lifetime limit is enforced between turns only: a connection always
+    // gets to serve its first turn, matching the Open Responses reconnect
+    // contract (a fresh connection is a fresh allowance).
+    let mut turns_served = false;
 
     while let Some(frame) = ws_rx.next().await {
         let frame = match frame {
@@ -104,6 +108,7 @@ pub async fn handle_socket(
                     engine.as_ref(),
                     &session,
                     connected_at,
+                    turns_served,
                     &config,
                     text.as_str(),
                     &mut sender,
@@ -124,6 +129,8 @@ pub async fn handle_socket(
                         let _ = sender.unbounded_send(Message::Close(None));
                         break;
                     }
+                } else {
+                    turns_served = true;
                 }
             }
             Message::Ping(payload) => {
@@ -154,6 +161,7 @@ async fn run_turn(
     engine: &ResponsesEngine,
     session: &SessionResponseCache,
     connected_at: Instant,
+    turns_served: bool,
     config: &WebSocketSessionConfig,
     text: &str,
     sender: &mut FrameSender,
@@ -202,7 +210,7 @@ async fn run_turn(
 
     // The lifetime limit is enforced between turns only, so an in-flight turn
     // always completes.
-    if connected_at.elapsed() >= config.connection_ttl {
+    if turns_served && connected_at.elapsed() >= config.connection_ttl {
         return Some(ResponsesError::ConnectionLimitReached);
     }
 

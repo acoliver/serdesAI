@@ -1,6 +1,5 @@
-//! HTTP integration tests for the Responses API server: JSON turns, SSE
-//! streaming, stateful chaining, the codex `/responses` alias, and error
-//! envelopes.
+//! HTTP integration tests for the test rig: JSON turns, SSE streaming,
+//! stateful chaining, and error envelopes.
 
 mod common;
 
@@ -38,34 +37,6 @@ async fn json_turn_returns_completed_response() {
 }
 
 #[tokio::test]
-async fn codex_alias_posts_to_plain_responses_path() {
-    let (model, _calls) = recording_model();
-    let addr = spawn_server(model).await;
-
-    // The codex CLI posts to {base_url}/responses with store:false.
-    let response = client()
-        .post(format!("http://{addr}/responses"))
-        .json(&json!({
-            "model": "gpt-5.1-codex",
-            "instructions": "You are a coding agent.",
-            "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
-            "tools": [{"type":"function","name":"shell","description":"run a command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}],
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
-            "reasoning": {"effort": "medium", "summary": "auto"},
-            "store": false,
-            "stream": false,
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 200);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["status"], "completed");
-}
-
-#[tokio::test]
 async fn stateful_chaining_resolves_previous_response_id() {
     let (model, calls) = recording_model();
     let addr = spawn_server(model).await;
@@ -81,17 +52,6 @@ async fn stateful_chaining_resolves_previous_response_id() {
         .await
         .unwrap();
     let first_id = first["id"].as_str().unwrap().to_string();
-
-    // GET returns the stored response.
-    let stored: Value = client()
-        .get(format!("{url}/{first_id}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(stored["id"], first_id.as_str());
 
     let second: Value = client()
         .post(&url)
@@ -113,33 +73,6 @@ async fn stateful_chaining_resolves_previous_response_id() {
     // turn history + second prompt.
     let calls = calls.lock().unwrap();
     assert_eq!(*calls, vec![2, 4]);
-}
-
-#[tokio::test]
-async fn store_false_responses_are_not_gettable() {
-    let (model, _calls) = recording_model();
-    let addr = spawn_server(model).await;
-    let url = format!("http://{addr}/v1/responses");
-
-    let first: Value = client()
-        .post(&url)
-        .json(&json!({"model": "m", "input": "x", "store": false}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let first_id = first["id"].as_str().unwrap();
-
-    let missing = client()
-        .get(format!("{url}/{first_id}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 404);
-    let body: Value = missing.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "not_found_error");
 }
 
 #[tokio::test]
