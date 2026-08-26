@@ -189,7 +189,7 @@ impl CompletingInput {
                 }
                 // Ctrl-O shows the most recent summarised output in full.
                 KeyCode::Char('o') => {
-                    show_full_output();
+                    toggle_output_block();
                     return None;
                 }
                 // Ctrl-D on an empty line is the conventional clean exit.
@@ -383,6 +383,9 @@ impl CompletingInput {
     /// user just entered would be overwritten and the session would lose its
     /// transcript.
     pub fn commit_to_scrollback(&self) {
+        // The block stops being redrawable here. What has already happened
+        // should stay where it is rather than move as later blocks come and go.
+        crate::collapse::commit();
         crate::screen::set_input(crate::screen::InputView::default());
         crate::screen::emit(&format!("{}{}\n", self.prompt, self.buffer));
     }
@@ -465,18 +468,13 @@ impl Default for CompletingInput {
     }
 }
 
-/// Print the most recent summarised output in full.
+/// Expand or collapse the block on screen.
 ///
-/// It appears below rather than in place of the summary: the conversation is in
-/// the terminal's own scrollback, which cannot be rewritten after the fact.
-fn show_full_output() {
-    match crate::collapse::take_latest() {
-        Some(block) => {
-            crate::screen::emit(&format!("\n{}\n{}\n", block.label, block.text));
-        }
-        None => {
-            crate::screen::emit("\nNothing further to show.\n");
-        }
+/// It changes in place: expanding pushes what follows it down, collapsing
+/// brings that back up.
+fn toggle_output_block() {
+    if !crate::collapse::toggle() {
+        crate::screen::emit("\nNothing to expand.\n");
     }
 }
 

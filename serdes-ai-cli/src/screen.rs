@@ -72,12 +72,69 @@ struct Screen {
     out: Stdout,
     /// How many rows the region currently occupies on screen.
     drawn_rows: u16,
+    /// How many of those rows are the block, as drawn.
+    ///
+    /// Recorded rather than recomputed: the input view can change between a
+    /// draw and the erase that follows it — the completion list opening is
+    /// enough — and deriving it from the current view then walks the cursor
+    /// back by the wrong number of rows.
+    drawn_block_rows: u16,
     view: InputView,
     /// Output not yet ending in a newline.
     ///
     /// Callers emit fragments — some text, then a newline as a separate call —
     /// and scrollback is written a whole line at a time.
     pending: String,
+    /// The block that can currently be expanded, and what has been shown since.
+    ///
+    /// Held in the region rather than written to scrollback, because that is
+    /// what makes it redrawable: expanding has to move what follows it down,
+    /// and collapsing has to bring it back up.
+    live: Option<LiveBlock>,
+}
+
+/// Output shown in summary, with the whole of it available.
+#[derive(Debug, Clone)]
+struct LiveBlock {
+    /// The summary lines, shown when collapsed.
+    summary: Vec<String>,
+    /// Every line, shown when expanded.
+    full: Vec<String>,
+    /// Which of the two is being shown.
+    expanded: bool,
+    /// Everything displayed after the block — the model's answer, the turn
+    /// summary — which has to move as the block grows and shrinks.
+    trailing: Vec<String>,
+}
+
+impl LiveBlock {
+    /// The lines to draw, in order.
+    fn lines(&self, available: usize) -> Vec<String> {
+        let body = if self.expanded {
+            &self.full
+        } else {
+            &self.summary
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        let room = available.saturating_sub(self.trailing.len());
+
+        if body.len() > room && room > 0 {
+            // An expansion taller than the screen cannot be drawn whole and
+            // still be retractable: the region has to fit to be redrawn.
+            lines.extend(body[..room.saturating_sub(1)].iter().cloned());
+            lines.push(format!(
+                "... showing {} of {} lines - ctrl+o to collapse",
+                room.saturating_sub(1),
+                body.len()
+            ));
+        } else {
+            lines.extend(body.iter().cloned());
+        }
+
+        lines.extend(self.trailing.iter().cloned());
+        lines
+    }
 }
 
 impl Screen {
@@ -85,31 +142,67 @@ impl Screen {
         Ok(Self {
             out: io::stdout(),
             drawn_rows: 0,
+            drawn_block_rows: 0,
             view: InputView::default(),
             pending: String::new(),
+            live: None,
         })
     }
 
     /// Erase the region, leaving the cursor where it began.
+    /// Erase the region, leaving the cursor at its first row.
+    ///
+    /// The cursor sits on the prompt line, which is below the block, so it has
+    /// to walk back up before clearing or the block would be left behind.
     fn erase(&mut self) -> io::Result<()> {
         if self.drawn_rows == 0 {
             return Ok(());
         }
 
+        if self.drawn_block_rows > 0 {
+            self.out.queue(cursor::MoveUp(self.drawn_block_rows))?;
+        }
+
         self.out.queue(cursor::MoveToColumn(0))?;
         self.out.queue(Clear(ClearType::FromCursorDown))?;
         self.drawn_rows = 0;
+        self.drawn_block_rows = 0;
         self.out.flush()
     }
 
-    /// Draw the prompt, what has been typed, and any completions.
+    /// How many rows the region may use, leaving the screen room to breathe.
+    fn available_rows(&self) -> usize {
+        let height = crossterm::terminal::size()
+            .map(|(_, rows)| rows as usize)
+            .unwrap_or(24);
+
+        // One row is kept free so the region never sits flush against the top,
+        // which would leave nothing of the conversation visible.
+        height.saturating_sub(2)
+    }
+
+    /// Draw the expandable block, the prompt, what has been typed, and any
+    /// completions.
     fn draw(&mut self) -> io::Result<()> {
         self.erase()?;
 
         let view = self.view.clone();
         let entries: Vec<&String> = view.entries.iter().take(MAX_ENTRIES).collect();
 
+        // The block sits above the prompt and is redrawn with it, which is what
+        // lets it grow and shrink in place.
+        let available = self.available_rows().saturating_sub(view.rows() as usize);
+        let block_lines = self
+            .live
+            .as_ref()
+            .map(|live| live.lines(available))
+            .unwrap_or_default();
+
         self.out.queue(cursor::MoveToColumn(0))?;
+        for line in &block_lines {
+            self.out.queue(Print(line))?;
+            self.out.queue(Print("\r\n"))?;
+        }
         self.out.queue(SetForegroundColor(Color::Cyan))?;
         self.out.queue(Print(&view.prompt))?;
         self.out.queue(ResetColor)?;
@@ -139,8 +232,31 @@ impl Screen {
         let column = display_width(&view.prompt).saturating_add(view.cursor_column);
         self.out.queue(cursor::MoveToColumn(column))?;
 
-        self.drawn_rows = view.rows();
+        self.drawn_block_rows = u16::try_from(block_lines.len()).unwrap_or(u16::MAX);
+        self.drawn_rows = view.rows().saturating_add(self.drawn_block_rows);
         self.out.flush()
+    }
+
+    /// Move the expandable block into scrollback.
+    ///
+    /// It is written as it currently appears — expanded if the user expanded it
+    /// — so committing does not change what is on screen.
+    fn commit_live(&mut self) -> io::Result<()> {
+        let Some(live) = self.live.take() else {
+            return Ok(());
+        };
+
+        let lines = live.lines(self.available_rows());
+        self.erase()?;
+
+        for line in &lines {
+            self.out.queue(cursor::MoveToColumn(0))?;
+            self.out.queue(Print(line))?;
+            self.out.queue(Print("\r\n"))?;
+        }
+        self.out.flush()?;
+
+        self.draw()
     }
 
     /// Put text into the scrollback above the region.
@@ -178,6 +294,13 @@ impl Screen {
     }
 
     fn write_lines(&mut self, lines: &[String]) -> io::Result<()> {
+        // While a block is expandable, what follows it belongs to the region:
+        // expanding has to push it down and collapsing has to bring it back.
+        if let Some(live) = self.live.as_mut() {
+            live.trailing.extend(lines.iter().cloned());
+            return self.draw();
+        }
+
         self.erase()?;
 
         for line in lines {
@@ -215,6 +338,84 @@ pub fn deactivate() {
     }
 }
 
+/// Forget the region and everything in it.
+///
+/// Called when a full-screen interface is about to take the terminal: it wipes
+/// the rows the region was drawn in, so both the row count and the expandable
+/// block it held are meaningless afterwards.
+pub fn discard_region() {
+    if let Ok(mut guard) = screen().lock() {
+        if let Some(active) = guard.as_mut() {
+            active.drawn_rows = 0;
+            active.drawn_block_rows = 0;
+            active.live = None;
+        }
+    }
+}
+
+/// Show `summary` in the region, keeping `full` for expansion.
+///
+/// Any block already expandable is written to scrollback first: only the most
+/// recent one can be toggled, because only it is still being redrawn.
+pub fn show_block(summary: &str, full: &str) {
+    let Ok(mut guard) = screen().lock() else {
+        return;
+    };
+    let Some(active) = guard.as_mut() else {
+        return;
+    };
+
+    let _ = active.commit_live();
+
+    active.live = Some(LiveBlock {
+        summary: summary.lines().map(str::to_string).collect(),
+        full: full.lines().map(str::to_string).collect(),
+        expanded: false,
+        trailing: Vec::new(),
+    });
+
+    let _ = active.draw();
+}
+
+/// Expand the block if it is collapsed, collapse it if it is expanded.
+///
+/// Returns whether there was one to toggle.
+pub fn toggle_block() -> bool {
+    let Ok(mut guard) = screen().lock() else {
+        return false;
+    };
+    let Some(active) = guard.as_mut() else {
+        return false;
+    };
+    let Some(live) = active.live.as_mut() else {
+        return false;
+    };
+
+    live.expanded = !live.expanded;
+    let _ = active.draw();
+    true
+}
+
+/// Write the expandable block to scrollback, so it stops being redrawn.
+///
+/// Called when the user enters a new line: what has already happened should
+/// stay where it is rather than move as later blocks come and go.
+pub fn commit_block() {
+    if let Ok(mut guard) = screen().lock() {
+        if let Some(active) = guard.as_mut() {
+            let _ = active.commit_live();
+        }
+    }
+}
+
+/// Whether a block can currently be expanded.
+pub fn has_block() -> bool {
+    screen()
+        .lock()
+        .map(|guard| guard.as_ref().is_some_and(|active| active.live.is_some()))
+        .unwrap_or(false)
+}
+
 /// Forget what the region drew, without erasing anything.
 ///
 /// A full-screen interface — a picker, the colour chooser — takes the terminal
@@ -224,6 +425,7 @@ pub fn invalidate() {
     if let Ok(mut guard) = screen().lock() {
         if let Some(active) = guard.as_mut() {
             active.drawn_rows = 0;
+            active.drawn_block_rows = 0;
         }
     }
 }

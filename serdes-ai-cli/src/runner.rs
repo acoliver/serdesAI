@@ -495,7 +495,7 @@ pub fn show_help_messages(bus: &MessageBus) {
     bus.emit_info("Type '/clear' or 'clear' to reset history and rotate autosave.".to_string());
     bus.emit_info("Type '/help' to show this startup guidance again.".to_string());
     bus.emit_info("Press Ctrl+C to cancel current processing, Ctrl+D to exit cleanly.".to_string());
-    bus.emit_info("Press Ctrl+O to show the most recent shortened output in full.".to_string());
+    bus.emit_info("Press Ctrl+O to expand or collapse shortened output.".to_string());
 }
 
 pub fn validate_model(model: &str) -> Result<()> {

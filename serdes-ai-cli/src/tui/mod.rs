@@ -27,6 +27,11 @@ pub type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 /// Initialize TUI terminal
 pub fn init_terminal() -> io::Result<TuiTerminal> {
+    // Everything the region had drawn is about to be wiped, including any
+    // expandable block. Redrawing it afterwards would put a second copy below
+    // whatever the screen then holds.
+    crate::screen::discard_region();
+
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, Hide)?;

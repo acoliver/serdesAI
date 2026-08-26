@@ -13,7 +13,12 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
+use std::time::Duration;
+
 use harness::{Key, TerminalApp, says};
+
+/// The pause after which a screen is taken to have finished drawing.
+const SETTLED: Duration = Duration::from_millis(250);
 
 /// An app sitting at the interactive prompt.
 fn at_prompt() -> TerminalApp {
@@ -37,6 +42,12 @@ fn open_and_dismiss(command: &str, marker: &str) -> TerminalApp {
 
     app.wait_for(marker)
         .unwrap_or_else(|e| panic!("{command} did not draw its screen: {e}"));
+
+    // Settle before dismissing. The marker appearing means drawing has started,
+    // not finished, and a key sent while the screen is still switching the
+    // terminal into raw mode can be discarded with the mode change.
+    app.wait_until_idle(SETTLED)
+        .unwrap_or_else(|e| panic!("{command} never finished drawing: {e}"));
 
     app.send_key(Key::Esc)
         .unwrap_or_else(|e| panic!("could not dismiss {command}: {e}"));
@@ -118,6 +129,8 @@ fn a_screen_can_be_opened_twice() {
         // the next command to be typed into a screen that is still open.
         app.wait_for_on_screen("olor")
             .unwrap_or_else(|e| panic!("the screen did not draw on visit {visit}: {e}"));
+        app.wait_until_idle(SETTLED)
+            .unwrap_or_else(|e| panic!("visit {visit} never finished drawing: {e}"));
 
         app.send_key(Key::Esc)
             .expect("could not dismiss the screen");
@@ -140,6 +153,8 @@ fn arrow_keys_in_a_screen_do_not_break_it() {
 
     app.type_line("/colors").expect("could not open the screen");
     app.wait_for("olor").expect("the screen did not draw");
+    app.wait_until_idle(SETTLED)
+        .expect("never finished drawing");
 
     for key in [Key::Down, Key::Down, Key::Up, Key::Right, Key::Left] {
         app.send_key(key).expect("could not send a key");
