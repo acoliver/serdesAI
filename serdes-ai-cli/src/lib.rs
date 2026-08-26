@@ -1,4 +1,5 @@
 pub mod bus;
+pub mod collapse;
 pub mod commands;
 pub mod config;
 pub mod messages;

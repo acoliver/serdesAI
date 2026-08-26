@@ -760,6 +760,8 @@ pub enum Key {
     Esc,
     /// Ctrl-C.
     CtrlC,
+    /// Ctrl-O, which shows the most recent shortened output in full.
+    CtrlO,
     /// Ctrl-D.
     CtrlD,
     /// Tab.
@@ -783,6 +785,7 @@ impl Key {
             Key::Enter => "\r",
             Key::Esc => "\x1b",
             Key::CtrlC => "\x03",
+            Key::CtrlO => "\x0f",
             Key::CtrlD => "\x04",
             Key::Tab => "\t",
             Key::Backspace => "\x7f",

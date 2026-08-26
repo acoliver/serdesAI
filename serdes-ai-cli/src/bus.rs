@@ -272,8 +272,9 @@ impl MessageBus {
                 let _ = renderer.print("\n", None);
             }
             AnyMessage::FileContent(msg) => {
-                let _ =
-                    renderer.print_panel(&format!("File: {}", msg.path), &msg.content, Color::Blue);
+                let label = format!("File: {}", msg.path);
+                let shown = crate::collapse::summarise(&label, &msg.content);
+                let _ = renderer.print_panel(&label, &shown, Color::Blue);
             }
             AnyMessage::StatusPanel(msg) => {
                 let style = match msg.status_type {
@@ -358,7 +359,10 @@ impl MessageBus {
                 // actually produced, which was being dropped entirely.
                 if !msg.output.trim().is_empty() {
                     let colour = if msg.success { Color::Grey } else { Color::Red };
-                    let _ = renderer.print(&format!("{}\n", msg.output.trim_end()), Some(colour));
+                    // Summarised: a command that prints thousands of lines would
+                    // otherwise bury the conversation it belongs to.
+                    let shown = crate::collapse::summarise("shell output", msg.output.trim_end());
+                    let _ = renderer.print(&format!("{shown}\n"), Some(colour));
                 }
                 if let Some(code) = msg.exit_code {
                     if code != 0 {

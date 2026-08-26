@@ -187,6 +187,11 @@ impl CompletingInput {
                     self.completions.clear();
                     return None;
                 }
+                // Ctrl-O shows the most recent summarised output in full.
+                KeyCode::Char('o') => {
+                    show_full_output();
+                    return None;
+                }
                 // Ctrl-D on an empty line is the conventional clean exit.
                 KeyCode::Char('d') => {
                     if self.buffer.is_empty() {
@@ -457,6 +462,21 @@ impl CompletingInput {
 impl Default for CompletingInput {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Print the most recent summarised output in full.
+///
+/// It appears below rather than in place of the summary: the conversation is in
+/// the terminal's own scrollback, which cannot be rewritten after the fact.
+fn show_full_output() {
+    match crate::collapse::take_latest() {
+        Some(block) => {
+            crate::screen::emit(&format!("\n{}\n{}\n", block.label, block.text));
+        }
+        None => {
+            crate::screen::emit("\nNothing further to show.\n");
+        }
     }
 }
 
