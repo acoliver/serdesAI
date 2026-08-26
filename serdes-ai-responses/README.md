@@ -1,78 +1,87 @@
 # serdes-ai-responses
 
-Serve any serdesAI model through the **OpenAI Responses API**, following the
-[Open Responses](https://openresponses.org) interoperability profile: plain
-JSON and SSE over HTTP, a WebSocket transport with connection-local state,
-and stateful conversation chaining via `previous_response_id`.
+A serdesAI `Model` client for the **OpenAI Responses API**, following the
+[Open Responses](https://openresponses.org) interoperability profile: drive
+OpenAI, the codex endpoint, or any Open Responses-compatible server from any
+serdesAI agent, unchanged.
 
-This turns a serdesAI `Model` into an endpoint that standard Responses API
-clients can talk to, including the OpenAI **codex** CLI pointed at a custom
-`model_provider`.
-
-## Features
-
-- `POST /v1/responses` — JSON responses, or SSE streaming when
-  `"stream": true` (`data: {...}` frames terminated by `data: [DONE]`).
-- `POST /responses` — alias so the codex CLI can use the server as its
-  `base_url` (it posts to `{base_url}/responses`).
-- `GET /v1/responses/{id}` — fetch a stored response.
-- `GET /v1/responses` — WebSocket upgrade; clients send
-  `{"type":"response.create","response":{...}}` frames and receive the same
-  events as SSE, one turn at a time.
-- **Stateful mode** — `store: true` (the default) persists each response in
-  a [`ResponseStore`]; later turns can chain with `previous_response_id`.
-  `store: false` turns on a WebSocket connection keep their state in a
-  connection-local cache, so nothing is persisted globally while chaining
-  still works on that socket (the codex CLI default).
-- **codex compatibility** — `store:false` + `instructions` + function tools
-  wire shapes, unprefixed mid-stream event names, and the error codes codex
-  treats as retryable (`previous_response_not_found`,
-  `websocket_connection_limit_reached`).
-
-Not supported: hosted tools (`web_search_preview` etc. — only client-side
-function tools), `background: true`, and item references (`item_reference`).
-
-## Quick start
+## Usage
 
 ```rust,ignore
-use serdes_ai_models::mock::FunctionModel;
-use serdes_ai_responses::server::ResponsesServer;
-use serdes_ai_responses::ResponsesEngine;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use serdes_ai_responses::client::OpenResponsesModel;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let model = FunctionModel::constant_text("hello"); // any Arc<dyn Model>
-    let server = ResponsesServer::new(ResponsesEngine::new(Arc::new(model)));
-    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
-    server.serve(addr).await?;
-    Ok(())
-}
+// Any Open Responses-compatible websocket endpoint.
+let model = OpenResponsesModel::new("gpt-5.1-codex-mini", "wss://host/v1/responses")
+    .bearer("sk-…");
+
+// Or the codex endpoint over HTTP.
+let model = OpenResponsesModel::new(
+    "gpt-5.1-codex-mini",
+    "https://chatgpt.com/backend-api/codex/responses",
+)
+.bearer("oauth-token")
+.header("chatgpt-account-id", "…");
+
+// Use it like any other serdesAI model.
+let agent = Agent::new(model).build()?;
 ```
 
-## Pointing the codex CLI at the server
+## Transports
+
+- **WebSocket** (`wss://`/`ws://`, the default for that scheme): sends
+  `{"type":"response.create","response":{…}}` frames and maps the event
+  stream (`output_item.added`, `output_text.delta`,
+  `reasoning_summary_text.delta`, `function_call_arguments.delta`, …) onto
+  `ModelResponseStreamEvent`s, ending with exactly one terminal
+  `StreamComplete` carrying the finish reason and token usage.
+- **HTTP** (`https://`/`http://`): `POST` per turn with `store: true` and
+  `previous_response_id` chaining; `"stream": true` requests are served by
+  an SSE parser (`data: {...}` frames terminated by `data: [DONE]`).
+
+## Session-stateful mode
+
+The model keeps conversation state in the session, so each turn only sends
+the *new* input items:
+
+- On websockets the socket session holds `previous_response_id`; turns are
+  sent with `store: false` and delta-only input. Assistant output the server
+  already produced is never re-sent.
+- When a continuation fails (`previous_response_not_found`) the cached id is
+  dropped and the full input replayed once, mirroring codex CLI recovery.
+- When the server enforces its connection lifetime
+  (`websocket_connection_limit_reached`) or the socket dies, the client
+  reconnects and replays the turn.
+- Recovery applies only before any event has reached the caller, so partial
+  output is never duplicated.
+- Turns are sequential: the protocol has no way to match interleaved
+  responses, so concurrent `request`/`request_stream` calls on one model
+  instance are serialized by the session lock.
+
+HTTP chaining follows the same shape with `store: true`.
+
+## Error codes surfaced
+
+| code | meaning |
+| --- | --- |
+| `invalid_request_error` | malformed request or unsupported option |
+| `previous_response_not_found` | chain target missing (recovered by replay) |
+| `websocket_connection_limit_reached` | WS lifetime exceeded (recovered by reconnect) |
+| `model_error` | backing model failed |
+| `internal_error` | server-side failure |
+
+Errors map onto `ModelError::Provider` with the wire code, except transport
+failures which surface as `ModelError::Connection`.
+
+## Test rig (`test-server` feature, off by default)
+
+The crate ships a wire-accurate Open Responses server used as a test rig for
+its own integration tests. It is not a product surface:
 
 ```toml
-# ~/.codex/config.toml
-[model_providers.serdes]
-name = "serdesAI"
-base_url = "http://127.0.0.1:8080"
-wire_api = "responses"
+[dev-dependencies]
+serdes-ai-responses = { path = ".", features = ["test-server"] }
 ```
 
-```sh
-codex --profile serdes -m gpt-5.1-codex-mini "fix the failing test"
-```
-
-## Error codes
-
-| HTTP | code | meaning |
-| --- | --- | --- |
-| 400 | `invalid_request_error` | malformed body or unsupported option |
-| 404 | `not_found_error` | unknown response id on GET |
-| 404 | `previous_response_not_found` | chain target missing (client should replay full input) |
-| 429 | `websocket_connection_limit_reached` | WS connection exceeded its lifetime; reconnect |
-| 502 | `model_error` | backing model failed |
-
-WebSocket errors use the envelope `{"type":"error","status_code":N,"error":{"code":..,"message":..}}`.
+It exercises both transports, chaining, TTL enforcement between turns, and
+the error codes above, so client behavior is verified against the same wire
+shapes codex expects.

@@ -64,7 +64,7 @@ embeddings = ["dep:serdes-ai-embeddings"]
 graph = ["dep:serdes-ai-graph"]
 evals = ["dep:serdes-ai-evals"]
 macros = ["dep:serdes-ai-macros"]
-open-responses = ["dep:serdes-ai-responses", "serdes-ai-responses/server"]
+open-responses = ["dep:serdes-ai-responses"]
 
 # Observability
 tracing-integration = [

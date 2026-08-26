@@ -1,17 +1,12 @@
-//! Response storage for stateful Responses API sessions.
+//! In-memory response storage for the test rig's stateful sessions.
 //!
-//! The Responses API is stateful when clients chain turns with
-//! `previous_response_id`: the server must remember each stored response and
-//! the conversation history that produced it. [`ResponseStore`] abstracts
-//! that storage; [`InMemoryResponseStore`] is the default implementation.
-//!
-//! WebSocket connections additionally keep a small connection-local cache
-//! ([`SessionResponseCache`]) so `store: false` turns (the codex CLI default)
-//! can continue a conversation on the same socket without persisting
-//! anything, following the Open Responses websocket specification.
+//! The rig must remember each stored response and the conversation history
+//! that produced it so clients can chain turns with `previous_response_id`,
+//! and keep a per-connection cache so `store: false` turns (the codex CLI
+//! default) can continue a conversation on the same socket. Both live here as
+//! plain in-memory maps: this is test infrastructure, not a product surface.
 
 use crate::types::ResponseObject;
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serdes_ai_core::ModelRequest;
@@ -30,24 +25,7 @@ pub struct StoredResponse {
     pub stored_at: DateTime<Utc>,
 }
 
-/// Storage for stateful response chaining and retrieval.
-#[async_trait]
-pub trait ResponseStore: Send + Sync {
-    /// Fetch a stored response by ID.
-    async fn get(&self, id: &str) -> Option<StoredResponse>;
-
-    /// Store a response.
-    async fn put(&self, stored: StoredResponse);
-
-    /// Delete a stored response.
-    async fn delete(&self, id: &str);
-}
-
-/// In-memory [`ResponseStore`] with a bounded number of entries.
-///
-/// When the capacity is reached the oldest stored response is evicted.
-/// Intended for single-process deployments; production deployments can
-/// implement [`ResponseStore`] against durable storage.
+/// Bounded in-memory store of responses for `previous_response_id` chaining.
 pub struct InMemoryResponseStore {
     entries: RwLock<HashMap<String, (u64, StoredResponse)>>,
     capacity: usize,
@@ -63,6 +41,30 @@ impl InMemoryResponseStore {
             capacity: capacity.max(1),
             counter: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Fetch a stored response by ID.
+    pub async fn get(&self, id: &str) -> Option<StoredResponse> {
+        self.entries
+            .read()
+            .get(id)
+            .map(|(_, stored)| stored.clone())
+    }
+
+    /// Store a response.
+    pub async fn put(&self, stored: StoredResponse) {
+        self.evict_if_full();
+        let seq = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.entries
+            .write()
+            .insert(stored.id.clone(), (seq, stored));
+    }
+
+    /// Delete a stored response.
+    pub async fn delete(&self, id: &str) {
+        self.entries.write().remove(id);
     }
 
     fn evict_if_full(&self) {
@@ -90,31 +92,6 @@ impl Default for InMemoryResponseStore {
         Self::new(1024)
     }
 }
-
-#[async_trait]
-impl ResponseStore for InMemoryResponseStore {
-    async fn get(&self, id: &str) -> Option<StoredResponse> {
-        self.entries
-            .read()
-            .get(id)
-            .map(|(_, stored)| stored.clone())
-    }
-
-    async fn put(&self, stored: StoredResponse) {
-        self.evict_if_full();
-        let seq = self
-            .counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.entries
-            .write()
-            .insert(stored.id.clone(), (seq, stored));
-    }
-
-    async fn delete(&self, id: &str) {
-        self.entries.write().remove(id);
-    }
-}
-
 /// Connection-local response cache for websocket sessions.
 ///
 /// Holds the most recent responses of a single websocket connection so that

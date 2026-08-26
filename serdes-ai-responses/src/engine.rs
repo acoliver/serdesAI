@@ -9,7 +9,7 @@ use crate::convert::{
     input_to_history, new_id, output_items_from_response, tool_choice, tool_definitions,
 };
 use crate::error::{codes, ResponsesError};
-use crate::store::{InMemoryResponseStore, ResponseStore, SessionResponseCache, StoredResponse};
+use crate::store::{InMemoryResponseStore, SessionResponseCache, StoredResponse};
 use crate::types::*;
 use chrono::Utc;
 use futures::StreamExt;
@@ -25,20 +25,16 @@ use std::sync::Arc;
 /// Executes Responses API turns against a backing serdesAI model.
 pub struct ResponsesEngine {
     model: Arc<dyn Model>,
-    store: Arc<dyn ResponseStore>,
+    store: Arc<InMemoryResponseStore>,
 }
 
 impl ResponsesEngine {
     /// Create an engine serving `model` with an in-memory response store.
-    #[must_use]
     pub fn new(model: Arc<dyn Model>) -> Self {
-        Self::with_store(model, Arc::new(InMemoryResponseStore::default()))
-    }
-
-    /// Create an engine serving `model` with a custom response store.
-    #[must_use]
-    pub fn with_store(model: Arc<dyn Model>, store: Arc<dyn ResponseStore>) -> Self {
-        Self { model, store }
+        Self {
+            model,
+            store: Arc::new(InMemoryResponseStore::default()),
+        }
     }
 
     /// The backing model.
@@ -48,8 +44,7 @@ impl ResponsesEngine {
     }
 
     /// The backing response store.
-    #[must_use]
-    pub fn response_store(&self) -> &Arc<dyn ResponseStore> {
+    pub fn response_store(&self) -> &Arc<InMemoryResponseStore> {
         &self.store
     }
 

@@ -1,12 +1,10 @@
-//! Axum-based HTTP server exposing the Responses API.
+//! Wire-accurate axum server used as a **test rig** for the client in this
+//! crate (feature `test-server`). Not a product surface.
 //!
 //! Routes:
 //!
 //! - `POST /v1/responses` — create a response (JSON, or SSE when
 //!   `stream: true`)
-//! - `POST /responses` — alias so clients that post to `{base_url}/responses`
-//!   (the codex CLI with `wire_api = "response"`) work without rewrites
-//! - `GET /v1/responses/{id}` — retrieve a stored response
 //! - `GET /v1/responses` — websocket upgrade; the Open Responses websocket
 //!   transport with connection-local session state
 //! - `GET /health` — liveness probe
@@ -17,10 +15,10 @@ use crate::types::{CreateResponseRequest, StreamEvent};
 use crate::websocket::{self, WebSocketSessionConfig};
 use axum::{
     body::{Body, Bytes},
-    extract::{ws::WebSocketUpgrade, Path, State},
+    extract::{ws::WebSocketUpgrade, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use futures::channel::mpsc;
@@ -89,8 +87,6 @@ impl ResponsesServer {
                 "/v1/responses",
                 get(upgrade_websocket).post(create_response),
             )
-            .route("/responses", post(create_response))
-            .route("/v1/responses/{id}", get(get_response))
             .route("/health", get(health))
             .with_state(self.state.clone())
     }
@@ -122,7 +118,7 @@ fn error_response(error: ResponsesError) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// POST /v1/responses and POST /responses.
+/// POST /v1/responses.
 async fn create_response(State(state): State<Arc<ResponsesServerState>>, body: Bytes) -> Response {
     let request: CreateResponseRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
@@ -200,19 +196,6 @@ async fn stream_response(
                 "failed to build stream response: {err}"
             )))
         })
-}
-
-/// GET /v1/responses/{id}.
-async fn get_response(
-    State(state): State<Arc<ResponsesServerState>>,
-    Path(id): Path<String>,
-) -> Response {
-    match state.engine.get_response(&id).await {
-        Some(stored) => Json(stored.response).into_response(),
-        None => error_response(ResponsesError::NotFound(format!(
-            "no stored response with id '{id}'"
-        ))),
-    }
 }
 
 /// GET /v1/responses — websocket upgrade for the Open Responses transport.

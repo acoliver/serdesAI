@@ -1,24 +1,27 @@
 [package]
 name = "serdes-ai-responses"
-description = "OpenAI Responses API (Open Responses) server for serdesAI models"
+description = "Client for the OpenAI Responses API (codex / Open Responses): WebSocket transport and session-stateful mode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-keywords = ["ai", "llm", "agent", "responses", "server"]
-categories = ["api-bindings", "network-programming"]
+keywords = ["ai", "llm", "agent", "responses", "client"]
+categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
 
 [features]
 default = []
-server = ["dep:axum", "dep:tower", "dep:http-body"]
+# Wire-accurate local server used as a test rig for this crate's integration
+# tests. Not a product surface.
+test-server = ["dep:axum", "dep:tower", "dep:http-body"]
 
 [dependencies]
 serdes-ai-core = { workspace = true }
 serdes-ai-models = { workspace = true }
 serdes-ai-tools = { workspace = true }
+serdes-ai-streaming = { workspace = true, features = ["websocket"] }
 
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -30,8 +33,11 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+reqwest = { workspace = true }
+tokio-stream = "0.1"
+base64 = { workspace = true }
 
-# HTTP server (optional)
+# Test rig only (optional)
 axum = { version = "0.8", optional = true, features = ["ws"] }
 tower = { version = "0.5", optional = true }
 http-body = { version = "1", optional = true }
@@ -42,3 +48,4 @@ rstest = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio-tungstenite = "0.21"
 reqwest = { workspace = true }
+serdes-ai-responses = { path = ".", features = ["test-server"] }

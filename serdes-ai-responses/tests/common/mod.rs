@@ -4,9 +4,9 @@
 //! Shared helpers for the integration tests.
 
 use serdes_ai_models::mock::FunctionModel;
+use serdes_ai_responses::engine::ResponsesEngine;
 use serdes_ai_responses::server::ResponsesServer;
 use serdes_ai_responses::websocket::WebSocketSessionConfig;
-use serdes_ai_responses::ResponsesEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
