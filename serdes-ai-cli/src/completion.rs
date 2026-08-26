@@ -51,6 +51,15 @@ pub struct CompletingInput {
     /// so a prompt printed once elsewhere is erased by the first redraw and
     /// replaced by whatever this draws instead.
     prompt: String,
+    /// Lines entered before, oldest first.
+    history: Vec<String>,
+    /// How far back through `history` the user has stepped.
+    ///
+    /// `None` means the line being typed rather than a recalled one, which is
+    /// what Down returns to at the end.
+    history_index: Option<usize>,
+    /// The line being typed, kept while a previous one is being looked at.
+    draft: String,
     /// Whether the prompt has been drawn for this line.
     ///
     /// It is written once and then left alone: reprinting it on every keystroke
@@ -73,8 +82,63 @@ impl CompletingInput {
             selected: 0,
             show_completions: false,
             prompt: prompt.into(),
+            history: Vec::new(),
+            history_index: None,
+            draft: String::new(),
             prompt_drawn: false,
         }
+    }
+
+    /// Give the line access to what was entered before.
+    pub fn with_history(mut self, history: Vec<String>) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// Step back to an earlier line.
+    ///
+    /// Returns whether there was one, so the caller can tell this apart from a
+    /// key that should do something else.
+    fn recall_earlier(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+
+        let index = match self.history_index {
+            // Keep what is being typed, so Down can come back to it.
+            None => {
+                self.draft = self.buffer.clone();
+                self.history.len() - 1
+            }
+            Some(0) => return true,
+            Some(index) => index - 1,
+        };
+
+        self.history_index = Some(index);
+        self.buffer = self.history[index].clone();
+        self.cursor_pos = self.buffer.len();
+        self.show_completions = false;
+        true
+    }
+
+    /// Step forward towards the line being typed.
+    fn recall_later(&mut self) -> bool {
+        let Some(index) = self.history_index else {
+            return false;
+        };
+
+        if index + 1 < self.history.len() {
+            self.history_index = Some(index + 1);
+            self.buffer = self.history[index + 1].clone();
+        } else {
+            // Past the newest entry is the line that was being typed.
+            self.history_index = None;
+            self.buffer = std::mem::take(&mut self.draft);
+        }
+
+        self.cursor_pos = self.buffer.len();
+        self.show_completions = false;
+        true
     }
 
     /// How many columns the cursor sits from the left edge.
@@ -202,14 +266,23 @@ impl CompletingInput {
                     self.cursor_pos = next;
                 }
             }
+            // While the list is open the arrows move the selection. With no
+            // list they step through what was entered before, which is what
+            // they do at every other shell prompt.
             KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+                if self.show_completions {
+                    self.selected = self.selected.saturating_sub(1);
+                } else {
+                    self.recall_earlier();
                 }
             }
             KeyCode::Down => {
-                if self.selected < self.completions.len().saturating_sub(1) {
-                    self.selected += 1;
+                if self.show_completions {
+                    if self.selected < self.completions.len().saturating_sub(1) {
+                        self.selected += 1;
+                    }
+                } else {
+                    self.recall_later();
                 }
             }
             KeyCode::Tab => {
@@ -387,6 +460,41 @@ impl Default for CompletingInput {
     }
 }
 
+/// The most recent lines to make available to the arrow keys.
+const HISTORY_LIMIT: usize = 500;
+
+/// What was entered in previous sessions, oldest first.
+///
+/// Read from the same file `/history` shows. A missing or unreadable file is
+/// simply an empty history: not being able to recall a previous line is no
+/// reason to refuse to read a new one.
+fn load_history() -> Vec<String> {
+    let path = crate::config::get_command_history_file();
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A line repeated immediately is one entry: holding Up through a run of
+        // the same command is not useful.
+        if lines.last().map(String::as_str) == Some(line) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+
+    if lines.len() > HISTORY_LIMIT {
+        lines.drain(..lines.len() - HISTORY_LIMIT);
+    }
+
+    lines
+}
+
 /// Read input with live completion
 pub fn read_input_with_completion() -> io::Result<Option<String>> {
     read_input_with_prompt("serdes-ai > ")
@@ -397,7 +505,7 @@ pub fn read_input_with_completion() -> io::Result<Option<String>> {
 /// The line is drawn into the region [`crate::screen`] keeps at the bottom, so
 /// output arriving while the user types is placed above it rather than over it.
 pub fn read_input_with_prompt(prompt: &str) -> io::Result<Option<String>> {
-    let mut input = CompletingInput::with_prompt(prompt);
+    let mut input = CompletingInput::with_prompt(prompt).with_history(load_history());
 
     terminal::enable_raw_mode()?;
     crate::screen::activate()?;
