@@ -11,7 +11,8 @@ mod common;
 use common::{recording_model, spawn_server, spawn_server_with_ws_config};
 use futures::{SinkExt, StreamExt};
 use serdes_ai_core::messages::{
-    ModelRequest, ModelRequestPart, ModelResponseStreamEvent, SystemPromptPart, UserPromptPart,
+    ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelResponseStreamEvent,
+    SystemPromptPart, TextPart, UserPromptPart,
 };
 use serdes_ai_models::model::{Model, ModelRequestParameters};
 use serdes_ai_models::ModelError;
@@ -20,6 +21,7 @@ use serdes_ai_responses::types::{
     CreateResponseRequest, OutputContent, OutputItem, ResponseObject, ResponseStatus,
     ResponseUsage, StreamEvent,
 };
+use serdes_ai_tools::ToolDefinition;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -432,5 +434,213 @@ async fn hard_error_surfaces_as_model_error() {
         }
         other => panic!("expected provider error, got {other:?}"),
     }
+    server.await.unwrap();
+}
+
+/// A minimal assistant response for extending history in tests.
+fn text_response(text: &str) -> ModelResponse {
+    ModelResponse {
+        parts: vec![ModelResponsePart::Text(TextPart::new(text))],
+        model_name: None,
+        timestamp: chrono::Utc::now(),
+        finish_reason: None,
+        usage: None,
+        vendor_id: None,
+        vendor_details: None,
+        kind: "response".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn mid_stream_error_is_surfaced_without_replay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+
+        // Turn 1 completes normally so the client chains onto resp_1.
+        let request = read_turn(&mut ws).await;
+        assert!(request.previous_response_id.is_none());
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+
+        // Turn 2 starts streaming, then fails mid-stream with a code the
+        // client would normally treat as recoverable.
+        let request = read_turn(&mut ws).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_1"));
+        send_event(
+            &mut ws,
+            &StreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: OutputItem::Message {
+                    id: "msg_partial".to_string(),
+                    role: "assistant".to_string(),
+                    status: serdes_ai_responses::types::OutputItemStatus::InProgress,
+                    content: Vec::new(),
+                },
+            },
+        )
+        .await;
+        send_event(
+            &mut ws,
+            &StreamEvent::OutputTextDelta {
+                sequence_number: 2,
+                item_id: "msg_partial".to_string(),
+                output_index: 0,
+                content_index: 0,
+                delta: "par".to_string(),
+            },
+        )
+        .await;
+        let envelope = serde_json::json!({
+            "type": "error",
+            "status_code": 404,
+            "error": {
+                "code": "previous_response_not_found",
+                "message": "previous response not found: resp_1",
+            }
+        });
+        ws.send(Message::Text(envelope.to_string())).await.unwrap();
+
+        // The delta already escaped to the caller, so the client must NOT
+        // send another response.create frame on this turn.
+        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            Err(_elapsed) => {}
+            Ok(frame) => panic!("client replayed a committed stream: {frame:?}"),
+        }
+    });
+
+    let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
+    let history = vec![user_turn("hello")];
+    let first = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("first turn");
+
+    let mut history = history;
+    history.push(ModelRequest::with_parts(vec![
+        ModelRequestPart::ModelResponse(Box::new(first)),
+    ]));
+    history.push(user_turn("second"));
+    let mut stream = client
+        .request_stream(&history, &settings(), &params())
+        .await
+        .expect("stream starts");
+
+    let mut saw_delta = false;
+    let mut error = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(ModelResponseStreamEvent::PartDelta(_)) => saw_delta = true,
+            Ok(ModelResponseStreamEvent::StreamComplete(_)) => {
+                panic!("mid-stream failure must not produce a terminal event")
+            }
+            Ok(_) => {}
+            Err(err) => error = Some(err),
+        }
+    }
+    assert!(saw_delta, "streamed delta must reach the caller");
+    match error.expect("mid-stream failure must surface as an error item") {
+        ModelError::Provider { code, .. } => assert_eq!(code, "previous_response_not_found"),
+        other => panic!("expected provider error, got {other:?}"),
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn http_stream_chained_turns_send_only_new_items() {
+    let (model, calls) = recording_model();
+    let addr = spawn_server(model).await;
+    let client = OpenResponsesModel::new("test-model", format!("http://{addr}/v1/responses"));
+
+    let drain = |client: OpenResponsesModel, history: Vec<ModelRequest>| async move {
+        let mut stream = client
+            .request_stream(&history, &settings(), &params())
+            .await
+            .expect("stream starts");
+        let mut text = String::new();
+        let mut terminal = false;
+        while let Some(item) = stream.next().await {
+            match item.expect("event ok") {
+                ModelResponseStreamEvent::PartDelta(delta) => {
+                    if let serdes_ai_core::messages::ModelResponsePartDelta::Text(text_delta) =
+                        delta.delta
+                    {
+                        text.push_str(&text_delta.content_delta);
+                    }
+                }
+                ModelResponseStreamEvent::StreamComplete(_) => terminal = true,
+                _ => {}
+            }
+        }
+        assert!(terminal, "stream must end with a terminal event");
+        text
+    };
+
+    let mut history = vec![system_turn("be brief"), user_turn("first")];
+    let first_text = drain(client.clone(), history.clone()).await;
+    assert_eq!(first_text, "ok");
+
+    history.push(ModelRequest::with_parts(vec![
+        ModelRequestPart::ModelResponse(Box::new(text_response(&first_text))),
+    ]));
+    history.push(user_turn("second"));
+    let second_text = drain(client, history).await;
+    assert_eq!(second_text, "ok");
+
+    // Turn 2 must send only the new user item; a client that replayed the
+    // prior ModelResponse would show 5 instead of 4.
+    assert_eq!(*calls.lock().unwrap(), vec![2, 4]);
+}
+
+#[tokio::test]
+async fn client_sends_function_tools_with_wire_type_tag() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+        // Capture the raw frame: the type tag must be present on the wire,
+        // not just in the parsed form.
+        let value = loop {
+            match ws.next().await.unwrap().unwrap() {
+                Message::Text(text) => {
+                    break serde_json::from_str::<serde_json::Value>(&text).unwrap()
+                }
+                Message::Close(_) => panic!("client closed before sending a turn"),
+                _ => continue,
+            }
+        };
+        assert_eq!(value["type"], "response.create");
+        let tools = value["response"]["tools"]
+            .as_array()
+            .expect("tools on the wire");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "get_weather");
+        assert_eq!(tools[0]["strict"], true);
+        assert_eq!(tools[0]["parameters"]["type"], "object");
+
+        let request =
+            serde_json::from_value::<CreateResponseRequest>(value["response"].clone()).unwrap();
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+    });
+
+    let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
+    let tool = ToolDefinition {
+        name: "get_weather".to_string(),
+        description: "Look up weather".to_string(),
+        parameters_json_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}}
+        }),
+        strict: Some(true),
+        outer_typed_dict_key: None,
+    };
+    let params = ModelRequestParameters::new().with_tools(vec![tool]);
+    let response = client
+        .request(&[user_turn("weather in NYC?")], &settings(), &params)
+        .await
+        .expect("turn with tools");
+    assert_eq!(text_of(&response), "ok");
     server.await.unwrap();
 }

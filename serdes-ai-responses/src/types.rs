@@ -319,6 +319,10 @@ impl ResponsesTool {
 
 #[derive(Serialize, Deserialize)]
 struct FunctionToolFields {
+    /// Always `"function"`; without it the serialized tool is not valid
+    /// Responses wire form and does not round-trip.
+    #[serde(rename = "type")]
+    kind: FunctionToolTag,
     name: String,
     #[serde(default)]
     description: String,
@@ -326,6 +330,45 @@ struct FunctionToolFields {
     parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
+}
+
+/// Marker type that only serializes from/to the string `"function"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FunctionToolTag;
+
+impl Serialize for FunctionToolTag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("function")
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionToolTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = FunctionToolTag;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("the string `function`")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v == "function" {
+                    Ok(FunctionToolTag)
+                } else {
+                    Err(serde::de::Error::custom("expected the string `function`"))
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
 }
 
 impl<'de> Deserialize<'de> for ResponsesTool {
@@ -367,6 +410,7 @@ impl Serialize for ResponsesTool {
                 parameters,
                 strict,
             } => FunctionToolFields {
+                kind: FunctionToolTag,
                 name: name.clone(),
                 description: description.clone(),
                 parameters: parameters.clone(),
@@ -1143,5 +1187,24 @@ mod tests {
             ResponsesTool::Builtin { tool_type } => assert_eq!(tool_type, "web_search_preview"),
             other => panic!("expected builtin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn function_tool_roundtrips_with_type_tag() {
+        let tool = ResponsesTool::Function {
+            name: "get_weather".into(),
+            description: "Look up weather".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}}
+            }),
+            strict: Some(true),
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["name"], "get_weather");
+        assert_eq!(json["strict"], true);
+        let back: ResponsesTool = serde_json::from_value(json).unwrap();
+        assert_eq!(back, tool);
     }
 }

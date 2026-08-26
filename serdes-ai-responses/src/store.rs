@@ -51,26 +51,14 @@ impl InMemoryResponseStore {
             .map(|(_, stored)| stored.clone())
     }
 
-    /// Store a response.
+    /// Store a response, evicting the oldest entries first when at capacity.
+    ///
+    /// Check and eviction share one write lock so concurrent puts cannot
+    /// oversubscribe capacity.
     pub async fn put(&self, stored: StoredResponse) {
-        self.evict_if_full();
         let seq = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.entries
-            .write()
-            .insert(stored.id.clone(), (seq, stored));
-    }
-
-    /// Delete a stored response.
-    pub async fn delete(&self, id: &str) {
-        self.entries.write().remove(id);
-    }
-
-    fn evict_if_full(&self) {
-        if self.entries.read().len() < self.capacity {
-            return;
-        }
         let mut entries = self.entries.write();
         while entries.len() >= self.capacity {
             let evict = entries
@@ -84,6 +72,12 @@ impl InMemoryResponseStore {
                 None => break,
             }
         }
+        entries.insert(stored.id.clone(), (seq, stored));
+    }
+
+    /// Delete a stored response.
+    pub async fn delete(&self, id: &str) {
+        self.entries.write().remove(id);
     }
 }
 
@@ -100,8 +94,9 @@ impl Default for InMemoryResponseStore {
 /// continuation evicts the referenced ID so the client is forced to replay
 /// the full input on its next attempt.
 pub struct SessionResponseCache {
-    entries: RwLock<HashMap<String, StoredResponse>>,
+    entries: RwLock<HashMap<String, (u64, StoredResponse)>>,
     capacity: usize,
+    counter: std::sync::atomic::AtomicU64,
 }
 
 impl SessionResponseCache {
@@ -111,22 +106,33 @@ impl SessionResponseCache {
         Self {
             entries: RwLock::new(HashMap::new()),
             capacity: capacity.max(1),
+            counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Fetch a cached response by ID.
     #[must_use]
     pub fn get(&self, id: &str) -> Option<StoredResponse> {
-        self.entries.read().get(id).cloned()
+        self.entries
+            .read()
+            .get(id)
+            .map(|(_, stored)| stored.clone())
     }
 
     /// Cache a response, evicting the oldest entry when full.
+    ///
+    /// Eviction order is a monotonic insertion counter, not a wall-clock
+    /// timestamp, so responses stored in the same instant evict in true
+    /// insertion order.
     pub fn put(&self, stored: StoredResponse) {
+        let seq = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut entries = self.entries.write();
         while entries.len() >= self.capacity {
             let evict = entries
                 .iter()
-                .min_by_key(|(_, stored)| stored.stored_at)
+                .min_by_key(|(_, (seq, _))| *seq)
                 .map(|(id, _)| id.clone());
             match evict {
                 Some(id) => {
@@ -135,7 +141,7 @@ impl SessionResponseCache {
                 None => break,
             }
         }
-        entries.insert(stored.id.clone(), stored);
+        entries.insert(stored.id.clone(), (seq, stored));
     }
 
     /// Evict a response ID (used after a failed continuation turn).
