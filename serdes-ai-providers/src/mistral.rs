@@ -1,8 +1,8 @@
 //! Mistral AI provider implementation.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
 
 /// Mistral AI provider.

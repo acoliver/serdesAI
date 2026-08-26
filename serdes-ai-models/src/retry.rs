@@ -4,9 +4,9 @@ use crate::{
     BoxedModel, Model, ModelError, ModelProfile, ModelRequestParameters, StreamedResponse,
 };
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use serdes_ai_core::{ModelRequest, ModelResponse, ModelSettings};
-use serdes_ai_retries::{with_retry_policy, RetryDecision, RetryFailure, RetryPolicy};
+use serdes_ai_retries::{RetryDecision, RetryFailure, RetryPolicy, with_retry_policy};
 use std::sync::Arc;
 
 /// A model decorator that retries safe failures against the same model.
@@ -166,8 +166,8 @@ impl Model for RetryingModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FunctionModel, ProviderErrorKind, DEFAULT_PROFILE};
-    use futures::{stream, StreamExt};
+    use crate::{DEFAULT_PROFILE, FunctionModel, ProviderErrorKind};
+    use futures::{StreamExt, stream};
     use serdes_ai_core::{ModelResponsePart, TextPart};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;

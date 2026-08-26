@@ -8,7 +8,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, TerminalApp};
+use harness::{TerminalApp, says};
 
 /// Run one prompt and return once the turn has finished.
 fn answered(reply: &str) -> TerminalApp {

@@ -173,9 +173,9 @@ pub use model::{
     StreamedResponse, ToolChoice,
 };
 pub use profile::{
+    DEFAULT_PROFILE, DEFAULT_PROMPTED_OUTPUT_TEMPLATE, ModelProfile, OutputMode,
     anthropic_claude_profile, deepseek_profile, google_gemini_profile, mistral_profile,
-    openai_gpt4o_profile, openai_o1_profile, qwen_profile, ModelProfile, OutputMode,
-    DEFAULT_PROFILE, DEFAULT_PROMPTED_OUTPUT_TEMPLATE,
+    openai_gpt4o_profile, openai_o1_profile, qwen_profile,
 };
 pub use retry::{ModelRetryExt, RetryingModel};
 pub use schema_transformer::JsonSchemaTransformer;
@@ -497,7 +497,8 @@ pub fn build_model_with_config(
                 std::env::var("GOOGLE_API_KEY").map_err(|_| {
                     ModelError::Configuration(
                         "Google/Gemini models require an API key. Use ModelConfig::with_api_key() \
-                         or set GOOGLE_API_KEY environment variable.".to_string()
+                         or set GOOGLE_API_KEY environment variable."
+                            .to_string(),
                     )
                 })?
             };
@@ -846,7 +847,7 @@ pub fn build_model_extended(
             } else {
                 std::env::var("GOOGLE_API_KEY").map_err(|_| {
                     ModelError::Configuration(
-                        "Google/Gemini models require an API key.".to_string()
+                        "Google/Gemini models require an API key.".to_string(),
                     )
                 })?
             };

@@ -58,8 +58,6 @@ pub struct Config {
     pub openai_verbosity: Verbosity,
     #[serde(default)]
     pub cancel_agent_key: CancelKey,
-    #[serde(default = "default_true")]
-    pub enable_dbos: bool,
     #[serde(default)]
     pub subagent_verbose: bool,
     #[serde(default)]
@@ -163,8 +161,6 @@ pub struct GeneralConfig {
     pub model: String,
     #[serde(default = "default_agent")]
     pub agent: String,
-    #[serde(default = "default_true")]
-    pub enable_dbos: bool,
     #[serde(default)]
     pub subagent_verbose: bool,
     #[serde(default)]
@@ -228,7 +224,6 @@ impl Default for Config {
             openai_reasoning_effort: ReasoningEffort::default(),
             openai_verbosity: Verbosity::default(),
             cancel_agent_key: CancelKey::default(),
-            enable_dbos: default_true(),
             subagent_verbose: false,
             model_settings: HashMap::new(),
             pinned_models: HashMap::new(),
@@ -256,7 +251,6 @@ impl Default for GeneralConfig {
         Self {
             model: default_model(),
             agent: default_agent(),
-            enable_dbos: default_true(),
             subagent_verbose: false,
             enable_pack_agents: false,
             enable_universal_constructor: default_true(),
@@ -350,7 +344,6 @@ impl Config {
             .unwrap_or_else(default_agent)
             .trim()
             .to_string();
-        self.general.enable_dbos = self.enable_dbos;
         self.general.subagent_verbose = self.subagent_verbose;
 
         self.autosave.enabled = self.autosave_enabled;
@@ -587,9 +580,6 @@ fn apply_ini_values(cfg: &mut Config, values: &HashMap<String, String>) {
         cfg.cancel_agent_key = parse_cancel_key(v);
     }
 
-    if let Some(v) = values.get("enable_dbos") {
-        cfg.enable_dbos = parse_bool(v, cfg.enable_dbos);
-    }
     if let Some(v) = values.get("subagent_verbose") {
         cfg.subagent_verbose = parse_bool(v, cfg.subagent_verbose);
     }
@@ -776,7 +766,6 @@ fn serialize_ini_config(cfg: &Config) -> serde_json::Result<String> {
         },
     );
 
-    write_kv(&mut out, "enable_dbos", &cfg.enable_dbos.to_string());
     write_kv(
         &mut out,
         "subagent_verbose",

@@ -95,7 +95,7 @@ impl<Deps> RunContext<Deps> {
         let meta = self
             .metadata
             .get_or_insert_with(|| JsonValue::Object(Default::default()));
-        if let JsonValue::Object(ref mut map) = meta {
+        if let JsonValue::Object(map) = meta {
             if let Ok(v) = serde_json::to_value(value) {
                 map.insert(key.to_string(), v);
             }

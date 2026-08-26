@@ -5,11 +5,11 @@ use super::stream::AnthropicStreamParser;
 use super::types::*;
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
-use crate::profile::{anthropic_claude_profile, ModelProfile};
+use crate::profile::{ModelProfile, anthropic_claude_profile};
 use async_trait::async_trait;
 use base64::Engine;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::Client;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serdes_ai_core::messages::{
     DocumentContent, ImageContent, RetryPromptPart, TextPart, ThinkingPart, ToolCallArgs,
     ToolCallPart, ToolReturnPart, UserContent, UserContentPart,
@@ -573,11 +573,11 @@ impl AnthropicModel {
     /// Merge content into existing content.
     fn merge_content(existing: &mut AnthropicContent, new: AnthropicContent) {
         match (&mut *existing, new) {
-            (AnthropicContent::Text(ref mut s), AnthropicContent::Text(t)) => {
+            (AnthropicContent::Text(s), AnthropicContent::Text(t)) => {
                 s.push_str("\n\n");
                 s.push_str(&t);
             }
-            (AnthropicContent::Blocks(ref mut blocks), AnthropicContent::Blocks(new_blocks)) => {
+            (AnthropicContent::Blocks(blocks), AnthropicContent::Blocks(new_blocks)) => {
                 blocks.extend(new_blocks);
             }
             (AnthropicContent::Text(s), AnthropicContent::Blocks(new_blocks)) => {
@@ -585,7 +585,7 @@ impl AnthropicModel {
                 blocks.extend(new_blocks);
                 *existing = AnthropicContent::Blocks(blocks);
             }
-            (AnthropicContent::Blocks(ref mut blocks), AnthropicContent::Text(t)) => {
+            (AnthropicContent::Blocks(blocks), AnthropicContent::Text(t)) => {
                 blocks.push(ContentBlock::text(t));
             }
         }
@@ -891,8 +891,8 @@ mod tests {
     #[tokio::test]
     async fn retrying_model_retries_concrete_anthropic_transport() {
         use crate::{RetryPolicy, RetryingModel, WaitStrategy};
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
         use wiremock::{Request, Respond, ResponseTemplate};
 
         #[derive(Clone)]
@@ -984,8 +984,10 @@ mod tests {
         use serdes_ai_tools::ObjectJsonSchema;
 
         let model = AnthropicModel::new("claude-3-5-sonnet-20241022", "key");
-        let tools = vec![ToolDefinition::new("search", "Search the web")
-            .with_parameters(ObjectJsonSchema::new())];
+        let tools = vec![
+            ToolDefinition::new("search", "Search the web")
+                .with_parameters(ObjectJsonSchema::new()),
+        ];
 
         let converted = model.convert_tools(&tools);
         assert_eq!(converted.len(), 1);

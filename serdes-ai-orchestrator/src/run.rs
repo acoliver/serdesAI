@@ -191,8 +191,8 @@ pub async fn run_agent(
 mod tests {
     use super::*;
     use crate::config::OrchestratorConfig;
-    use crate::registry::tests::MockFactory;
     use crate::registry::AgentRegistry;
+    use crate::registry::tests::MockFactory;
     use std::sync::Arc;
 
     fn registry(reply: &str) -> AgentRegistry {

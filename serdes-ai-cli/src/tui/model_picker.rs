@@ -4,12 +4,12 @@ use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
+    Frame, Terminal,
     backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
-    Frame, Terminal,
 };
 
 use crate::tui::theme::Theme;

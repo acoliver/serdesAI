@@ -5,8 +5,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::Parser;
 use syn::{
-    parse_macro_input, punctuated::Punctuated, DeriveInput, Error, FnArg, ItemFn, Meta, Pat, Token,
-    Type,
+    DeriveInput, Error, FnArg, ItemFn, Meta, Pat, Token, Type, parse_macro_input,
+    punctuated::Punctuated,
 };
 
 struct ParamInfo {

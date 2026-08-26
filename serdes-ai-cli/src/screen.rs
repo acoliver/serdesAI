@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{Clear, ClearType};
-use crossterm::{cursor, QueueableCommand};
+use crossterm::{QueueableCommand, cursor};
 
 /// The most completion entries to show at once.
 pub const MAX_ENTRIES: usize = 8;

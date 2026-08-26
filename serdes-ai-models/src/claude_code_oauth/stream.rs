@@ -71,8 +71,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use futures::StreamExt;
+    use futures::stream;
     use serdes_ai_core::messages::FinishReason;
 
     fn make_sse_bytes(event_type: &str, data: &str) -> Bytes {

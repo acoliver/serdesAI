@@ -108,9 +108,11 @@ impl<T: DeserializeOwned + Send + Sync> OutputSchema<T> for StructuredOutputSche
     }
 
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(&self.tool_name, &self.tool_description)
-            .with_parameters(self.schema.clone())
-            .with_strict(self.strict.unwrap_or(false))]
+        vec![
+            ToolDefinition::new(&self.tool_name, &self.tool_description)
+                .with_parameters(self.schema.clone())
+                .with_strict(self.strict.unwrap_or(false)),
+        ]
     }
 
     fn json_schema(&self) -> Option<ObjectJsonSchema> {

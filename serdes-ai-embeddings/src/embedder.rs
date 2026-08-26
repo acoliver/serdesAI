@@ -252,7 +252,7 @@ impl EmbedderBuilder {
                 return Err(EmbeddingError::config(format!(
                     "Unknown provider: {}. Available: openai, cohere",
                     provider
-                )))
+                )));
             }
         };
 

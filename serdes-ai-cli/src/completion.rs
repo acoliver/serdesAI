@@ -1,11 +1,10 @@
 //! Live completion dropdown (like prompt_toolkit)
 
 use crossterm::{
-    cursor,
+    QueueableCommand, cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
-    QueueableCommand,
 };
 use std::io::{self, Write};
 
@@ -20,74 +19,23 @@ pub struct Completion {
 }
 
 /// Available commands for completion
+/// Every command the application knows, for the completion list.
+///
+/// Taken from the command registry rather than a list kept here. The list here
+/// held fourteen of them, so most commands could never be completed and any
+/// command added later would have been missing too.
 pub fn get_command_completions() -> Vec<Completion> {
-    vec![
-        Completion {
-            text: "/help".to_string(),
-            display: "/help".to_string(),
-            description: "Show help".to_string(),
-        },
-        Completion {
-            text: "/model".to_string(),
-            display: "/model".to_string(),
-            description: "Change model".to_string(),
-        },
-        Completion {
-            text: "/agent".to_string(),
-            display: "/agent".to_string(),
-            description: "Change agent".to_string(),
-        },
-        Completion {
-            text: "/show".to_string(),
-            display: "/show".to_string(),
-            description: "Show config".to_string(),
-        },
-        Completion {
-            text: "/set".to_string(),
-            display: "/set".to_string(),
-            description: "Set config".to_string(),
-        },
-        Completion {
-            text: "/compact".to_string(),
-            display: "/compact".to_string(),
-            description: "Compact session".to_string(),
-        },
-        Completion {
-            text: "/truncate".to_string(),
-            display: "/truncate".to_string(),
-            description: "Truncate session".to_string(),
-        },
-        Completion {
-            text: "/session".to_string(),
-            display: "/session".to_string(),
-            description: "Session info".to_string(),
-        },
-        Completion {
-            text: "/wiggum".to_string(),
-            display: "/wiggum".to_string(),
-            description: "Start wiggum loop".to_string(),
-        },
-        Completion {
-            text: "/paste".to_string(),
-            display: "/paste".to_string(),
-            description: "Paste from clipboard".to_string(),
-        },
-        Completion {
-            text: "/colors".to_string(),
-            display: "/colors".to_string(),
-            description: "Configure colors".to_string(),
-        },
-        Completion {
-            text: "/diff".to_string(),
-            display: "/diff".to_string(),
-            description: "Toggle diff mode".to_string(),
-        },
-        Completion {
-            text: "/quit".to_string(),
-            display: "/quit".to_string(),
-            description: "Exit".to_string(),
-        },
-    ]
+    let mut completions: Vec<Completion> = crate::commands::registry::get_unique_commands()
+        .into_iter()
+        .map(|info| Completion {
+            text: format!("/{}", info.name),
+            display: format!("/{}", info.name),
+            description: info.description,
+        })
+        .collect();
+
+    completions.sort_by(|a, b| a.text.cmp(&b.text));
+    completions
 }
 
 /// Input state with completion
@@ -214,6 +162,13 @@ impl CompletingInput {
     pub fn handle_key(&mut self, key: KeyCode) -> Option<String> {
         match key {
             KeyCode::Enter => {
+                // While the list is open, Enter chooses the highlighted entry
+                // rather than submitting. Submitting there sent the "/" that had
+                // been typed so far and threw the selection away, which made the
+                // arrow keys pointless.
+                if self.accept_completion() {
+                    return None;
+                }
                 return Some(self.buffer.clone());
             }
             KeyCode::Char('/') if self.buffer.is_empty() => {
@@ -258,11 +213,7 @@ impl CompletingInput {
                 }
             }
             KeyCode::Tab => {
-                if let Some(comp) = self.completions.get(self.selected) {
-                    self.buffer = comp.text.clone();
-                    self.cursor_pos = self.buffer.len();
-                    self.show_completions = false;
-                }
+                self.accept_completion();
             }
             KeyCode::Esc => {
                 self.show_completions = false;
@@ -270,6 +221,40 @@ impl CompletingInput {
             _ => {}
         }
         None
+    }
+
+    /// Put the highlighted completion on the line and close the list.
+    ///
+    /// Returns whether there was a selection to take, so a caller can tell an
+    /// accepted completion from a key that should do something else.
+    fn accept_completion(&mut self) -> bool {
+        if !self.show_completions {
+            return false;
+        }
+
+        let Some(comp) = self.completions.get(self.selected) else {
+            return false;
+        };
+
+        // Nothing to take when the line already says exactly this. Otherwise a
+        // command typed out in full would be "completed" to itself instead of
+        // running, and would need a second Enter.
+        if self.buffer.trim_end() == comp.text {
+            return false;
+        }
+
+        self.buffer = comp.text.clone();
+        self.cursor_pos = self.buffer.len();
+        self.show_completions = false;
+
+        // A trailing space so an argument can be typed straight away: most of
+        // these commands take one.
+        if !self.buffer.ends_with(' ') {
+            self.buffer.push(' ');
+            self.cursor_pos = self.buffer.len();
+        }
+
+        true
     }
 
     fn update_completions(&mut self) {
@@ -456,5 +441,20 @@ pub fn read_input_with_prompt(prompt: &str) -> io::Result<Option<String>> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_source_tests {
+    #[tokio::test]
+    async fn the_registry_supplies_the_completions() {
+        crate::commands::init_all();
+        let completions = super::get_command_completions();
+        assert!(
+            completions.len() > 14,
+            "only {} completions came from the registry",
+            completions.len()
+        );
+        assert!(completions.iter().any(|c| c.text == "/help"));
     }
 }

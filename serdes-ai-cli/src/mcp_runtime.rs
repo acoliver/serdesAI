@@ -1,6 +1,6 @@
 //! MCP (Model Context Protocol) runtime for managing external tool servers.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Stdio;

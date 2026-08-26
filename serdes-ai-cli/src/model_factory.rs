@@ -10,10 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serdes_ai_agent::ModelConfig;
-use serdes_ai_models::scripted::{Script, ScriptedModel};
 use serdes_ai_models::Model;
+use serdes_ai_models::scripted::{Script, ScriptedModel};
 use tracing::{debug, info, warn};
 
 use crate::config;

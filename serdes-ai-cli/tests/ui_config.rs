@@ -6,7 +6,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, TerminalApp};
+use harness::{TerminalApp, says};
 
 fn at_prompt(reply: &str) -> TerminalApp {
     let app = TerminalApp::builder()

@@ -10,10 +10,15 @@ mod harness;
 
 use std::time::Duration;
 
-use harness::{says, TerminalApp};
+use harness::{TerminalApp, says};
 
 /// The pause after which the application is taken to have finished drawing.
 const SETTLED: Duration = Duration::from_millis(300);
+
+/// The description of the first entry, which is always visible when the list
+/// opens. The list comes from the command registry and is alphabetical, so
+/// naming a command further down would depend on how many commands exist.
+const FIRST_ENTRY: &str = "Show or set active agent";
 
 /// A short terminal with one turn behind it, so the prompt is at the bottom.
 fn after_a_turn(reply: &str) -> TerminalApp {
@@ -39,7 +44,7 @@ fn the_completion_list_is_visible_with_the_prompt_at_the_bottom() {
     let mut app = after_a_turn("line one\nline two\nline three\nline four\nline five");
 
     app.send("/").expect("could not type");
-    app.wait_for("Show help")
+    app.wait_for(FIRST_ENTRY)
         .expect("the completion list was drawn off the bottom of the screen");
 }
 
@@ -49,7 +54,7 @@ fn the_whole_list_fits_on_screen() {
     let mut app = after_a_turn("line one\nline two\nline three\nline four\nline five");
 
     app.send("/").expect("could not type");
-    app.wait_for("Show help").expect("no list");
+    app.wait_for(FIRST_ENTRY).expect("no list");
     app.wait_until_idle(SETTLED).expect("never settled");
 
     let screen = app.screen_text();
@@ -78,7 +83,7 @@ fn output_arriving_while_typing_goes_above_the_prompt() {
     let mut app = after_a_turn("some output");
 
     app.send("/").expect("could not type");
-    app.wait_for("Show help").expect("no list");
+    app.wait_for(FIRST_ENTRY).expect("no list");
     app.wait_until_idle(SETTLED).expect("never settled");
 
     let rows: Vec<String> = app
@@ -104,10 +109,10 @@ fn the_session_still_works_after_the_list_has_opened_and_closed() {
     let mut app = after_a_turn("REPLY-AGAIN");
 
     app.send("/").expect("could not type");
-    app.wait_for("Show help").expect("no list");
+    app.wait_for(FIRST_ENTRY).expect("no list");
     app.send_key(harness::Key::Backspace)
         .expect("could not clear");
-    app.wait_until_gone("Show help").expect("the list stayed");
+    app.wait_until_gone(FIRST_ENTRY).expect("the list stayed");
 
     app.type_line("again").expect("could not type a new line");
     app.wait_for_additional("REPLY-AGAIN", 1)

@@ -84,12 +84,12 @@ pub async fn run(
             return Err(ToolFailure::Timeout {
                 command: command.to_string(),
                 seconds: limit.as_secs(),
-            })
+            });
         }
         Ok(Err(e)) => {
             return Err(ToolFailure::InvalidCommand {
                 reason: format!("failed to spawn: {e}"),
-            })
+            });
         }
         Ok(Ok(output)) => output,
     };

@@ -1,7 +1,7 @@
 //! Wiggum Loop State - Auto re-prompt functionality
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Wiggum state
 pub struct WiggumState {

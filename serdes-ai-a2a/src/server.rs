@@ -3,17 +3,17 @@
 //! This module provides an Axum-based HTTP server for exposing A2A endpoints.
 //! It is only available when the `server` feature is enabled.
 
+use crate::A2AServer;
 use crate::broker::Broker;
 use crate::schema::{AgentCard, Message, TaskSendParams};
 use crate::storage::Storage;
 use crate::task::{Task, TaskStatus};
-use crate::A2AServer;
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;

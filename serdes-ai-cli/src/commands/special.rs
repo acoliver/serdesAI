@@ -4,7 +4,7 @@ use crate::bus;
 use crate::clipboard;
 use crate::commands::registry::{CommandCategory, CommandResult};
 use crate::register_command;
-use crate::tui::{mark_tutorial_complete, run_tutorial_wizard, TutorialResult};
+use crate::tui::{TutorialResult, mark_tutorial_complete, run_tutorial_wizard};
 use crate::wiggum;
 
 const MOTD_CONTENT: &str = concat!(

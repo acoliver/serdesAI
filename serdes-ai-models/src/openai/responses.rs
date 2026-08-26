@@ -11,7 +11,7 @@
 
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
-use crate::profile::{openai_o1_profile, ModelProfile};
+use crate::profile::{ModelProfile, openai_o1_profile};
 use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;

@@ -15,12 +15,12 @@ use crossterm::{
     cursor::{Hide, Show},
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        is_raw_mode_enabled,
     },
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io::{self, Write};
 
 pub type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
@@ -108,13 +108,13 @@ where
 
 // Re-exports
 // Deprecated: prefer inline picker in crate::picker
-pub use autosave_menu::{interactive_autosave_menu, AutosaveMenu};
+pub use autosave_menu::{AutosaveMenu, interactive_autosave_menu};
 pub use colors_menu::{interactive_colors_menu, interactive_diff_menu};
 pub use components::{ConfirmDialog, InputDialog, ListPicker, ProgressBar};
 // Deprecated: prefer inline picker in crate::picker
 pub use model_picker::ModelInfo;
-pub use model_settings::{interactive_model_settings, ModelSettingsEditor};
+pub use model_settings::{ModelSettingsEditor, interactive_model_settings};
 pub use theme::Theme;
 pub use tutorial::{
-    mark_tutorial_complete, run_tutorial_wizard, should_run_tutorial, TutorialResult,
+    TutorialResult, mark_tutorial_complete, run_tutorial_wizard, should_run_tutorial,
 };

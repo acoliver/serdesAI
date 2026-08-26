@@ -3,7 +3,7 @@
 use super::types::*;
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
-use crate::profile::{openai_gpt4o_profile, ModelProfile};
+use crate::profile::{ModelProfile, openai_gpt4o_profile};
 use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
@@ -263,8 +263,7 @@ impl ChatGptOAuthModel {
                             {}\n\
                             # Task\n\
                             {}",
-                            system_prompt,
-                            text
+                            system_prompt, text
                         );
                         *text = modified;
                     }

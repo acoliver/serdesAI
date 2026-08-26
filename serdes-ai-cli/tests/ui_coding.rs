@@ -9,7 +9,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{script, text_turn, tool_turn, workspace, TerminalApp};
+use harness::{TerminalApp, script, text_turn, tool_turn, workspace};
 
 /// Run one prompt in `dir` with a scripted tool call, then a closing reply.
 fn run_tool(

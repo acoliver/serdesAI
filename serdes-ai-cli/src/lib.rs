@@ -37,7 +37,7 @@ pub mod wiggum;
 // Re-exports for convenient access
 pub use args::Cli;
 pub use bus::AnyMessage;
-pub use bus::{emit_error, emit_info, emit_success, emit_warning, get_message_bus, MessageBus};
+pub use bus::{MessageBus, emit_error, emit_info, emit_success, emit_warning, get_message_bus};
 pub use config::{
     ensure_config_exists, get_agent_name, get_model_name, load_api_keys_to_environment,
     set_agent_name, set_model_name,
@@ -49,7 +49,7 @@ pub use runner::run;
 pub mod prelude {
     pub use crate::args::Cli;
     pub use crate::bus::{
-        emit_error, emit_info, emit_success, emit_warning, get_message_bus, AnyMessage, MessageBus,
+        AnyMessage, MessageBus, emit_error, emit_info, emit_success, emit_warning, get_message_bus,
     };
     pub use crate::config::{
         ensure_config_exists, get_agent_name, get_model_name, load_api_keys_to_environment,

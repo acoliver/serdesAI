@@ -82,13 +82,13 @@ pub use graph::{Graph, SimpleGraph};
 pub use iter::GraphIter;
 pub use iter::StepResult;
 pub use mermaid::{
-    generate_flowchart, generate_mermaid, MermaidBuilder, MermaidDirection, MermaidOptions,
+    MermaidBuilder, MermaidDirection, MermaidOptions, generate_flowchart, generate_mermaid,
 };
 pub use node::{
     AgentNode, BaseNode, ConditionalNode, End, FunctionNode, Node, NodeDef, NodeResult, RouterNode,
 };
 pub use persistence::{FilePersistence, InMemoryPersistence, PersistenceError, StatePersistence};
-pub use state::{generate_run_id, GraphRunContext, GraphRunResult, GraphState, PersistableState};
+pub use state::{GraphRunContext, GraphRunResult, GraphState, PersistableState, generate_run_id};
 
 /// Prelude for common imports.
 pub mod prelude {

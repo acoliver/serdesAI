@@ -25,8 +25,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message as WsMessage, MaybeTlsStream,
-    WebSocketStream as TungsteniteStream,
+    MaybeTlsStream, WebSocketStream as TungsteniteStream, connect_async,
+    tungstenite::protocol::Message as WsMessage,
 };
 
 use crate::error::{StreamError, StreamResult};

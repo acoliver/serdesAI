@@ -17,7 +17,7 @@ mod server;
 
 pub use config::OAuthConfig;
 pub use context::OAuthContext;
-pub use flow::{refresh_token, run_pkce_flow, OAuthError};
+pub use flow::{OAuthError, refresh_token, run_pkce_flow};
 pub use server::CallbackServer;
 
 /// Token response from OAuth token endpoint.

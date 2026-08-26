@@ -16,7 +16,7 @@ use crate::gate::{self, GateOutcome, Verdict};
 use crate::plan::{ApprovalDecision, Plan, PlanApprover};
 use crate::registry::{AgentRegistry, ModelFactory};
 use crate::role::Role;
-use crate::run::{run_agent, RunError};
+use crate::run::{RunError, run_agent};
 use crate::tools;
 
 /// How many events may queue before a slow subscriber starts missing them.

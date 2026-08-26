@@ -9,10 +9,10 @@ use crate::types::{
     JsonRpcNotification, JsonRpcRequest, ListPromptsResult, ListResourcesResult, ListToolsResult,
     McpTool, ReadResourceParams, ReadResourceResult, RequestId, ServerCapabilities,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::sync::atomic::{AtomicI64, Ordering};
+use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
 /// MCP client for connecting to servers.

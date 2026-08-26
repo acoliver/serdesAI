@@ -11,7 +11,7 @@ use serdes_ai_orchestrator::orchestrator::Orchestrator;
 use serdes_ai_orchestrator::role::Role;
 use tokio_util::sync::CancellationToken;
 
-use support::{always_approve, git_commit_all, git_init, temp_root, ScriptedFactory, Turn};
+use support::{ScriptedFactory, Turn, always_approve, git_commit_all, git_init, temp_root};
 
 /// A verifier turn casting the given vote.
 fn vote(complete: bool, correct: bool, note: &str) -> Vec<Turn> {

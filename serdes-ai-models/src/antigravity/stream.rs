@@ -7,11 +7,11 @@ use crate::error::ModelError;
 use bytes::Bytes;
 use futures::Stream;
 use pin_project_lite::pin_project;
+use serdes_ai_core::ModelResponsePart;
 use serdes_ai_core::messages::{
     FinishReason, ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent, PartStartEvent,
     StreamCompleteEvent, TextPart, ThinkingPart, ToolCallPart,
 };
-use serdes_ai_core::ModelResponsePart;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -417,8 +417,8 @@ fn map_finish_reason(reason: &str) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use futures::StreamExt;
+    use futures::stream;
 
     fn make_sse_bytes(data: &str) -> Bytes {
         Bytes::from(format!("data: {}\n\n", data))

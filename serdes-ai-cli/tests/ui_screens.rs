@@ -13,7 +13,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, Key, TerminalApp};
+use harness::{Key, TerminalApp, says};
 
 /// An app sitting at the interactive prompt.
 fn at_prompt() -> TerminalApp {

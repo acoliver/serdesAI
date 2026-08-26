@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::{
-    definition::ToolDefinition, return_types::ToolResult, schema::SchemaBuilder, RunContext,
+    RunContext, definition::ToolDefinition, return_types::ToolResult, schema::SchemaBuilder,
 };
 
 /// Core trait for all tools.

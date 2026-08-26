@@ -9,7 +9,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, script, text_turn, tool_turn, workspace, Key, TerminalApp};
+use harness::{Key, TerminalApp, says, script, text_turn, tool_turn, workspace};
 
 #[test]
 fn version_is_reported() {

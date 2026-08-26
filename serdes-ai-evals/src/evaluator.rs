@@ -319,9 +319,11 @@ mod tests {
     fn test_evaluation_result_display() {
         assert!(EvaluationResult::pass().to_string().contains("PASS"));
         assert!(EvaluationResult::fail("bad").to_string().contains("FAIL"));
-        assert!(EvaluationResult::skip("no expected")
-            .to_string()
-            .contains("SKIP"));
+        assert!(
+            EvaluationResult::skip("no expected")
+                .to_string()
+                .contains("SKIP")
+        );
     }
 
     #[test]

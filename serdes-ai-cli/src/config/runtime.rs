@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 
 use super::{
-    default_agent, default_max_sessions, default_model, CancelKey, ColorsConfig,
-    CompactionStrategy, Config, ModelSettings, ReasoningEffort, Verbosity,
+    CancelKey, ColorsConfig, CompactionStrategy, Config, ModelSettings, ReasoningEffort, Verbosity,
+    default_agent, default_max_sessions, default_model,
 };
 
 static RUNTIME_CONFIG: Lazy<RwLock<Config>> = Lazy::new(|| {
@@ -294,10 +294,6 @@ pub fn get_cancel_agent_key() -> CancelKey {
     with_read(|cfg| cfg.cancel_agent_key.clone())
 }
 
-pub fn get_use_dbos() -> bool {
-    with_read(|cfg| cfg.enable_dbos)
-}
-
 pub fn get_subagent_verbose() -> bool {
     with_read(|cfg| cfg.subagent_verbose)
 }
@@ -399,12 +395,6 @@ pub fn set_cancel_agent_key(key: CancelKey) {
     });
 }
 
-pub fn set_enable_dbos(enabled: bool) {
-    with_write(|cfg| {
-        cfg.enable_dbos = enabled;
-    });
-}
-
 pub fn set_subagent_verbose(enabled: bool) {
     with_write(|cfg| {
         cfg.subagent_verbose = enabled;
@@ -469,7 +459,6 @@ pub fn get_config_keys() -> Vec<String> {
         "openai_reasoning_effort".to_string(),
         "openai_verbosity".to_string(),
         "cancel_agent_key".to_string(),
-        "enable_dbos".to_string(),
         "subagent_verbose".to_string(),
         "request_timeout_secs".to_string(),
         "temperature".to_string(),
@@ -498,7 +487,6 @@ pub fn get_config_value(key: &str) -> Option<String> {
         "openai_reasoning_effort" => serde_json::to_string(&cfg.openai_reasoning_effort).ok(),
         "openai_verbosity" => serde_json::to_string(&cfg.openai_verbosity).ok(),
         "cancel_agent_key" => serde_json::to_string(&cfg.cancel_agent_key).ok(),
-        "enable_dbos" => Some(cfg.enable_dbos.to_string()),
         "subagent_verbose" => Some(cfg.subagent_verbose.to_string()),
         "request_timeout_secs" => cfg.request_timeout_secs.map(|v| v.to_string()),
         "temperature" => cfg.temperature.map(|v| v.to_string()),
@@ -594,9 +582,6 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                         ));
                     }
                 }
-            }
-            "enable_dbos" => {
-                cfg.enable_dbos = parse_bool(value, "enable_dbos")?;
             }
             "subagent_verbose" => {
                 cfg.subagent_verbose = parse_bool(value, "subagent_verbose")?;

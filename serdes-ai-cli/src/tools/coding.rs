@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serdes_ai_agent::{AgentBuilder, RunContext};
-use serdes_ai_orchestrator::tools::{fs as ops, shell, ToolContext};
+use serdes_ai_orchestrator::tools::{ToolContext, fs as ops, shell};
 use serdes_ai_tools::ToolReturn;
 
 use crate::bus::{AnyMessage, MessageBus};
@@ -553,18 +553,22 @@ mod tests {
         let lines = diff_lines("", "one\ntwo\n");
 
         assert_eq!(lines.len(), 2);
-        assert!(lines
-            .iter()
-            .all(|l| matches!(l.line_type, DiffLineType::Add)));
+        assert!(
+            lines
+                .iter()
+                .all(|l| matches!(l.line_type, DiffLineType::Add))
+        );
     }
 
     #[test]
     fn an_unchanged_file_produces_no_edits() {
         let lines = diff_lines("same\n", "same\n");
 
-        assert!(lines
-            .iter()
-            .all(|l| matches!(l.line_type, DiffLineType::Context)));
+        assert!(
+            lines
+                .iter()
+                .all(|l| matches!(l.line_type, DiffLineType::Context))
+        );
     }
 
     #[test]

@@ -307,12 +307,12 @@ pub fn get_commands_help() -> String {
 #[macro_export]
 macro_rules! register_command {
     (
-        name = $name:expr,
-        description = $desc:expr,
-        usage = $usage:expr,
-        aliases = [$($alias:expr),* $(,)?],
-        category = $cat:expr,
-        handler = $handler:expr
+        name = $name:expr_2021,
+        description = $desc:expr_2021,
+        usage = $usage:expr_2021,
+        aliases = [$($alias:expr_2021),* $(,)?],
+        category = $cat:expr_2021,
+        handler = $handler:expr_2021
         $(,)?
     ) => {{
         let info = $crate::commands::registry::CommandInfo::new(

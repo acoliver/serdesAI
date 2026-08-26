@@ -26,10 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
+    RunContext, ToolError,
     definition::ToolDefinition,
     return_types::{ToolResult, ToolReturn},
     schema::SchemaBuilder,
-    RunContext, ToolError,
 };
 
 /// Configuration for the DuckDuckGo search tool.

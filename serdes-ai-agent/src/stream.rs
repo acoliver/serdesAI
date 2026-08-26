@@ -4,7 +4,7 @@
 //! character-by-character streaming from the model.
 
 use crate::agent::{Agent, RegisteredTool};
-use crate::context::{generate_run_id, RunContext, RunUsage};
+use crate::context::{RunContext, RunUsage, generate_run_id};
 use crate::errors::AgentRunError;
 use crate::run::{CompressionStrategy, RunOptions};
 use chrono::Utc;
@@ -622,7 +622,7 @@ impl AgentStream {
                                                 }))
                                                 .await;
                                             // Update the part
-                                            if let Some(ModelResponsePart::Text(ref mut text)) =
+                                            if let Some(ModelResponsePart::Text(text)) =
                                                 response_parts.get_mut(delta.index)
                                             {
                                                 text.content.push_str(&t.content_delta);
@@ -645,9 +645,8 @@ impl AgentStream {
                                                 }))
                                                 .await;
                                             // Update args - accumulate the delta into the tool call
-                                            if let Some(ModelResponsePart::ToolCall(
-                                                ref mut tool_call,
-                                            )) = response_parts.get_mut(delta.index)
+                                            if let Some(ModelResponsePart::ToolCall(tool_call)) =
+                                                response_parts.get_mut(delta.index)
                                             {
                                                 tc.apply(tool_call);
                                             }
@@ -658,9 +657,8 @@ impl AgentStream {
                                                     text: t.content_delta.clone(),
                                                 }))
                                                 .await;
-                                            if let Some(ModelResponsePart::Thinking(
-                                                ref mut think,
-                                            )) = response_parts.get_mut(delta.index)
+                                            if let Some(ModelResponsePart::Thinking(think)) =
+                                                response_parts.get_mut(delta.index)
                                             {
                                                 t.apply(think);
                                             }
@@ -1227,7 +1225,7 @@ impl AgentStream {
                                                             text: t.content_delta.clone(),
                                                         }))
                                                         .await;
-                                                    if let Some(ModelResponsePart::Text(ref mut text)) =
+                                                    if let Some(ModelResponsePart::Text(text)) =
                                                         response_parts.get_mut(delta.index)
                                                     {
                                                         text.content.push_str(&t.content_delta);
@@ -1249,7 +1247,7 @@ impl AgentStream {
                                                         }))
                                                         .await;
                                                     if let Some(ModelResponsePart::ToolCall(
-                                                        ref mut tool_call,
+                                                        tool_call,
                                                     )) = response_parts.get_mut(delta.index)
                                                     {
                                                         tc.apply(tool_call);
@@ -1263,7 +1261,7 @@ impl AgentStream {
                                                         }))
                                                         .await;
                                                     if let Some(ModelResponsePart::Thinking(
-                                                        ref mut think,
+                                                        think,
                                                     )) = response_parts.get_mut(delta.index)
                                                     {
                                                         t.apply(think);
@@ -1585,14 +1583,14 @@ impl Stream for AgentStream {
 mod tests {
     use super::*;
     use crate::builder::agent;
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
     use serdes_ai_core::messages::{
         FinishReason, ModelRequestPart, StreamCompleteEvent, TextPart, ToolCallPart,
     };
     use serdes_ai_models::FunctionModel;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[test]

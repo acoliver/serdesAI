@@ -59,8 +59,8 @@ pub mod usage;
 
 // Re-exports for convenience
 pub use errors::{ClassifyModelFailure, ModelFailure, ModelFailureKind, Result, SerdesAiError};
-pub use format::{format_as_xml, format_as_xml_with_options, XmlFormatError, XmlFormatOptions};
-pub use identifier::{now_utc, ConversationId, RunId, ToolCallId};
+pub use format::{XmlFormatError, XmlFormatOptions, format_as_xml, format_as_xml_with_options};
+pub use identifier::{ConversationId, RunId, ToolCallId, now_utc};
 pub use messages::{
     BinaryContent,
     // Builtin tools (web search, code execution, file search)
@@ -107,9 +107,9 @@ pub use usage::{RequestUsage, RunUsage, UsageLimits};
 /// ```
 pub mod prelude {
     pub use crate::errors::{Result, SerdesAiError};
-    pub use crate::format::{format_as_xml, format_as_xml_with_options, XmlFormatOptions};
+    pub use crate::format::{XmlFormatOptions, format_as_xml, format_as_xml_with_options};
     pub use crate::identifier::{
-        generate_run_id, generate_tool_call_id, now_utc, ConversationId, RunId, ToolCallId,
+        ConversationId, RunId, ToolCallId, generate_run_id, generate_tool_call_id, now_utc,
     };
     pub use crate::messages::{
         BinaryContent,

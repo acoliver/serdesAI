@@ -8,7 +8,7 @@ use crate::bus;
 use crate::commands::registry::{self, CommandCategory, CommandResult};
 use crate::config;
 use crate::models::loader;
-use crate::picker::{pick_agent_inline, pick_model_inline, AgentInfo};
+use crate::picker::{AgentInfo, pick_agent_inline, pick_model_inline};
 use crate::register_command;
 use crate::runner::{validate_agent, validate_model};
 use crate::session;

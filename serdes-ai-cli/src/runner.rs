@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use figlet_rs::FIGfont;
 use tracing::info;
@@ -16,7 +16,7 @@ use serdes_ai_core::messages::{
 use crate::args::{Cli, RunMode};
 use crate::bus::{AnyMessage, MessageBus};
 use crate::commands;
-use crate::commands::registry::{execute_command, CommandResult};
+use crate::commands::registry::{CommandResult, execute_command};
 use crate::config;
 use crate::input;
 use crate::messages::{
@@ -28,7 +28,7 @@ use crate::stream_render::StreamRenderer;
 use crate::terminal;
 use crate::tools;
 use crate::tui::{
-    mark_tutorial_complete, run_tutorial_wizard, should_run_tutorial, TutorialResult,
+    TutorialResult, mark_tutorial_complete, run_tutorial_wizard, should_run_tutorial,
 };
 use crate::turn_ui::Turn;
 use crate::wiggum;
@@ -151,7 +151,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             // Set for the process rather than saved, so a one-off run against a
             // local server does not silently repoint every later session.
-            std::env::set_var("SERDES_AI_BASE_URL", base_url);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("SERDES_AI_BASE_URL", base_url) };
             bus.emit_success(format!("Using endpoint: {base_url}"));
         }
 
@@ -271,6 +272,30 @@ pub async fn interactive_mode(
     }
 
     Ok(())
+}
+
+/// Show or change the run mode, reporting through the message bus.
+pub fn handle_mode_argument(argument: &str) {
+    if argument.is_empty() {
+        crate::bus::emit_info(format!("Mode: {}", describe_mode(get_run_mode())));
+        crate::bus::emit_info("Use /mode single|fast|workflow to change it.".to_string());
+        return;
+    }
+
+    let next = match argument.to_ascii_lowercase().as_str() {
+        "single" => RunMode::Single,
+        "fast" => RunMode::Fast,
+        "workflow" => RunMode::Workflow,
+        other => {
+            crate::bus::emit_warning(format!(
+                "Unknown mode '{other}'. Expected one of: single, fast, workflow."
+            ));
+            return;
+        }
+    };
+
+    set_run_mode(next);
+    crate::bus::emit_success(format!("Mode: {}", describe_mode(next)));
 }
 
 /// Show or change the run mode.

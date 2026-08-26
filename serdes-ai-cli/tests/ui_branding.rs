@@ -7,7 +7,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, TerminalApp};
+use harness::{TerminalApp, says};
 
 /// Pictographic characters that should never reach the screen.
 const ICONS: &[&str] = &[

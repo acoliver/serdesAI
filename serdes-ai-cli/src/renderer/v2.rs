@@ -1,14 +1,14 @@
-use std::any::{type_name, TypeId};
+use std::any::{TypeId, type_name};
 use std::collections::HashMap;
-use std::io::{stderr, stdout, Stdout, Write};
+use std::io::{Stdout, Write, stderr, stdout};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::{ExecutableCommand, QueueableCommand};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use crate::bus::{AnyMessage, MessageBus};
 use crate::config;

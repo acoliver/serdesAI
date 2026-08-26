@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serdes_ai_orchestrator::config::OrchestratorConfig;
 use serdes_ai_orchestrator::orchestrator::Orchestrator;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ use crate::args::RunMode;
 use crate::bus::MessageBus;
 use crate::{config, model_factory};
 
-use super::{forward_events, CliApprover};
+use super::{CliApprover, forward_events};
 
 /// Builds the orchestrator's models the same way the rest of the CLI does.
 ///

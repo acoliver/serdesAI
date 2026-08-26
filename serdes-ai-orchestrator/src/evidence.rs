@@ -270,10 +270,12 @@ mod tests {
         let evidence = collect(&root, None).await;
 
         assert!(!evidence.gaps.is_empty());
-        assert!(evidence
-            .gaps
-            .iter()
-            .any(|g| g.contains("not a git repository")));
+        assert!(
+            evidence
+                .gaps
+                .iter()
+                .any(|g| g.contains("not a git repository"))
+        );
         assert!(evidence.render().contains("Evidence gaps"));
     }
 

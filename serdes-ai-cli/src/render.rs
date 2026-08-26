@@ -7,8 +7,9 @@
 use std::io::{self};
 
 use crossterm::{
+    QueueableCommand,
     style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal, QueueableCommand,
+    terminal,
 };
 
 const DEFAULT_MAX_WIDTH: usize = 80;

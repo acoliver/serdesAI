@@ -149,7 +149,7 @@ impl AntigravityModel {
     /// Build request headers.
     fn build_headers(&self) -> Result<reqwest::header::HeaderMap, ModelError> {
         use reqwest::header::{
-            HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
+            AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
         };
 
         let mut headers = HeaderMap::new();

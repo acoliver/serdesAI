@@ -301,11 +301,12 @@ where
                 this.partial_response.apply_delta(&delta);
 
                 // Return first pending event
-                if let Some(event) = this.pending_events.pop_front() {
-                    Poll::Ready(Some(event))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                match this.pending_events.pop_front() {
+                    Some(event) => Poll::Ready(Some(event)),
+                    _ => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
                 }
             }
             Poll::Ready(Some(Err(e))) => {

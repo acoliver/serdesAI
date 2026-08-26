@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
 /// OAuth provider configuration

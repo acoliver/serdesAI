@@ -3,7 +3,7 @@
 use crate::error::GraphError;
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

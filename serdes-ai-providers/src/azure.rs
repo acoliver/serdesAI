@@ -1,10 +1,10 @@
 //! Azure OpenAI provider implementation.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
-use serdes_ai_models::profile::openai_gpt4o_profile;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
+use serdes_ai_models::profile::openai_gpt4o_profile;
 
 /// Azure OpenAI provider.
 #[derive(Debug)]

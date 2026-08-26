@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    definition::ToolDefinition, errors::ToolError, return_types::ToolReturn, tool::Tool, RunContext,
+    RunContext, definition::ToolDefinition, errors::ToolError, return_types::ToolReturn, tool::Tool,
 };
 
 /// Registry of tools that can be called by an agent.
@@ -240,7 +240,7 @@ pub trait ToolProvider<Deps> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{schema::SchemaBuilder, ToolResult};
+    use crate::{ToolResult, schema::SchemaBuilder};
     use async_trait::async_trait;
 
     struct EchoTool;

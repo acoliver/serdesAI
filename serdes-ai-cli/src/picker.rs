@@ -3,11 +3,10 @@
 use std::io::{self, Write};
 
 use crossterm::{
-    cursor,
+    ExecutableCommand, QueueableCommand, cursor,
     event::{self, Event, KeyCode, KeyEventKind},
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
-    ExecutableCommand, QueueableCommand,
 };
 
 const MAX_VISIBLE_ITEMS: usize = 10;
@@ -37,7 +36,7 @@ pub fn pick_model_inline(models: &[String], current: Option<&str>) -> io::Result
     // Header printed once; body is redrawn beneath this line.
     stdout.execute(SetForegroundColor(Color::Cyan))?;
     stdout.execute(Print(
-        "Select a model (↑/↓, Enter=choose, Esc=cancel, type=filter):\n",
+        "Select a model (↑/↓, Enter=choose, Esc=cancel, type=filter):\r\n",
     ))?;
     stdout.execute(ResetColor)?;
 
@@ -58,17 +57,17 @@ pub fn pick_model_inline(models: &[String], current: Option<&str>) -> io::Result
                 KeyCode::Enter => {
                     terminal::disable_raw_mode()?;
                     if let Some((_, model)) = filtered.get(selected) {
-                        stdout.queue(Print("\n"))?;
+                        stdout.queue(Print("\r\n"))?;
                         stdout.flush()?;
                         return Ok(Some((*model).clone()));
                     }
-                    stdout.queue(Print("\n"))?;
+                    stdout.queue(Print("\r\n"))?;
                     stdout.flush()?;
                     return Ok(None);
                 }
                 KeyCode::Esc => {
                     terminal::disable_raw_mode()?;
-                    stdout.queue(Print("\n"))?;
+                    stdout.queue(Print("\r\n"))?;
                     stdout.flush()?;
                     return Ok(None);
                 }
@@ -105,7 +104,7 @@ fn render_picker_body(
 
     if !filter.is_empty() {
         stdout.queue(SetForegroundColor(Color::DarkGrey))?;
-        stdout.queue(Print(format!("Filter: {filter}\n")))?;
+        stdout.queue(Print(format!("Filter: {filter}\r\n")))?;
         stdout.queue(ResetColor)?;
     }
 
@@ -113,7 +112,7 @@ fn render_picker_body(
 
     if visible_count == 0 {
         stdout.queue(SetForegroundColor(Color::Yellow))?;
-        stdout.queue(Print("No matching models. Keep typing or backspace.\n"))?;
+        stdout.queue(Print("No matching models. Keep typing or backspace.\r\n"))?;
         stdout.queue(ResetColor)?;
         stdout.flush()?;
         return Ok(());
@@ -122,17 +121,17 @@ fn render_picker_body(
     for (row, (_, model)) in filtered.iter().take(visible_count).enumerate() {
         if row == selected {
             stdout.queue(SetForegroundColor(Color::Green))?;
-            stdout.queue(Print(format!("> {model}\n")))?;
+            stdout.queue(Print(format!("> {model}\r\n")))?;
             stdout.queue(ResetColor)?;
         } else {
-            stdout.queue(Print(format!("  {model}\n")))?;
+            stdout.queue(Print(format!("  {model}\r\n")))?;
         }
     }
 
     if filtered.len() > MAX_VISIBLE_ITEMS {
         stdout.queue(SetForegroundColor(Color::DarkGrey))?;
         stdout.queue(Print(format!(
-            "  ... and {} more\n",
+            "  ... and {} more\r\n",
             filtered.len() - MAX_VISIBLE_ITEMS
         )))?;
         stdout.queue(ResetColor)?;
@@ -179,7 +178,7 @@ pub fn pick_agent_inline(
 
     stdout.execute(SetForegroundColor(Color::Cyan))?;
     stdout.execute(Print(
-        "Select an agent (↑/↓, Enter=choose, Esc=cancel, type=filter):\n",
+        "Select an agent (↑/↓, Enter=choose, Esc=cancel, type=filter):\r\n",
     ))?;
     stdout.execute(ResetColor)?;
 
@@ -200,17 +199,17 @@ pub fn pick_agent_inline(
                 KeyCode::Enter => {
                     terminal::disable_raw_mode()?;
                     if let Some((_, agent)) = filtered.get(selected) {
-                        stdout.queue(Print("\n"))?;
+                        stdout.queue(Print("\r\n"))?;
                         stdout.flush()?;
                         return Ok(Some(agent.name.clone()));
                     }
-                    stdout.queue(Print("\n"))?;
+                    stdout.queue(Print("\r\n"))?;
                     stdout.flush()?;
                     return Ok(None);
                 }
                 KeyCode::Esc => {
                     terminal::disable_raw_mode()?;
-                    stdout.queue(Print("\n"))?;
+                    stdout.queue(Print("\r\n"))?;
                     stdout.flush()?;
                     return Ok(None);
                 }
@@ -247,7 +246,7 @@ fn render_agent_picker_body(
 
     if !filter.is_empty() {
         stdout.queue(SetForegroundColor(Color::DarkGrey))?;
-        stdout.queue(Print(format!("Filter: {filter}\n")))?;
+        stdout.queue(Print(format!("Filter: {filter}\r\n")))?;
         stdout.queue(ResetColor)?;
     }
 
@@ -255,7 +254,7 @@ fn render_agent_picker_body(
 
     if visible_count == 0 {
         stdout.queue(SetForegroundColor(Color::Yellow))?;
-        stdout.queue(Print("No matching agents. Keep typing or backspace.\n"))?;
+        stdout.queue(Print("No matching agents. Keep typing or backspace.\r\n"))?;
         stdout.queue(ResetColor)?;
         stdout.flush()?;
         return Ok(());
@@ -265,13 +264,13 @@ fn render_agent_picker_body(
         if row == selected {
             stdout.queue(SetForegroundColor(Color::Green))?;
             stdout.queue(Print(format!(
-                "> {:<20} {}\n",
+                "> {:<20} {}\r\n",
                 agent.name, agent.description
             )))?;
             stdout.queue(ResetColor)?;
         } else {
             stdout.queue(Print(format!(
-                "  {:<20} {}\n",
+                "  {:<20} {}\r\n",
                 agent.name, agent.description
             )))?;
         }
@@ -280,7 +279,7 @@ fn render_agent_picker_body(
     if filtered.len() > MAX_VISIBLE_ITEMS {
         stdout.queue(SetForegroundColor(Color::DarkGrey))?;
         stdout.queue(Print(format!(
-            "  ... and {} more\n",
+            "  ... and {} more\r\n",
             filtered.len() - MAX_VISIBLE_ITEMS
         )))?;
         stdout.queue(ResetColor)?;

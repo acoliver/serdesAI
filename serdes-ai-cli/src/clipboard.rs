@@ -151,10 +151,13 @@ pub fn get_pending_images() -> Vec<ClipboardImage> {
 /// Clear pending image queue.
 pub fn clear_pending() {
     let manager = get_clipboard_manager();
-    if let Ok(mut guard) = manager.lock() {
-        guard.pending_images.clear();
-    } else {
-        warn!("Clipboard manager lock poisoned while clearing pending images");
+    match manager.lock() {
+        Ok(mut guard) => {
+            guard.pending_images.clear();
+        }
+        _ => {
+            warn!("Clipboard manager lock poisoned while clearing pending images");
+        }
     }
 }
 

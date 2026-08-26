@@ -2,7 +2,7 @@
 
 use crate::error::GraphError;
 use crate::node::{BaseNode, NodeResult};
-use crate::state::{generate_run_id, GraphRunContext, GraphRunResult, GraphState};
+use crate::state::{GraphRunContext, GraphRunResult, GraphState, generate_run_id};
 use std::marker::PhantomData;
 
 /// Iterator for stepping through a graph.

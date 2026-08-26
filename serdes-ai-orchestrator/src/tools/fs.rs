@@ -158,7 +158,7 @@ pub fn edit_file(
             return Err(ToolFailure::InvalidEdit {
                 path: display_path(root, &resolved),
                 reason: "old_string was not found in the file".to_string(),
-            })
+            });
         }
         1 => {}
         n => {
@@ -167,7 +167,7 @@ pub fn edit_file(
                 reason: format!(
                     "old_string appears {n} times; include more surrounding context so it matches exactly once"
                 ),
-            })
+            });
         }
     }
 

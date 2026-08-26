@@ -10,8 +10,8 @@
 //! the mechanism the whole tool-driven orchestration design rests on. It is
 //! test-only and exists to fail loudly at compile time if that stops holding.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 use serdes_ai_agent::{AgentBuilder, RunContext};

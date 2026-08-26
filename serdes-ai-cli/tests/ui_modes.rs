@@ -8,7 +8,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{workspace, Key, TerminalApp};
+use harness::{Key, TerminalApp, workspace};
 
 /// A script driving an orchestrator that delegates once to a code agent.
 fn delegating_script(file: &str, contents: &str) -> String {

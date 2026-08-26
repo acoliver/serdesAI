@@ -9,6 +9,16 @@ use crate::tui::{interactive_colors_menu, interactive_model_settings};
 pub fn init() {
     // /show command
     register_command!(
+        name = "mode",
+        description = "Show or set how a turn runs: single, fast or workflow",
+        usage = "/mode [single|fast|workflow]",
+        aliases = [],
+        category = CommandCategory::Config,
+        handler = handle_mode
+    )
+    .ok();
+
+    register_command!(
         name = "show",
         description = "Show current configuration",
         usage = "/show",
@@ -85,6 +95,18 @@ pub fn init() {
     .ok();
 }
 
+/// Show or change how a turn runs.
+///
+/// Registered rather than intercepted before the registry, so it appears in the
+/// completion list and in /help. While it was intercepted, typing it offered
+/// /model as a completion instead, and choosing that replaced what had been
+/// typed.
+fn handle_mode(cmd: &str) -> CommandResult {
+    let argument = command_arg(cmd);
+    crate::runner::handle_mode_argument(argument);
+    CommandResult::Handled
+}
+
 fn handle_show(_cmd: &str) -> CommandResult {
     let current_agent = config::get_agent_name();
     let default_agent = config::get_config_value("default_agent")
@@ -96,17 +118,6 @@ fn handle_show(_cmd: &str) -> CommandResult {
         .filter(|v| !v.trim().is_empty() && !v.eq_ignore_ascii_case("false") && v != "0")
         .map(|_| "on")
         .unwrap_or("off");
-
-    let dbos = if config::get_use_dbos() {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    let auto_save = if config::get_autosave_enabled() {
-        "enabled"
-    } else {
-        "disabled"
-    };
 
     let strategy = match config::get_compaction_strategy() {
         config::CompactionStrategy::Summarization => "summarization",
@@ -133,6 +144,12 @@ fn handle_show(_cmd: &str) -> CommandResult {
         config::CancelKey::CtrlQ => "ctrl_q",
     };
 
+    let auto_save = if config::get_autosave_enabled() {
+        "enabled"
+    } else {
+        "disabled"
+    };
+
     let temperature = match config::get_config_value("temperature") {
         Some(value) if !value.trim().is_empty() => value,
         _ => "(model default)".to_string(),
@@ -147,7 +164,6 @@ fn handle_show(_cmd: &str) -> CommandResult {
     bus::emit_info(format_status_line("default_agent", &default_agent));
     bus::emit_info(format_status_line("model", &model));
     bus::emit_info(format_status_line("YOLO_MODE", yolo_mode));
-    bus::emit_info(format_status_line("DBOS", dbos));
     bus::emit_info(format_status_line("auto_save_session", auto_save));
     bus::emit_info(format_status_line("protected_tokens", &protected_tokens));
     bus::emit_info(format_status_line("compaction_threshold", &threshold_pct));
@@ -183,9 +199,6 @@ fn handle_set(cmd: &str) -> CommandResult {
     }
 
     let result = match key_norm.as_str() {
-        "enable_dbos" => parse_bool(value)
-            .map(config::set_enable_dbos)
-            .map_err(|err| err.to_string()),
         "cancel_agent_key" => parse_cancel_key(value)
             .map(config::set_cancel_agent_key)
             .map_err(|err| err.to_string()),

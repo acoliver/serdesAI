@@ -660,7 +660,7 @@ impl BinaryContent {
 
 /// Custom serde module for base64 encoding/decoding of binary data.
 mod base64_serde {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error>
@@ -1024,7 +1024,7 @@ impl CodeExecutionResult {
     /// Check if execution succeeded (exit_code == 0 and no error).
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.error.is_none() && self.exit_code.map_or(true, |c| c == 0)
+        self.error.is_none() && self.exit_code.is_none_or(|c| c == 0)
     }
 }
 
@@ -1900,8 +1900,10 @@ mod tests {
     fn test_serde_roundtrip_web_search_results() {
         let results = WebSearchResults::new(
             "rust",
-            vec![WebSearchResult::new("Rust", "https://rust-lang.org")
-                .with_snippet("Systems programming")],
+            vec![
+                WebSearchResult::new("Rust", "https://rust-lang.org")
+                    .with_snippet("Systems programming"),
+            ],
         )
         .with_total_results(100);
 

@@ -16,7 +16,7 @@ pub mod tools;
 pub mod uc;
 
 use crate::bus::MessageBus;
-use crate::commands::registry::{execute_command, get_all_commands, CommandResult};
+use crate::commands::registry::{CommandResult, execute_command, get_all_commands};
 
 /// Initialize all built-in command modules.
 pub fn init_all() {

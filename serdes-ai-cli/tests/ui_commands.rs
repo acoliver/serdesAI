@@ -8,7 +8,7 @@
 #[path = "ui/harness.rs"]
 mod harness;
 
-use harness::{says, workspace, TerminalApp};
+use harness::{TerminalApp, says, workspace};
 
 /// An app sitting at the interactive prompt.
 fn at_prompt(reply: &str) -> TerminalApp {

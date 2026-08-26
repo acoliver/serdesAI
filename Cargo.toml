@@ -24,7 +24,7 @@ members = [
 
 [workspace.package]
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["serdes-ai contributors"]
 repository = "https://github.com/janfeddersen-wq/serdesAI"
@@ -33,7 +33,7 @@ documentation = "https://docs.rs/serdes-ai"
 readme = "README.md"
 keywords = ["ai", "llm", "agent", "serde", "pydantic"]
 categories = ["development-tools", "api-bindings", "asynchronous"]
-rust-version = "1.75.0"
+rust-version = "1.85.0"
 
 [workspace.dependencies]
 # Serialization

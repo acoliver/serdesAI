@@ -337,8 +337,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_combined_toolset_enter_exit() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let enter_count = Arc::new(AtomicU32::new(0));
         let exit_count = Arc::new(AtomicU32::new(0));

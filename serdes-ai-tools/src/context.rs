@@ -4,7 +4,7 @@
 //! to tools during execution, including dependencies, model info, and usage tracking.
 
 use chrono::{DateTime, Utc};
-use serdes_ai_core::{identifier::generate_run_id, ModelSettings, RunUsage};
+use serdes_ai_core::{ModelSettings, RunUsage, identifier::generate_run_id};
 use std::sync::Arc;
 
 /// Context passed to tools during execution.

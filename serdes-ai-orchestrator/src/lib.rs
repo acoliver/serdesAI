@@ -34,7 +34,7 @@ pub use orchestrator::{OrchestrationError, Orchestrator, WorkflowOutcome};
 pub use plan::{ApprovalDecision, AutoApprove, Plan, PlanApprover, PlanStep};
 pub use registry::{AgentRegistry, ModelFactory};
 pub use role::Role;
-pub use run::{run_agent, RunError};
+pub use run::{RunError, run_agent};
 pub use tools::{ToolContext, ToolFailure};
 
 #[cfg(test)]

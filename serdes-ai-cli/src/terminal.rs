@@ -265,7 +265,7 @@ pub fn ensure_ctrl_c_disabled() -> bool {
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{env, Ordering, ORIGINAL_STDIN_MODE};
+    use super::{ORIGINAL_STDIN_MODE, Ordering, env};
     use std::io;
 
     type Handle = *mut core::ffi::c_void;
