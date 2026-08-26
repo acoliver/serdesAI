@@ -96,10 +96,11 @@ impl ResponsesEngine {
                 ));
             };
             let mut history = apply_instructions(stored.history, request.instructions.as_deref());
-            history.extend(input_to_history(&request.input, None)?);
+            let new_items = input_to_history(&request.input, None, &history)?;
+            history.extend(new_items);
             history
         } else {
-            input_to_history(&request.input, request.instructions.as_deref())?
+            input_to_history(&request.input, request.instructions.as_deref(), &[])?
         };
 
         Ok(PreparedTurn {

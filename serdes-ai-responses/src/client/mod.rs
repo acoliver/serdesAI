@@ -737,8 +737,13 @@ impl OpenResponsesModel {
     }
 }
 
-/// Streaming HTTP turn (SSE). Streaming turns are not replayed internally:
-/// once an event escapes, replaying would duplicate output.
+/// Streaming HTTP turn (SSE).
+///
+/// The request is established before any event escapes, so a
+/// `previous_response_not_found` on the status line clears the stale chain
+/// and replays the full input once, mirroring the non-streaming path. Once
+/// the SSE body is being read there is no further replay: replaying after
+/// events escaped would duplicate output.
 async fn run_http_stream(
     inner: &Inner,
     messages: &[ModelRequest],
@@ -749,25 +754,42 @@ async fn run_http_stream(
     use futures::StreamExt;
 
     let mut session = inner.session.lock().await;
-    let chained = session.previous_response_id.is_some();
-    let skip = if chained { session.sent_requests } else { 0 };
-    let previous = chained.then(|| session.previous_response_id.clone().expect("checked"));
-    let mut request = build_request(inner, messages, settings, params, skip, previous, true)?;
-    request.stream = Some(true);
 
-    let mut http = inner.http.post(&inner.endpoint).json(&request);
-    for (name, value) in &inner.headers {
-        http = http.header(name, value);
-    }
-    let response = http
-        .send()
-        .await
-        .map_err(|e| ModelError::Connection(e.to_string()))?;
-    if !response.status().is_success() {
+    let response = loop {
+        let chained = session.previous_response_id.is_some();
+        let skip = if chained {
+            continuation_skip(messages, session.sent_requests)
+        } else {
+            0
+        };
+        let previous = chained.then(|| session.previous_response_id.clone().expect("checked"));
+        let mut request = build_request(inner, messages, settings, params, skip, previous, true)?;
+        request.stream = Some(true);
+
+        let mut http = inner.http.post(&inner.endpoint).json(&request);
+        for (name, value) in &inner.headers {
+            http = http.header(name, value);
+        }
+        let response = http
+            .send()
+            .await
+            .map_err(|e| ModelError::Connection(e.to_string()))?;
+        if response.status().is_success() {
+            break response;
+        }
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
-        return Err(ModelError::http(status, body));
-    }
+        let code = serde_json::from_str::<crate::error::HttpErrorEnvelope>(&body)
+            .ok()
+            .map(|envelope| envelope.error.code)
+            .unwrap_or_default();
+        if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && chained {
+            session.previous_response_id = None;
+            session.sent_requests = 0;
+            continue;
+        }
+        return Err(ModelError::http(status, format!("{code}: {body}")));
+    };
 
     let mut byte_stream = response.bytes_stream();
     let mut buffer = String::new();

@@ -318,6 +318,7 @@ pub fn tool_choice(choice: Option<&ResponsesToolChoice>) -> Option<ToolChoice> {
 pub fn input_to_history(
     input: &ResponseInput,
     instructions: Option<&str>,
+    stored_history: &[ModelRequest],
 ) -> Result<Vec<ModelRequest>, ResponsesError> {
     let mut history: Vec<ModelRequest> = Vec::new();
     if let Some(instructions) = instructions {
@@ -328,9 +329,26 @@ pub fn input_to_history(
         history.push(request);
     }
 
-    // call_id -> tool name, learned from function_call items in input order so
-    // that later function_call_output items can carry a real tool name.
-    let mut call_names: HashMap<String, String> = HashMap::new();
+    // call_id -> tool name, seeded from function calls already present in
+    // stored history (so a chained turn's function_call_output resolves a
+    // call made in an earlier turn), then extended by function_call items in
+    // input order.
+    let mut call_names: HashMap<String, String> = stored_history
+        .iter()
+        .flat_map(|request| request.parts.iter())
+        .filter_map(|part| match part {
+            ModelRequestPart::ModelResponse(response) => Some(response.parts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            ModelResponsePart::ToolCall(call) => call
+                .tool_call_id
+                .clone()
+                .map(|call_id| (call_id, call.tool_name.clone())),
+            _ => None,
+        })
+        .collect();
 
     enum Pending {
         Assistant(Vec<ModelResponsePart>),
