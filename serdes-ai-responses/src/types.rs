@@ -788,7 +788,7 @@ pub enum StreamEvent {
         response: ResponseObject,
     },
     /// An output item started.
-    #[serde(rename = "output_item.added")]
+    #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         /// Sequence number.
         sequence_number: u64,
@@ -798,7 +798,7 @@ pub enum StreamEvent {
         item: OutputItem,
     },
     /// An output item finished.
-    #[serde(rename = "output_item.done")]
+    #[serde(rename = "response.output_item.done")]
     OutputItemDone {
         /// Sequence number.
         sequence_number: u64,
@@ -808,7 +808,7 @@ pub enum StreamEvent {
         item: OutputItem,
     },
     /// A content part was added to a message item.
-    #[serde(rename = "content_part.added")]
+    #[serde(rename = "response.content_part.added")]
     ContentPartAdded {
         /// Sequence number.
         sequence_number: u64,
@@ -822,7 +822,7 @@ pub enum StreamEvent {
         part: OutputContent,
     },
     /// A content part finished.
-    #[serde(rename = "content_part.done")]
+    #[serde(rename = "response.content_part.done")]
     ContentPartDone {
         /// Sequence number.
         sequence_number: u64,
@@ -836,7 +836,7 @@ pub enum StreamEvent {
         part: OutputContent,
     },
     /// Text delta.
-    #[serde(rename = "output_text.delta")]
+    #[serde(rename = "response.output_text.delta")]
     OutputTextDelta {
         /// Sequence number.
         sequence_number: u64,
@@ -850,7 +850,7 @@ pub enum StreamEvent {
         delta: String,
     },
     /// Text finished.
-    #[serde(rename = "output_text.done")]
+    #[serde(rename = "response.output_text.done")]
     OutputTextDone {
         /// Sequence number.
         sequence_number: u64,
@@ -864,7 +864,7 @@ pub enum StreamEvent {
         text: String,
     },
     /// A reasoning summary part started.
-    #[serde(rename = "reasoning_summary_part.added")]
+    #[serde(rename = "response.reasoning_summary_part.added")]
     ReasoningSummaryPartAdded {
         /// Sequence number.
         sequence_number: u64,
@@ -878,7 +878,7 @@ pub enum StreamEvent {
         part: SummaryTextItem,
     },
     /// A reasoning summary part finished.
-    #[serde(rename = "reasoning_summary_part.done")]
+    #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone {
         /// Sequence number.
         sequence_number: u64,
@@ -892,7 +892,7 @@ pub enum StreamEvent {
         part: SummaryTextItem,
     },
     /// Reasoning summary delta.
-    #[serde(rename = "reasoning_summary_text.delta")]
+    #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryTextDelta {
         /// Sequence number.
         sequence_number: u64,
@@ -906,7 +906,7 @@ pub enum StreamEvent {
         delta: String,
     },
     /// Reasoning summary finished.
-    #[serde(rename = "reasoning_summary_text.done")]
+    #[serde(rename = "response.reasoning_summary_text.done")]
     ReasoningSummaryTextDone {
         /// Sequence number.
         sequence_number: u64,
@@ -920,7 +920,7 @@ pub enum StreamEvent {
         text: String,
     },
     /// Function call arguments delta.
-    #[serde(rename = "function_call_arguments.delta")]
+    #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
         /// Sequence number.
         sequence_number: u64,
@@ -932,7 +932,7 @@ pub enum StreamEvent {
         delta: String,
     },
     /// Function call arguments finished.
-    #[serde(rename = "function_call_arguments.done")]
+    #[serde(rename = "response.function_call_arguments.done")]
     FunctionCallArgumentsDone {
         /// Sequence number.
         sequence_number: u64,
@@ -1034,18 +1034,18 @@ impl StreamEvent {
         match self {
             Self::ResponseCreated { .. } => "response.created",
             Self::ResponseInProgress { .. } => "response.in_progress",
-            Self::OutputItemAdded { .. } => "output_item.added",
-            Self::OutputItemDone { .. } => "output_item.done",
-            Self::ContentPartAdded { .. } => "content_part.added",
-            Self::ContentPartDone { .. } => "content_part.done",
-            Self::OutputTextDelta { .. } => "output_text.delta",
-            Self::OutputTextDone { .. } => "output_text.done",
-            Self::ReasoningSummaryPartAdded { .. } => "reasoning_summary_part.added",
-            Self::ReasoningSummaryPartDone { .. } => "reasoning_summary_part.done",
-            Self::ReasoningSummaryTextDelta { .. } => "reasoning_summary_text.delta",
-            Self::ReasoningSummaryTextDone { .. } => "reasoning_summary_text.done",
-            Self::FunctionCallArgumentsDelta { .. } => "function_call_arguments.delta",
-            Self::FunctionCallArgumentsDone { .. } => "function_call_arguments.done",
+            Self::OutputItemAdded { .. } => "response.output_item.added",
+            Self::OutputItemDone { .. } => "response.output_item.done",
+            Self::ContentPartAdded { .. } => "response.content_part.added",
+            Self::ContentPartDone { .. } => "response.content_part.done",
+            Self::OutputTextDelta { .. } => "response.output_text.delta",
+            Self::OutputTextDone { .. } => "response.output_text.done",
+            Self::ReasoningSummaryPartAdded { .. } => "response.reasoning_summary_part.added",
+            Self::ReasoningSummaryPartDone { .. } => "response.reasoning_summary_part.done",
+            Self::ReasoningSummaryTextDelta { .. } => "response.reasoning_summary_text.delta",
+            Self::ReasoningSummaryTextDone { .. } => "response.reasoning_summary_text.done",
+            Self::FunctionCallArgumentsDelta { .. } => "response.function_call_arguments.delta",
+            Self::FunctionCallArgumentsDone { .. } => "response.function_call_arguments.done",
             Self::ResponseCompleted { .. } => "response.completed",
             Self::ResponseFailed { .. } => "response.failed",
             Self::ResponseIncomplete { .. } => "response.incomplete",

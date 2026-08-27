@@ -235,9 +235,12 @@ async fn read_turn(ws: &mut FakeWs) -> CreateResponseRequest {
         let message = ws.next().await.expect("frame").expect("ws ok");
         match message {
             Message::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(value["type"], "response.create", "unexpected frame: {text}");
-                return serde_json::from_value(value["response"].clone()).unwrap();
+                // Codex frames are flat; everything except `type` is the
+                // response payload.
+                value.as_object_mut().expect("frame object").remove("type");
+                return serde_json::from_value(value).unwrap();
             }
             Message::Close(_) => panic!("client closed before sending a turn"),
             _ => continue,
@@ -611,17 +614,20 @@ async fn client_sends_function_tools_with_wire_type_tag() {
             }
         };
         assert_eq!(value["type"], "response.create");
-        let tools = value["response"]["tools"]
-            .as_array()
-            .expect("tools on the wire");
+        let tools = value["tools"].as_array().expect("tools on the wire");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["name"], "get_weather");
         assert_eq!(tools[0]["strict"], true);
         assert_eq!(tools[0]["parameters"]["type"], "object");
 
-        let request =
-            serde_json::from_value::<CreateResponseRequest>(value["response"].clone()).unwrap();
+        // Codex frames are flat: strip `type`, the rest is the payload.
+        let mut payload = value;
+        payload
+            .as_object_mut()
+            .expect("frame object")
+            .remove("type");
+        let request = serde_json::from_value::<CreateResponseRequest>(payload).unwrap();
         send_completed_turn(&mut ws, "resp_1", &request).await;
     });
 

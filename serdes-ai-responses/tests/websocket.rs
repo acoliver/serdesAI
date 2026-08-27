@@ -24,11 +24,10 @@ async fn connect(addr: &std::net::SocketAddr) -> Ws {
 /// Send a response.create frame and collect events until the turn's terminal
 /// event (or an error envelope) arrives.
 async fn run_turn(ws: &mut Ws, response: Value) -> Vec<Value> {
-    ws.send(Message::Text(
-        json!({"type": "response.create", "response": response}).to_string(),
-    ))
-    .await
-    .unwrap();
+    // Codex sends response.create frames flat: parameters on the frame root.
+    let mut frame = response;
+    frame["type"] = json!("response.create");
+    ws.send(Message::Text(frame.to_string())).await.unwrap();
 
     let mut events = Vec::new();
     loop {
@@ -81,10 +80,10 @@ async fn turns_stream_events_with_terminal_completion() {
     // wire names use the unprefixed forms for item-level events
     assert!(events
         .iter()
-        .any(|event| event["type"] == "output_item.added"));
+        .any(|event| event["type"] == "response.output_item.added"));
     assert!(events
         .iter()
-        .any(|event| event["type"] == "output_text.delta"));
+        .any(|event| event["type"] == "response.output_text.delta"));
 
     // A second turn on the same socket works (sequential turns).
     let events = run_turn(&mut ws, json!({"model": "m", "input": "again"})).await;
@@ -154,18 +153,18 @@ async fn unknown_continuation_reports_error_and_connection_survives() {
 }
 
 #[tokio::test]
-async fn forbidden_keys_are_rejected() {
+async fn stream_keys_are_ignored() {
     let (model, _calls) = recording_model();
     let addr = spawn_server_with_ws_config(model, Default::default()).await;
     let mut ws = connect(&addr).await;
 
+    // The live backend accepts HTTP-only keys on websocket turns; the rig
+    // strips them instead of rejecting the frame.
     let events = run_turn(&mut ws, json!({"model": "m", "input": "x", "stream": true})).await;
-    let error = find(&events, "error");
-    assert_eq!(error["error"]["code"], "invalid_request_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("'stream' must be omitted"));
+    assert!(
+        find(&events, "response.completed").is_object(),
+        "turn should complete with stream key present"
+    );
 
     // Non response.create frames are rejected too.
     let events = run_turn_raw(&mut ws, json!({"type": "response.cancel"})).await;

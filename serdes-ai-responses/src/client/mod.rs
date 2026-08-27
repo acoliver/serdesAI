@@ -53,10 +53,16 @@ impl Transport {
 }
 
 /// The wire frame that initiates a websocket turn.
+///
+/// The codex wire form is flat: `type` plus the response parameters at the
+/// top level (`{"type":"response.create","model":…,"input":…}`), with no
+/// `response` wrapper. The live backend reads `model` from the frame root
+/// and reports `None` when it is nested.
 #[derive(Serialize)]
 struct ResponseCreateFrame<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
+    #[serde(flatten)]
     response: &'a CreateResponseRequest,
 }
 
@@ -279,6 +285,7 @@ async fn run_ws_turn(
 ) -> Result<ResponseObject, ModelError> {
     let mut session = inner.session.lock().await;
     let mut streamed_any = false;
+    let mut last_cause: Option<String> = None;
 
     for _attempt in 0..MAX_ATTEMPTS {
         // Reconnect if needed. A fresh socket means a fresh server-side
@@ -307,6 +314,7 @@ async fn run_ws_turn(
             kind: "response.create",
             response: &request,
         };
+        tracing::debug!(frame = %serde_json::to_string(&frame).unwrap_or_default(), "sending response.create");
 
         let socket = session.socket.as_mut().expect("socket ensured above");
         let mut outcome = match socket.send_json(&frame).await {
@@ -314,6 +322,8 @@ async fn run_ws_turn(
             Err(e) => Some(if streamed_any {
                 AttemptOutcome::Failed(ModelError::Connection(e.to_string()))
             } else {
+                last_cause = Some(e.to_string());
+                tracing::warn!(error = %e, "send failed before any event; reconnecting");
                 AttemptOutcome::Retry(RetryKind::Reconnect)
             }),
         };
@@ -340,9 +350,12 @@ async fn run_ws_turn(
         }
     }
 
-    Err(ModelError::Connection(
-        "websocket turn exhausted retries".to_string(),
-    ))
+    Err(ModelError::Connection(match last_cause {
+        Some(cause) => {
+            format!("websocket turn exhausted retries; last cause: {cause}")
+        }
+        None => "websocket turn exhausted retries".to_string(),
+    }))
 }
 
 /// Read frames for one attempt, translating events into the sink until the
@@ -357,6 +370,9 @@ async fn read_ws_events(
         let message = match socket.next_message().await {
             Some(Ok(message)) => message,
             Some(Err(e)) => {
+                if !*streamed_any {
+                    tracing::warn!(error = %e, "socket error before any event; reconnecting");
+                }
                 return if *streamed_any {
                     AttemptOutcome::Failed(ModelError::Connection(e.to_string()))
                 } else {
@@ -364,6 +380,9 @@ async fn read_ws_events(
                 };
             }
             None => {
+                if !*streamed_any {
+                    tracing::warn!("socket closed by peer before any event; reconnecting");
+                }
                 return if *streamed_any {
                     AttemptOutcome::Failed(ModelError::Connection(
                         "connection closed mid-turn".to_string(),
@@ -376,6 +395,9 @@ async fn read_ws_events(
         let text = match message {
             WsStreamMessage::Text(text) => text,
             WsStreamMessage::Close => {
+                if !*streamed_any {
+                    tracing::warn!("close frame before any event; reconnecting");
+                }
                 return if *streamed_any {
                     AttemptOutcome::Failed(ModelError::Connection(
                         "connection closed mid-turn".to_string(),
@@ -389,7 +411,7 @@ async fn read_ws_events(
 
         let event = match serde_json::from_str::<StreamEvent>(&text) {
             Ok(event) => event,
-            Err(_) => match serde_json::from_str::<WsErrorEnvelope>(&text) {
+            Err(event_error) => match serde_json::from_str::<WsErrorEnvelope>(&text) {
                 Ok(envelope) => {
                     let code = envelope.error.code.as_str();
                     if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && !*streamed_any {
@@ -400,8 +422,8 @@ async fn read_ws_events(
                     }
                     return AttemptOutcome::Failed(envelope_error(&envelope));
                 }
-                Err(_) => {
-                    tracing::warn!(frame = %text, "unparseable websocket frame");
+                Err(envelope_error) => {
+                    tracing::warn!(frame = %text, event_error = %event_error, envelope_error = %envelope_error, "unparseable websocket frame");
                     continue;
                 }
             },

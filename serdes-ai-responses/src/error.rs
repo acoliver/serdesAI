@@ -103,7 +103,10 @@ impl ResponsesError {
 /// Error payload embedded in both the HTTP and websocket envelopes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
-    /// Machine-readable error code.
+    /// Machine-readable error code. Absent on generic `invalid_request`
+    /// frames from the live backend, which identify themselves only by
+    /// `type`; the alias maps that field onto `code` so such frames parse.
+    #[serde(default, alias = "type")]
     pub code: String,
     /// Human-readable description.
     pub message: String,
@@ -137,6 +140,10 @@ pub struct WsErrorEnvelope {
     #[serde(rename = "type")]
     pub kind: String,
     /// HTTP-equivalent status code for the failure.
+    ///
+    /// The live codex backend names this field `status`; both spellings are
+    /// accepted on the wire.
+    #[serde(alias = "status")]
     pub status_code: u16,
     /// The error payload.
     pub error: ErrorBody,

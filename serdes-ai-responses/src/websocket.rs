@@ -1,7 +1,7 @@
 //! Open Responses websocket transport.
 //!
 //! `GET /v1/responses` upgrades to a websocket. The client sends
-//! `{"type":"response.create","response":{...}}` text frames; the server
+//! `{"type":"response.create", …flat response parameters…}` text frames; the server
 //! answers with the same event objects the SSE transport emits, one JSON
 //! object per text frame, with `sequence_number` restarting at 0 each turn.
 //!
@@ -57,7 +57,8 @@ impl Default for WebSocketSessionConfig {
     }
 }
 
-/// Keys that must not appear in a websocket `response.create` payload.
+/// Keys carried by codex websocket turns that only apply to HTTP requests.
+/// They are stripped before the payload is parsed.
 const FORBIDDEN_KEYS: [&str; 3] = ["stream", "stream_options", "background"];
 
 /// Outgoing frame sender shared by turn execution and control paths.
@@ -187,25 +188,20 @@ async fn run_turn(
             "unsupported frame type '{kind}'; only response.create is accepted"
         )));
     }
-    let response = match frame.get("response") {
-        Some(response) => response.clone(),
-        None => {
+    // Codex sends `response.create` frames with the parameters flat on the
+    // frame root (no `response` wrapper); HTTP-only keys arrive alongside
+    // them and are ignored rather than rejected.
+    let mut response_object = match frame {
+        Value::Object(object) => object,
+        _ => {
             return Some(ResponsesError::InvalidRequest(
-                "response.create frame must carry a response object".to_string(),
+                "frame must be a JSON object".to_string(),
             ))
         }
     };
-    let Some(response_object) = response.as_object() else {
-        return Some(ResponsesError::InvalidRequest(
-            "\"response\" must be an object".to_string(),
-        ));
-    };
+    response_object.remove("type");
     for key in FORBIDDEN_KEYS {
-        if response_object.contains_key(key) {
-            return Some(ResponsesError::InvalidRequest(format!(
-                "'{key}' must be omitted in websocket turns"
-            )));
-        }
+        response_object.remove(key);
     }
 
     // The lifetime limit is enforced between turns only, so an in-flight turn
@@ -214,14 +210,15 @@ async fn run_turn(
         return Some(ResponsesError::ConnectionLimitReached);
     }
 
-    let request: crate::types::CreateResponseRequest = match serde_json::from_value(response) {
-        Ok(request) => request,
-        Err(err) => {
-            return Some(ResponsesError::InvalidRequest(format!(
-                "invalid response payload: {err}"
-            )))
-        }
-    };
+    let request: crate::types::CreateResponseRequest =
+        match serde_json::from_value(Value::Object(response_object)) {
+            Ok(request) => request,
+            Err(err) => {
+                return Some(ResponsesError::InvalidRequest(format!(
+                    "invalid response payload: {err}"
+                )))
+            }
+        };
 
     let turn = match engine.prepare(&request, Some(session)).await {
         Ok(turn) => turn,

@@ -13,7 +13,9 @@ readme = "README.md"
 
 [features]
 default = []
-websocket = ["dep:tokio-tungstenite"]
+# TLS is part of the websocket contract (wss://), not an optional extra:
+# without it the client compiles but rejects every wss URL at connect time.
+websocket = ["dep:tokio-tungstenite", "tokio-tungstenite/rustls-tls-native-roots"]
 
 [dependencies]
 serdes-ai-core = { workspace = true }
