@@ -1008,12 +1008,12 @@ mod tests {
             vec![
                 "response.created",
                 "response.in_progress",
-                "output_item.added",
-                "content_part.added",
-                "output_text.delta",
-                "output_text.delta",
-                "content_part.done",
-                "output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.delta",
+                "response.content_part.done",
+                "response.output_item.done",
                 "response.completed",
             ]
         );
