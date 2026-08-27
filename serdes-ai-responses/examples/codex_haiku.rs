@@ -2,12 +2,15 @@
 //!
 //! Runs the ChatGPT OAuth PKCE flow from `serdes-ai-providers` (the codex
 //! CLI's client id, browser opens automatically, callback on
-//! localhost:1455), then asks the selected model for one haiku over
-//! `wss://` and prints the stream as it arrives.
+//! localhost:1455), then exercises the selected model over `wss://`.
 //!
 //! ```bash
+//! # one haiku, streamed as deltas
 //! cargo run -p serdes-ai-responses --example codex_haiku
 //! cargo run -p serdes-ai-responses --example codex_haiku -- gpt-5.6-sol
+//! # tool-call round trip: model calls get_weather, example answers,
+//! # chained second turn returns the final answer
+//! cargo run -p serdes-ai-responses --example codex_haiku -- tools
 //! ```
 //!
 //! Tokens are cached in `~/.keys/.serdes_codex_token.json` (never printed)
@@ -107,12 +110,117 @@ fn user_turn(text: &str) -> ModelRequest {
     ))])
 }
 
+/// Full tool-call round trip against the live backend: register a function
+/// tool, let the model call it, answer locally, and finish on a chained
+/// turn. Fails loudly if any leg of the loop is broken on the wire.
+async fn tool_round_trip(model: &OpenResponsesModel) -> Result<(), Box<dyn std::error::Error>> {
+    use serdes_ai_core::messages::{ModelResponsePart, ToolCallArgs, ToolReturnPart};
+    use serdes_ai_tools::ToolDefinition;
+
+    let params = ModelRequestParameters::new().with_tools(vec![ToolDefinition {
+        name: "get_weather".into(),
+        description: "Get the current weather for a city.".into(),
+        parameters_json_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "City name"}
+            },
+            "required": ["city"],
+            "additionalProperties": false
+        }),
+        strict: Some(true),
+        outer_typed_dict_key: None,
+    }]);
+
+    println!("-- turn 1: one function tool offered, asking about Tokyo weather");
+    let history = vec![user_turn(
+        "What is the weather in Tokyo? Call the get_weather tool.",
+    )];
+    let first = model
+        .request(&history, &ModelSettings::default(), &params)
+        .await?;
+
+    let call = first.parts.iter().find_map(|part| match part {
+        ModelResponsePart::ToolCall(call) => Some(call.clone()),
+        _ => None,
+    });
+    let Some(call) = call else {
+        let text = first
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                ModelResponsePart::Text(t) => Some(t.content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        return Err(format!("model returned no tool call; text was: {text}").into());
+    };
+    let args = match &call.args {
+        ToolCallArgs::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    };
+    println!(
+        "-- tool call received: name={} call_id={:?}",
+        call.tool_name, call.tool_call_id
+    );
+    println!("   arguments={args}");
+    if args.trim().is_empty() {
+        return Err(
+            "tool call arrived with EMPTY arguments: argument deltas did not assemble".into(),
+        );
+    }
+
+    // "Execute" the tool locally and return the result on a chained turn.
+    let mut tool_return = ToolReturnPart::new(
+        "get_weather",
+        r#"{"temperature_c": 18, "conditions": "clear"}"#,
+    );
+    tool_return.tool_call_id = call.tool_call_id.clone();
+    let history = vec![
+        history.into_iter().next().expect("one turn"),
+        ModelRequest::with_parts(vec![ModelRequestPart::ModelResponse(Box::new(first))]),
+        ModelRequest::with_parts(vec![ModelRequestPart::ToolReturn(tool_return)]),
+    ];
+    println!("-- turn 2: returning the tool output on a chained turn");
+    let second = model
+        .request(&history, &ModelSettings::default(), &params)
+        .await?;
+
+    let text = second
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            ModelResponsePart::Text(t) => Some(t.content.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    println!();
+    println!("{text}");
+    println!();
+    if text.trim().is_empty() {
+        return Err("second turn returned no text".into());
+    }
+    println!(
+        "-- tool round trip complete: finish={:?} usage={:?}",
+        second.finish_reason, second.usage
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    let model_name = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    let mut model_name = DEFAULT_MODEL.to_owned();
+    let mut tools_mode = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "tools" {
+            tools_mode = true;
+        } else {
+            model_name = arg;
+        }
+    }
 
     let token = obtain_token().await?;
     let account = account_id(token.id_token.as_deref());
@@ -128,6 +236,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("Connecting: model={model_name} endpoint={ENDPOINT} transport=websocket");
     println!();
+
+    if tools_mode {
+        return tool_round_trip(&model).await;
+    }
 
     let history = vec![user_turn(
         "Write us one haiku about finally getting websockets to work.",
