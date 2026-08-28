@@ -486,11 +486,11 @@ fn build_request(
     };
     Ok(CreateResponseRequest {
         model: inner.model_name.clone(),
-        input: if items.is_empty() {
-            crate::types::ResponseInput::Text(String::new())
-        } else {
-            crate::types::ResponseInput::Items(items)
-        },
+        // Always a list, including when empty. A chained turn whose new
+        // items are all skipped has nothing left to add, and the API rejects
+        // the empty string an untagged Text variant serializes to with
+        // "Input must be a list".
+        input: crate::types::ResponseInput::Items(items),
         instructions,
         tools,
         tool_choice: tool_choice_to_wire(params.tool_choice.as_ref()),
@@ -856,4 +856,54 @@ async fn run_http_stream(
     Err(ModelError::InvalidResponse(
         "sse stream ended without a terminal event".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod input_shape_tests {
+    use super::{build_request, Inner, Session, Transport};
+    use serdes_ai_core::messages::request::ModelRequest;
+    use serdes_ai_core::ModelSettings;
+    use serdes_ai_models::model::ModelRequestParameters;
+
+    fn inner() -> Inner {
+        Inner {
+            model_name: "gpt-5.6-luna".to_string(),
+            endpoint: "wss://example.invalid/responses".to_string(),
+            transport: Transport::WebSocket,
+            headers: Vec::new(),
+            reasoning: None,
+            http: reqwest::Client::new(),
+            profile: Default::default(),
+            session: tokio::sync::Mutex::new(Session {
+                socket: None,
+                previous_response_id: None,
+                sent_requests: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_empty_turn_serializes_input_as_a_list() {
+        // Skipping every new item leaves nothing to send. The API rejects an
+        // empty string here with "Input must be a list", so the empty case
+        // has to stay an array.
+        let messages: Vec<ModelRequest> = Vec::new();
+        let request = build_request(
+            &inner(),
+            &messages,
+            &ModelSettings::default(),
+            &ModelRequestParameters::default(),
+            0,
+            Some("resp_1".to_string()),
+            false,
+        )
+        .expect("request");
+
+        let body = serde_json::to_value(&request).expect("serialize");
+        assert!(
+            body["input"].is_array(),
+            "input must be a list when empty, got {}",
+            body["input"]
+        );
+    }
 }
