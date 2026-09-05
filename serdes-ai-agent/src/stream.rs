@@ -7,6 +7,7 @@ use crate::agent::{Agent, RegisteredTool};
 use crate::context::{generate_run_id, RunContext, RunUsage};
 use crate::errors::AgentRunError;
 use crate::run::{CompressionStrategy, RunOptions};
+use crate::steering::{SteeringQueue, SteeringReceiver};
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serdes_ai_core::messages::{
@@ -95,6 +96,17 @@ pub enum AgentStreamEvent {
         tool_call_id: Option<String>,
         success: bool,
         error: Option<String>,
+    },
+    /// Steering input was delivered to the run at the tool-call boundary.
+    ///
+    /// Emitted after the step's `ToolExecuted` events and before the next
+    /// `RequestStart`, so consumers can persist the steered user message in
+    /// transcript order.
+    SteeringDelivered {
+        /// The step whose tool-call boundary delivered this message.
+        step: u32,
+        /// The steered text, also appended to history as a user prompt.
+        text: String,
     },
     /// Thinking delta (for reasoning models).
     ThinkingDelta { text: String },
@@ -192,6 +204,32 @@ fn usage_from_stream_complete(event: &StreamCompleteEvent) -> Option<RequestUsag
     Some(usage)
 }
 
+/// Drain queued steering input at the tool-call boundary and wire it into the
+/// run.
+///
+/// Each drained text is appended to the history as its own `ModelRequest`
+/// carrying a user prompt part, and one `SteeringDelivered` event is emitted
+/// per text so callers observe delivery after this step's `ToolExecuted`
+/// events and before the next `RequestStart`.
+async fn deliver_queued_steering(
+    receiver: &mut Option<SteeringReceiver>,
+    messages: &mut Vec<ModelRequest>,
+    tx: &mpsc::Sender<Result<AgentStreamEvent, AgentRunError>>,
+    step: u32,
+) {
+    let Some(receiver) = receiver.as_mut() else {
+        return;
+    };
+    for text in receiver.drain() {
+        let mut steer_req = ModelRequest::new();
+        steer_req.add_user_prompt(text.clone());
+        messages.push(steer_req);
+        let _ = tx
+            .send(Ok(AgentStreamEvent::SteeringDelivered { step, text }))
+            .await;
+    }
+}
+
 impl AgentStream {
     /// Create a new streaming agent run.
     ///
@@ -237,6 +275,10 @@ impl AgentStream {
         let _metadata = options.metadata.clone();
         let compression_config = options.compression.clone();
         let run_id_clone = run_id.clone();
+        let mut steering_rx = options
+            .steering
+            .as_ref()
+            .and_then(SteeringQueue::take_receiver);
 
         debug!(run_id = %run_id, "AgentStream: spawning streaming task");
 
@@ -866,6 +908,10 @@ impl AgentStream {
                         messages.push(tool_req);
                     }
 
+                    // Deliver steering queued while the tools ran, before the
+                    // next model request is issued.
+                    deliver_queued_steering(&mut steering_rx, &mut messages, &tx, step).await;
+
                     // Continue to let model respond to tool "error"
                     continue;
                 }
@@ -973,6 +1019,10 @@ impl AgentStream {
         let compression_config = options.compression.clone();
         let run_id_clone = run_id.clone();
         let cancel_token_clone = cancel_token.clone();
+        let mut steering_rx = options
+            .steering
+            .as_ref()
+            .and_then(SteeringQueue::take_receiver);
 
         debug!(run_id = %run_id, "AgentStream: spawning streaming task with cancellation support");
 
@@ -1475,6 +1525,10 @@ impl AgentStream {
                         messages.push(tool_req);
                     }
 
+                    // Deliver steering queued while the tools ran, before the
+                    // next model request is issued.
+                    deliver_queued_steering(&mut steering_rx, &mut messages, &tx, step).await;
+
                     continue;
                 }
 
@@ -1572,7 +1626,7 @@ mod tests {
     use serdes_ai_models::FunctionModel;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     #[test]
@@ -3206,5 +3260,411 @@ mod tests {
             run_complete_count, 1,
             "exactly one terminal RunComplete must fire (no premature termination)"
         );
+    }
+
+    // ========================================================================
+    // Steering delivery tests: queued texts reach the model at the
+    // tool-call boundary, FIFO, never before the first request and never
+    // at a text-only end of turn.
+    // ========================================================================
+
+    /// Collect the text of every user prompt across a captured request
+    /// history, in order.
+    fn user_texts(requests: &[ModelRequest]) -> Vec<String> {
+        requests
+            .iter()
+            .flat_map(|req| req.user_prompts())
+            .filter_map(|part| part.as_text().map(str::to_string))
+            .collect()
+    }
+
+    /// Two-request mock model: the first call returns a tool call, later
+    /// calls return terminal text. Every incoming request history is recorded
+    /// for assertions.
+    fn tool_then_text_model(recorded: &Arc<Mutex<Vec<Vec<ModelRequest>>>>) -> FunctionModel {
+        let recorded = Arc::clone(recorded);
+        FunctionModel::with_stream(move |messages: &[ModelRequest], _settings| {
+            let call = {
+                let mut log = recorded.lock().expect("request log poisoned");
+                log.push(messages.to_vec());
+                log.len() - 1
+            };
+            let events = if call == 0 {
+                vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::ToolCall(
+                            ToolCallPart::new("demo_tool", ToolCallArgs::string("{}"))
+                                .with_tool_call_id("call_1"),
+                        ),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(FinishReason::ToolCall),
+                    )),
+                ]
+            } else {
+                vec![
+                    Ok(ModelResponseStreamEvent::part_start(
+                        0,
+                        ModelResponsePart::Text(TextPart::new("done")),
+                    )),
+                    Ok(ModelResponseStreamEvent::part_end(0)),
+                    Ok(ModelResponseStreamEvent::StreamComplete(
+                        StreamCompleteEvent::new(FinishReason::Stop),
+                    )),
+                ]
+            };
+            Box::pin(stream::iter(events))
+        })
+    }
+
+    /// A steer enqueued while the step-0 tool runs is delivered at that
+    /// step's tool-call boundary: it appears in the SECOND model request
+    /// (after the tool return), and `SteeringDelivered` is emitted after
+    /// `ToolExecuted` and before the next `RequestStart`.
+    #[tokio::test]
+    async fn test_steering_delivered_at_tool_boundary_in_second_request() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<ModelRequest>>::new()));
+        let model = tool_then_text_model(&recorded);
+        let queue = SteeringQueue::new();
+        let tool_queue = queue.clone();
+
+        let agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                move |_ctx, _args: serde_json::Value| {
+                    tool_queue.steer("check the weather in tokyo".to_string());
+                    Ok(serdes_ai_tools::ToolReturn::text("ok"))
+                },
+            )
+            .build();
+
+        let options = RunOptions::new().steering(queue.clone());
+        let mut stream = agent
+            .run_stream_with_options("trigger tool then finish", (), options)
+            .await
+            .expect("stream should start");
+
+        let mut order: Vec<String> = Vec::new();
+        let mut steering_events = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event should be ok") {
+                AgentStreamEvent::RequestStart { step } => {
+                    order.push(format!("request_start:{step}"));
+                }
+                AgentStreamEvent::ToolExecuted { ref tool_name, .. }
+                    if tool_name == "demo_tool" =>
+                {
+                    order.push("tool_executed".to_string());
+                }
+                AgentStreamEvent::SteeringDelivered { step, text } => {
+                    order.push(format!("steering:{step}"));
+                    steering_events.push((step, text));
+                }
+                AgentStreamEvent::RunComplete { .. } => order.push("run_complete".to_string()),
+                _ => {}
+            }
+        }
+
+        // Delivered exactly once, for the step whose tool call triggered it.
+        assert_eq!(
+            steering_events,
+            vec![(1, "check the weather in tokyo".to_string())]
+        );
+
+        // Event order: after the tool execution, before the next RequestStart.
+        let tool_pos = order
+            .iter()
+            .position(|e| e == "tool_executed")
+            .expect("tool executed event");
+        let steering_pos = order
+            .iter()
+            .position(|e| e == "steering:1")
+            .expect("steering event");
+        let request2_pos = order
+            .iter()
+            .position(|e| e == "request_start:2")
+            .expect("second RequestStart");
+        assert!(tool_pos < steering_pos, "order was: {order:?}");
+        assert!(steering_pos < request2_pos, "order was: {order:?}");
+
+        // The second model request carries the tool return AND the steered
+        // user prompt; the first request does not see the steer.
+        let log = recorded.lock().expect("request log poisoned");
+        assert_eq!(log.len(), 2, "expected exactly two model requests");
+        assert_eq!(
+            user_texts(&log[0]),
+            vec!["trigger tool then finish".to_string()]
+        );
+        assert_eq!(
+            user_texts(&log[1]),
+            vec![
+                "trigger tool then finish".to_string(),
+                "check the weather in tokyo".to_string(),
+            ]
+        );
+        assert_eq!(
+            log[1].iter().flat_map(|req| req.tool_returns()).count(),
+            1,
+            "the tool return precedes the steered prompt in the same request"
+        );
+        // The delivered text left the queue.
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// Multiple steers deliver FIFO at one boundary, whether enqueued before
+    /// the run started or while its tool was executing. Nothing is drained
+    /// into the FIRST request.
+    #[tokio::test]
+    async fn test_steering_multiple_messages_deliver_fifo_at_one_boundary() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<ModelRequest>>::new()));
+        let model = tool_then_text_model(&recorded);
+        let queue = SteeringQueue::new();
+        // Enqueued before the run: must NOT reach the first model request.
+        queue.steer("queued before the run".to_string());
+        let tool_queue = queue.clone();
+
+        let agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                move |_ctx, _args: serde_json::Value| {
+                    tool_queue.steer("first mid-run".to_string());
+                    tool_queue.steer("second mid-run".to_string());
+                    Ok(serdes_ai_tools::ToolReturn::text("ok"))
+                },
+            )
+            .build();
+
+        let options = RunOptions::new().steering(queue.clone());
+        let mut stream = agent
+            .run_stream_with_options("trigger tool then finish", (), options)
+            .await
+            .expect("stream should start");
+
+        let mut delivered = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentStreamEvent::SteeringDelivered { text, .. } =
+                event.expect("stream event should be ok")
+            {
+                delivered.push(text);
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            vec![
+                "queued before the run".to_string(),
+                "first mid-run".to_string(),
+                "second mid-run".to_string(),
+            ]
+        );
+
+        let log = recorded.lock().expect("request log poisoned");
+        assert_eq!(log.len(), 2);
+        assert_eq!(
+            user_texts(&log[0]),
+            vec!["trigger tool then finish".to_string()]
+        );
+        assert_eq!(
+            user_texts(&log[1]),
+            vec![
+                "trigger tool then finish".to_string(),
+                "queued before the run".to_string(),
+                "first mid-run".to_string(),
+                "second mid-run".to_string(),
+            ]
+        );
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// A text-only stream response for the plain-question tests.
+    fn text_only_stream_events(
+    ) -> Vec<Result<ModelResponseStreamEvent, serdes_ai_models::ModelError>> {
+        vec![
+            Ok(ModelResponseStreamEvent::part_start(
+                0,
+                ModelResponsePart::Text(TextPart::new("all done")),
+            )),
+            Ok(ModelResponseStreamEvent::part_end(0)),
+            Ok(ModelResponseStreamEvent::StreamComplete(
+                StreamCompleteEvent::new(FinishReason::Stop),
+            )),
+        ]
+    }
+
+    /// A run that never crosses a tool boundary delivers nothing: the steered
+    /// text stays queued for the caller after the run ends.
+    #[tokio::test]
+    async fn test_steering_text_only_run_leaves_text_queued() {
+        let model = FunctionModel::with_stream(|_messages: &[ModelRequest], _settings| {
+            Box::pin(stream::iter(text_only_stream_events()))
+        });
+
+        let queue = SteeringQueue::new();
+        queue.steer("never delivered".to_string());
+
+        let agent = agent(model).build();
+        let options = RunOptions::new().steering(queue.clone());
+        let mut stream = agent
+            .run_stream_with_options("plain question", (), options)
+            .await
+            .expect("stream should start");
+
+        let mut saw_steering = false;
+        let mut saw_run_complete = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event should be ok") {
+                AgentStreamEvent::SteeringDelivered { .. } => saw_steering = true,
+                AgentStreamEvent::RunComplete { .. } => saw_run_complete = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_complete, "run should complete normally");
+        assert!(!saw_steering, "no tool boundary, so nothing is delivered");
+        assert_eq!(
+            queue.pending_len(),
+            1,
+            "the leftover stays queued for the caller"
+        );
+    }
+
+    /// A leftover from a text-only run survives that run and is delivered by
+    /// a LATER run created from the same queue, at that run's first
+    /// tool-call boundary.
+    #[tokio::test]
+    async fn test_steering_leftover_delivered_by_follow_up_run() {
+        let queue = SteeringQueue::new();
+        queue.steer("carried over".to_string());
+
+        // Run 1: text-only, leaves the steer queued.
+        let text_model = FunctionModel::with_stream(|_messages: &[ModelRequest], _settings| {
+            Box::pin(stream::iter(text_only_stream_events()))
+        });
+        let plain_agent = agent(text_model).build();
+        let options = RunOptions::new().steering(queue.clone());
+        let mut stream = plain_agent
+            .run_stream_with_options("plain question", (), options)
+            .await
+            .expect("stream should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should be ok");
+        }
+        assert_eq!(queue.pending_len(), 1);
+
+        // Run 2: crosses a tool boundary, delivers the leftover.
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<ModelRequest>>::new()));
+        let model = tool_then_text_model(&recorded);
+        let tool_agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                |_ctx, _args: serde_json::Value| Ok(serdes_ai_tools::ToolReturn::text("ok")),
+            )
+            .build();
+        let options = RunOptions::new().steering(queue.clone());
+        let mut stream = tool_agent
+            .run_stream_with_options("trigger tool then finish", (), options)
+            .await
+            .expect("stream should start");
+
+        let mut delivered = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentStreamEvent::SteeringDelivered { text, .. } =
+                event.expect("stream event should be ok")
+            {
+                delivered.push(text);
+            }
+        }
+
+        assert_eq!(delivered, vec!["carried over".to_string()]);
+        let log = recorded.lock().expect("request log poisoned");
+        assert_eq!(
+            user_texts(&log[1]),
+            vec![
+                "trigger tool then finish".to_string(),
+                "carried over".to_string(),
+            ]
+        );
+        assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// The cancellable loop (`new_with_cancel`) drains at the boundary too,
+    /// with the same event-ordering guarantees.
+    #[tokio::test]
+    async fn test_steering_delivered_through_new_with_cancel() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<ModelRequest>>::new()));
+        let model = tool_then_text_model(&recorded);
+        let queue = SteeringQueue::new();
+        let tool_queue = queue.clone();
+
+        let agent = agent(model)
+            .tool_fn(
+                "demo_tool",
+                "Demo tool",
+                move |_ctx, _args: serde_json::Value| {
+                    tool_queue.steer("cancel path steer".to_string());
+                    Ok(serdes_ai_tools::ToolReturn::text("ok"))
+                },
+            )
+            .build();
+
+        let options = RunOptions::new().steering(queue.clone());
+        let token = CancellationToken::new();
+        let mut stream = AgentStream::new_with_cancel(
+            &agent,
+            "trigger tool then finish".into(),
+            (),
+            options,
+            token,
+        )
+        .await
+        .expect("stream should start");
+
+        let mut order: Vec<String> = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event should be ok") {
+                AgentStreamEvent::RequestStart { step } => {
+                    order.push(format!("request_start:{step}"));
+                }
+                AgentStreamEvent::ToolExecuted { ref tool_name, .. }
+                    if tool_name == "demo_tool" =>
+                {
+                    order.push("tool_executed".to_string());
+                }
+                AgentStreamEvent::SteeringDelivered { .. } => order.push("steering".to_string()),
+                AgentStreamEvent::RunComplete { .. } => order.push("run_complete".to_string()),
+                _ => {}
+            }
+        }
+
+        let tool_pos = order
+            .iter()
+            .position(|e| e == "tool_executed")
+            .expect("tool executed event");
+        let steering_pos = order
+            .iter()
+            .position(|e| e == "steering")
+            .expect("steering event");
+        let request2_pos = order
+            .iter()
+            .position(|e| e == "request_start:2")
+            .expect("second RequestStart");
+        assert!(tool_pos < steering_pos, "order was: {order:?}");
+        assert!(steering_pos < request2_pos, "order was: {order:?}");
+
+        let log = recorded.lock().expect("request log poisoned");
+        assert_eq!(log.len(), 2);
+        assert_eq!(
+            user_texts(&log[1]),
+            vec![
+                "trigger tool then finish".to_string(),
+                "cancel path steer".to_string(),
+            ]
+        );
+        assert_eq!(queue.pending_len(), 0);
     }
 }

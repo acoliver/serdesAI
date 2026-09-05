@@ -5,6 +5,7 @@
 use crate::agent::{Agent, EndStrategy};
 use crate::context::{generate_run_id, RunContext, RunUsage, UsageLimits};
 use crate::errors::{AgentRunError, OutputParseError, OutputValidationError};
+use crate::steering::SteeringQueue;
 use chrono::Utc;
 use serde_json::Value as JsonValue;
 use serdes_ai_core::messages::{RetryPromptPart, ToolCallArgs, ToolReturnPart, UserContent};
@@ -54,6 +55,8 @@ pub struct RunOptions {
     pub model_settings: Option<ModelSettings>,
     /// Message history to continue from.
     pub message_history: Option<Vec<ModelRequest>>,
+    /// Steering input queue for this run.
+    pub steering: Option<SteeringQueue>,
     /// Usage limits for this run.
     pub usage_limits: Option<crate::context::UsageLimits>,
     /// Custom metadata.
@@ -77,6 +80,15 @@ impl RunOptions {
     /// Set message history.
     pub fn message_history(mut self, history: Vec<ModelRequest>) -> Self {
         self.message_history = Some(history);
+        self
+    }
+
+    /// Attach a steering input queue.
+    ///
+    /// Queued texts are delivered to the model at tool-call boundaries only;
+    /// see [`SteeringQueue`] for the exact delivery rules.
+    pub fn steering(mut self, queue: SteeringQueue) -> Self {
+        self.steering = Some(queue);
         self
     }
 
