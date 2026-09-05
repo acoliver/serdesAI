@@ -65,6 +65,7 @@ Cargo.lock.bak
 # Logs
 *.log
 logs/
+tmp/
 
 # Test artifacts
 test-output/
