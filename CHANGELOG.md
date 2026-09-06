@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-05
+
+### Added
+- Steering input for streaming runs: a message typed while the agent is working can now reach the running turn instead of waiting for it to finish (`serdes-ai-agent`):
+  - New `SteeringQueue`, cheaply cloneable, constructible standalone, with `steer(text: String)` to enqueue from any task and `pending_len()` to read how many texts are queued but not yet delivered. Internally a tokio unbounded mpsc; the run claims the single receiver for its lifetime.
+  - `RunOptions::steering(queue)` attaches a queue to a run, mirroring `message_history`. Clone the queue beforehand wherever user input arrives.
+  - Queued texts are drained FIFO at the tool-call boundary only: after the step's tool returns are appended to the history and before the loop issues the next model request. Each drained text is appended as its own `ModelRequest` carrying a user prompt part, and one `AgentStreamEvent::SteeringDelivered { step, text }` is emitted per text after that step's `ToolExecuted` events and before the next `RequestStart`, so consumers can persist the user message in transcript order. Both `AgentStream::new` and `AgentStream::new_with_cancel` drain.
+  - Nothing is drained before the first model request, and a run that never crosses a tool-call boundary (text-only completion, error, cancellation) delivers nothing: leftovers stay queued and a later run created from the same queue delivers them at its first tool-call boundary.
+
+### Breaking
+- `AgentStreamEvent` gains `SteeringDelivered { step, text }`. The enum is not `#[non_exhaustive]`, so downstream `match` sites that list every variant without a wildcard need the new arm. Adding a public type and variant is a minor-version bump for this 0.x workspace: `0.4.0` across all crates.
+
 ## [0.3.0] - 2026-08-24
 
 Combined release integrating PRs #51, #52, #53, #54 and #55. Streaming is now a
