@@ -79,6 +79,7 @@ pub mod history;
 pub mod instructions;
 pub mod output;
 pub mod run;
+pub mod steering;
 pub mod stream;
 
 // Re-exports
@@ -105,6 +106,7 @@ pub use output::{
 pub use run::{
     AgentRun, AgentRunResult, CompressionStrategy, ContextCompression, RunOptions, StepResult,
 };
+pub use steering::SteeringQueue;
 pub use stream::{AgentStream, AgentStreamEvent};
 
 // Re-export CancellationToken for convenience
@@ -116,7 +118,7 @@ pub mod prelude {
         agent, agent_with_deps, Agent, AgentBuilder, AgentRun, AgentRunError, AgentRunResult,
         AgentStream, AgentStreamEvent, CancellationToken, CompressionStrategy, ContextCompression,
         EndStrategy, OutputMode, OutputSchema, OutputValidator, RunContext, RunOptions, RunUsage,
-        StepResult, UsageLimits,
+        SteeringQueue, StepResult, UsageLimits,
     };
 }
 
