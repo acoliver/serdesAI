@@ -29,7 +29,7 @@ let agent = Agent::new(model).build()?;
 ## Transports
 
 - **WebSocket** (`wss://`/`ws://`, the default for that scheme): sends
-  `{"type":"response.create","response":{…}}` frames and maps the event
+  `{"type":"response.create","model":…,"input":[…]}` frames and maps the event
   stream (`output_item.added`, `output_text.delta`,
   `reasoning_summary_text.delta`, `function_call_arguments.delta`, …) onto
   `ModelResponseStreamEvent`s, ending with exactly one terminal

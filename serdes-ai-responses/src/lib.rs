@@ -5,7 +5,7 @@
 //! implementation that drives a Responses API endpoint:
 //!
 //! - **WebSocket transport** (`wss://…/v1/responses`): sends
-//!   `{"type":"response.create","response":{…}}` frames and maps the event
+//!   `{"type":"response.create","model":…,"input":[…]}` frames and maps the event
 //!   stream onto `ModelResponseStreamEvent`s.
 //! - **Session-stateful mode**: the model keeps `previous_response_id` in the
 //!   socket session and sends `store: false` plus only the *new* input items

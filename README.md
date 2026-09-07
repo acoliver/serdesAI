@@ -312,7 +312,7 @@ serdes-ai = { version = "0.1", features = ["full"] }
 | `embeddings`          | Embedding models          |         |
 | `graph`               | Graph workflows           |         |
 | `evals`               | Evaluation framework      |         |
-| `macros`              | Procedural macros         | [OK]       |
+| `macros`              | Procedural macros         | ✅       |
 | `open-responses`      | OpenAI Responses API client `Model` (codex / Open Responses profile: WebSocket + HTTP, session-stateful turns) |  |
 | `tracing-integration` | Tracing support           |         |
 | `otel`                | OpenTelemetry support     |         |

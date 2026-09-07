@@ -1,4 +1,4 @@
-//! Error types for the Open Responses server.
+//! Error types for the Open Responses client.
 //!
 //! Errors are surfaced in two envelope shapes:
 //!
