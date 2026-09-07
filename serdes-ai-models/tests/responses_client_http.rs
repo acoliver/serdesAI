@@ -1,18 +1,31 @@
-//! HTTP-transport tests for the responses model against the local rig:
-//! terminal-last SSE streaming and the full-input turns that stand in for
-//! HTTP session chaining until the chaining path lands over HTTP.
-//! Websocket-transport coverage lives in `responses_client_ws.rs`.
+//! HTTP-transport tests for the responses model: rig-driven coverage of
+//! terminal-last SSE streaming and the server-side history lens chained
+//! turns reconstruct, plus scripted fake servers that pin the wire
+//! contracts the rig cannot observe (`store: true`, delta-only chained
+//! input, stale-continuation replay, error-envelope mapping) and the SSE
+//! terminal-event contract. Websocket-transport coverage lives in
+//! `responses_client_ws.rs`.
 
 mod rig;
 mod ws_fakes_common;
 
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use futures::StreamExt;
-use rig::{recording_model, spawn_server};
+use rig::{recording_model, spawn_malformed_sse_server, spawn_server};
 use serdes_ai_core::messages::{
     ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelResponseStreamEvent,
     TextPart,
 };
+use serdes_ai_models::ModelError;
 use serdes_ai_models::model::Model;
+use serdes_ai_models::openai::responses::wire::codes;
 use serdes_ai_models::openai::responses::{OpenAIResponsesModel, Transport};
 use ws_fakes_common::{params, response_turn, settings, system_turn, text_of, user_turn};
 
@@ -22,6 +35,7 @@ fn http_client(addr: std::net::SocketAddr) -> OpenAIResponsesModel {
     OpenAIResponsesModel::new("test-model", "test-key")
         .with_base_url(format!("http://{addr}/v1"))
         .with_transport(Transport::Http)
+        .with_session_chaining(true)
 }
 
 /// A minimal assistant response for extending history in tests.
@@ -40,9 +54,6 @@ fn text_response(text: &str) -> ModelResponse {
 
 #[tokio::test]
 async fn http_stateful_chaining_across_turns() {
-    // HTTP session chaining (previous_response_id) is not implemented yet,
-    // so each turn carries the full history; the rig still reconstructs the
-    // same server-side history lens a chained turn would produce.
     let (model, calls) = recording_model();
     let addr = spawn_server(model).await;
     let client = http_client(addr);
@@ -63,6 +74,11 @@ async fn http_stateful_chaining_across_turns() {
         .await
         .expect("second turn");
 
+    // Turn 1 sees instructions + prompt. Turn 2 chains onto the recorded
+    // response and sends only the new user item; the rig reconstructs the
+    // full server-side history (instructions + prompt + prior response +
+    // prompt = 4). The delta-only wire shape is pinned by
+    // `http_chained_turns_send_store_true_and_delta_only_items` below.
     assert_eq!(text_of(&second), "ok");
     assert_eq!(*calls.lock().unwrap(), vec![2, 4]);
 }
@@ -108,16 +124,6 @@ async fn http_stream_chained_turns_send_only_new_items() {
         let mut terminal = false;
         while let Some(item) = stream.next().await {
             match item.expect("event ok") {
-                // HTTP streaming currently falls back to a buffered turn
-                // (part content arrives on PartStart); collect deltas too
-                // so the drain keeps working once real SSE deltas land.
-                ModelResponseStreamEvent::PartStart(start) => {
-                    if let serdes_ai_core::messages::ModelResponsePart::Text(text_part) =
-                        &start.part
-                    {
-                        text.push_str(&text_part.content);
-                    }
-                }
                 ModelResponseStreamEvent::PartDelta(delta) => {
                     if let serdes_ai_core::messages::ModelResponsePartDelta::Text(text_delta) =
                         delta.delta
@@ -144,10 +150,8 @@ async fn http_stream_chained_turns_send_only_new_items() {
     let second_text = drain(client, history).await;
     assert_eq!(second_text, "ok");
 
-    // Turn 2 carries the full history (HTTP chaining is not implemented
-    // yet): instructions + first prompt + prior response + second prompt.
-    // A turn that dropped the prior response or double-counted the system
-    // turn would not reconstruct this lens.
+    // Turn 2 must send only the new user item; a client that replayed the
+    // prior ModelResponse would show 5 instead of 4.
     assert_eq!(*calls.lock().unwrap(), vec![2, 4]);
 }
 
@@ -173,7 +177,7 @@ async fn http_conversations_stay_isolated() {
         .expect("conversation B turn 1");
     assert_eq!(text_of(&b), "ok");
 
-    // Conversation A's second turn reconstructs its own history.
+    // Conversation A's second turn chains onto its own last response.
     convo_a.push(response_turn(first));
     convo_a.push(user_turn("second"));
     let second = client
@@ -182,8 +186,222 @@ async fn http_conversations_stay_isolated() {
         .expect("conversation A turn 2");
     assert_eq!(text_of(&second), "ok");
 
-    // A1 sees 2; B1 sees 2 (a fresh conversation, not A's history); A2
-    // sees its own full 4. The requests are stateless full input until
-    // HTTP chaining lands, so this pins the per-conversation history lens.
+    // A1 sees 2; B1 sees 2 (a fresh conversation, not A's chain); A2 sees
+    // the chained 4. A client that keyed chains per model instead of per
+    // conversation would show B1 chaining onto A's response.
     assert_eq!(*calls.lock().unwrap(), vec![2, 2, 4]);
+}
+
+// ---------------------------------------------------------------------------
+// Wire contracts against scripted fake servers
+// ---------------------------------------------------------------------------
+
+/// Behavior script for the scripted fake responses server.
+#[derive(Debug, Clone, Copy)]
+enum FakeMode {
+    /// Accept unchained turns; reject turns carrying a
+    /// `previous_response_id` with `previous_response_not_found`.
+    StaleChain,
+    /// Reject every turn with a `model_error` envelope.
+    EnvelopeEveryTurn,
+    /// Reject every turn with a 500 non-JSON body.
+    PlainTextEveryTurn,
+}
+
+/// Request bodies the fake server received, in order.
+type CapturedBodies = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// Spawn a scripted single-route responses server; returns its address and
+/// the request bodies it received.
+async fn spawn_fake_server(mode: FakeMode) -> (std::net::SocketAddr, CapturedBodies) {
+    let bodies: CapturedBodies = Arc::default();
+    let router = Router::new()
+        .route(
+            "/v1/responses",
+            post(handle_fake_turn).with_state((mode, Arc::clone(&bodies))),
+        )
+        .with_state((mode, Arc::clone(&bodies)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (addr, bodies)
+}
+
+/// The completed-response body the fake server answers accepted turns
+/// with; `id` follows the number of requests seen so far.
+fn completed_body(id: &str, request: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "object": "response",
+        "created_at": 1,
+        "model": request["model"],
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "id": format!("msg_{id}"),
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+        }],
+    })
+}
+
+async fn handle_fake_turn(
+    State((mode, bodies)): State<(FakeMode, CapturedBodies)>,
+    body: Bytes,
+) -> Response {
+    let request: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    bodies.lock().unwrap().push(request.clone());
+    let chained = request
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null());
+
+    let rejection = match mode {
+        FakeMode::StaleChain => {
+            chained.then_some((StatusCode::NOT_FOUND, codes::PREVIOUS_RESPONSE_NOT_FOUND))
+        }
+        FakeMode::EnvelopeEveryTurn => Some((StatusCode::BAD_GATEWAY, "model_error")),
+        FakeMode::PlainTextEveryTurn => None,
+    };
+    if let Some((status, code)) = rejection {
+        let envelope = serde_json::json!({
+            "error": {"code": code, "message": format!("rejected: {code}")},
+        });
+        return (status, axum::Json(envelope)).into_response();
+    }
+    if matches!(mode, FakeMode::PlainTextEveryTurn) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "backend exploded").into_response();
+    }
+
+    let id = format!("resp_{}", bodies.lock().unwrap().len());
+    axum::Json(completed_body(&id, &request)).into_response()
+}
+
+#[tokio::test]
+async fn http_chained_turns_send_store_true_and_delta_only_items() {
+    let (addr, bodies) = spawn_fake_server(FakeMode::StaleChain).await;
+    let client = http_client(addr);
+
+    let mut history = vec![system_turn("be brief"), user_turn("first")];
+    let first = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("first turn");
+    history.push(response_turn(first));
+    history.push(user_turn("second"));
+
+    // The fake rejects the chained turn with previous_response_not_found;
+    // the client must clear the chain and replay the full input.
+    let second = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("second turn after stale-continuation replay");
+    assert_eq!(text_of(&second), "ok");
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3, "the chained turn was rejected once");
+    // Turn 1: full input, persisted for chaining.
+    assert_eq!(bodies[0]["store"], serde_json::Value::Bool(true));
+    assert!(bodies[0]["previous_response_id"].is_null());
+    assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 1);
+    // Turn 2 chains with store:true and only the new user item.
+    assert_eq!(bodies[1]["previous_response_id"], "resp_1");
+    assert_eq!(bodies[1]["store"], serde_json::Value::Bool(true));
+    assert_eq!(
+        bodies[1]["input"].as_array().unwrap().len(),
+        1,
+        "chained turn sends only the new input item"
+    );
+    // The stale-continuation replay sends the full input without the id.
+    assert!(bodies[2]["previous_response_id"].is_null());
+    assert_eq!(
+        bodies[2]["input"].as_array().unwrap().len(),
+        3,
+        "replay carries the full input (user, assistant echo, user)"
+    );
+}
+
+#[tokio::test]
+async fn http_error_envelope_surfaces_as_provider_error() {
+    let (addr, _bodies) = spawn_fake_server(FakeMode::EnvelopeEveryTurn).await;
+    let client = http_client(addr);
+
+    let error = client
+        .request(&[user_turn("hello")], &settings(), &params())
+        .await
+        .expect_err("turn must fail");
+
+    match &error {
+        ModelError::Provider {
+            provider,
+            code,
+            status,
+            ..
+        } => {
+            assert_eq!(provider, "openai");
+            assert_eq!(code, "model_error");
+            assert_eq!(*status, Some(502));
+        }
+        other => panic!("expected a provider error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn http_non_envelope_error_stays_transport_error() {
+    let (addr, _bodies) = spawn_fake_server(FakeMode::PlainTextEveryTurn).await;
+    let client = http_client(addr);
+
+    let error = client
+        .request(&[user_turn("hello")], &settings(), &params())
+        .await
+        .expect_err("turn must fail");
+
+    match &error {
+        ModelError::Http { status, .. } => assert_eq!(*status, 500),
+        other => panic!("expected a transport error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn http_done_without_terminal_event_fails_the_stream() {
+    let addr = spawn_malformed_sse_server().await;
+    let client = http_client(addr);
+
+    let history = vec![user_turn("hello")];
+    let mut stream = client
+        .request_stream(&history, &settings(), &params())
+        .await
+        .expect("stream starts");
+
+    let mut events = Vec::new();
+    while let Some(item) = stream.next().await {
+        events.push(item);
+    }
+
+    // The malformed route streams a delta and then the [DONE] sentinel
+    // with no terminal event: the delta reaches the caller, no terminal
+    // event may be synthesized, and the sentinel surfaces as an error.
+    let deltas = events
+        .iter()
+        .filter(|item| matches!(item, Ok(ModelResponseStreamEvent::PartDelta(_))))
+        .count();
+    assert_eq!(deltas, 1, "the streamed delta reached the caller");
+    assert!(
+        !events
+            .iter()
+            .any(|item| matches!(item, Ok(ModelResponseStreamEvent::StreamComplete(_)))),
+        "no terminal event may follow a stream without one"
+    );
+    assert!(
+        matches!(events.last(), Some(Err(_))),
+        "error is the last item"
+    );
+    match &events.last() {
+        Some(Err(ModelError::IncompleteStream(message))) => {
+            assert!(message.contains("[DONE]"), "got: {message}");
+        }
+        other => panic!("expected an incomplete-stream error, got {other:?}"),
+    }
 }

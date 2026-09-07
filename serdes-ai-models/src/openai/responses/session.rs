@@ -3,10 +3,12 @@
 //! Conversations are keyed by the fingerprint of the history's first
 //! request, so different conversations through one model instance stay
 //! isolated and run concurrently; each turn only sends the new input items
-//! of its own conversation. The websocket transport consumes this state
-//! today; the HTTP chaining path shares it in a later stage.
-// With the websocket feature compiled out nothing reaches these items yet;
-// that is expected, not dead code.
+//! of its own conversation. Both transports consume this state: the
+//! websocket keeps a live socket per conversation, and HTTP chaining
+//! records each completed turn's response id with `store: true`.
+// The EventSink helpers serve only the websocket transport; with that
+// feature compiled out they are unreachable, which is expected, not dead
+// code. The conversation state itself serves both transports.
 #![cfg_attr(not(feature = "responses-ws"), allow(dead_code))]
 
 use crate::error::ModelError;

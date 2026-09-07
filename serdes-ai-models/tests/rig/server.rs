@@ -18,12 +18,14 @@ use axum::{
     extract::{State, ws::WebSocketUpgrade},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use serdes_ai_models::openai::responses::events::StreamEvent;
-use serdes_ai_models::openai::responses::wire::CreateResponseRequest;
+use serdes_ai_models::openai::responses::wire::{
+    CreateResponseRequest, OutputItem, OutputItemStatus,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -213,4 +215,48 @@ async fn upgrade_websocket(
 /// GET /health.
 async fn health() -> &'static str {
     "ok"
+}
+
+/// A test-only SSE turn that streams a delta and the `data: [DONE]`
+/// sentinel but never a terminal `response.completed`, `response.failed`,
+/// or `response.incomplete` event. Contract tests point the client here to
+/// pin that the sentinel without a terminal event surfaces as an error
+/// instead of ending the stream silently.
+pub fn malformed_sse_router() -> Router {
+    Router::new().route("/v1/responses", post(malformed_sse_turn))
+}
+
+async fn malformed_sse_turn() -> Response {
+    let events = [
+        StreamEvent::OutputItemAdded {
+            sequence_number: 0,
+            output_index: 0,
+            item: OutputItem::Message {
+                id: "msg_malformed".to_string(),
+                role: "assistant".to_string(),
+                status: OutputItemStatus::InProgress,
+                content: Vec::new(),
+            },
+        },
+        StreamEvent::OutputTextDelta {
+            sequence_number: 1,
+            item_id: "msg_malformed".to_string(),
+            output_index: 0,
+            content_index: 0,
+            delta: "ok".to_string(),
+        },
+    ];
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(&serde_json::to_string(&event).expect("event serializes"));
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(body))
+        .expect("static response body")
 }

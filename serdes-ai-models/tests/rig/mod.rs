@@ -41,7 +41,7 @@ pub mod store;
 pub mod websocket;
 
 use crate::rig::engine::ResponsesEngine;
-use crate::rig::server::ResponsesServer;
+use crate::rig::server::{ResponsesServer, malformed_sse_router};
 use crate::rig::websocket::WebSocketSessionConfig;
 use serdes_ai_models::mock::FunctionModel;
 use std::net::SocketAddr;
@@ -97,6 +97,19 @@ pub async fn spawn_server_with_ws_config(
     let engine = ResponsesEngine::new(Arc::new(model));
     let server = ResponsesServer::new(engine).with_websocket_config(websocket_config);
     let router = server.router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    addr
+}
+
+/// Start the malformed-SSE contract server on an ephemeral port: a turn
+/// whose SSE body streams a delta and the `data: [DONE]` sentinel but
+/// never a terminal event.
+pub async fn spawn_malformed_sse_server() -> SocketAddr {
+    let router = malformed_sse_router();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

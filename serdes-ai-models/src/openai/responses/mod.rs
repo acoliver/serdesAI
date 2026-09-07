@@ -19,6 +19,8 @@ pub mod events;
 
 mod convert;
 
+mod http;
+
 mod session;
 
 pub use session::Transport;
@@ -541,7 +543,7 @@ pub struct OutputTokensDetails {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RequestOverlay {
     /// Requests already delivered on the session and excluded from the
-    /// input (websocket continuation turns); HTTP replays everything.
+    /// input (continuation turns on both transports).
     pub(crate) skip: usize,
     /// The `stream` key: HTTP always sends it, websocket frames omit it.
     pub(crate) stream: Option<bool>,
@@ -739,9 +741,9 @@ impl OpenAIResponsesModel {
     ///
     /// With chaining on, turns keep per-conversation session state
     /// (`previous_response_id` plus the requests already delivered) and
-    /// send only each turn's new input items. HTTP chaining is not
-    /// implemented yet; selecting chaining over HTTP fails the request
-    /// with a configuration error.
+    /// send only each turn's new input items, on both transports: the
+    /// websocket keeps a live socket per conversation with `store: false`,
+    /// HTTP persists every turn with `store: true` and streams SSE.
     #[must_use]
     pub fn with_session_chaining(mut self, chaining: bool) -> Self {
         self.chaining = chaining;
@@ -759,12 +761,14 @@ impl OpenAIResponsesModel {
         }
     }
 
-    /// Build the request body for an HTTP turn.
+    /// Build the request body for a non-chaining HTTP turn.
     ///
     /// The mapping itself is shared with the websocket transport (see
-    /// [`Self::compose_request`]); HTTP pins the transport fields: full
-    /// replay, `stream` always sent, `store` omitted, routing fields from
-    /// the model settings.
+    /// [`Self::compose_request`]); the non-chaining overlay pins the
+    /// transport fields: full replay, `stream` always sent, `store`
+    /// omitted, routing fields from the model settings. Chained turns
+    /// compose through the `http` module's `build_chained_request`
+    /// instead.
     fn build_request(
         &self,
         messages: &[ModelRequest],
@@ -904,6 +908,14 @@ impl OpenAIResponsesModel {
             };
         }
 
+        // Open Responses error envelopes (a wire code without a `type`)
+        // are provider errors like every other transport path produces;
+        // only bodies without any envelope degrade to the bare status
+        // error.
+        if let Ok(envelope) = serde_json::from_str::<wire::HttpErrorEnvelope>(body) {
+            return http::envelope_error(&envelope, status);
+        }
+
         ModelError::http(status, body)
     }
 }
@@ -959,15 +971,6 @@ fn ws_stream(
     ))
 }
 
-/// The HTTP chaining path is a later stage; selecting chaining over HTTP
-/// fails fast instead of silently sending unchained turns.
-fn http_chaining_unavailable() -> ModelError {
-    ModelError::Configuration(
-        "http session chaining is not implemented yet; disable chaining or use the websocket transport"
-            .to_string(),
-    )
-}
-
 #[async_trait]
 impl Model for OpenAIResponsesModel {
     fn name(&self) -> &str {
@@ -992,7 +995,7 @@ impl Model for OpenAIResponsesModel {
             Transport::WebSocket => ws_request(self, messages, settings, params).await,
             Transport::Http => {
                 if self.chaining {
-                    return Err(http_chaining_unavailable());
+                    return http::request(self, messages, settings, params).await;
                 }
                 let body = self.build_request(messages, settings, params, false)?;
 
@@ -1032,9 +1035,10 @@ impl Model for OpenAIResponsesModel {
 
     /// Stream a response.
     ///
-    /// The websocket transport streams wire events natively; HTTP keeps the
-    /// non-streaming request fallback, replaying the buffered completed
-    /// response as part events and ending with one terminal event.
+    /// The websocket transport streams wire events natively. Chained HTTP
+    /// turns stream SSE natively as well; without chaining, HTTP keeps the
+    /// non-streaming request fallback: the buffered completed response is
+    /// replayed as part events and ends with one terminal event.
     async fn request_stream(
         &self,
         messages: &[ModelRequest],
@@ -1045,11 +1049,13 @@ impl Model for OpenAIResponsesModel {
             Transport::WebSocket => ws_stream(self, messages, settings, params),
             Transport::Http => {
                 if self.chaining {
-                    return Err(http_chaining_unavailable());
+                    return http::stream(self, messages, settings, params);
                 }
 
-                // For now, fall back to non-streaming
-                // TODO: Implement proper streaming with ResponsesStreamParser
+                // Deliberate fallback: a stateless caller replays its full
+                // input every turn, so buffering the completed response
+                // costs nothing chaining would save; chained turns stream
+                // SSE natively (see http::stream).
                 let response = self.request(messages, settings, params).await?;
 
                 let ModelResponse {
@@ -1794,5 +1800,46 @@ mod tests {
         );
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    /// An Open Responses error envelope on the non-chaining HTTP path
+    /// surfaces as a provider error with the wire code; the bare transport
+    /// error is reserved for bodies without an envelope.
+    #[tokio::test]
+    async fn http_error_envelope_maps_to_provider_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/responses"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": "previous_response_not_found",
+                        "message": "resp_x is gone"
+                    }
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let model = OpenAIResponsesModel::new("o3-mini", "sk-test").with_base_url(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let error = model
+            .request(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .expect_err("turn must fail");
+
+        match &error {
+            ModelError::Provider { code, status, .. } => {
+                assert_eq!(code, "previous_response_not_found");
+                assert_eq!(*status, Some(404));
+            }
+            other => panic!("expected a provider error, got {other:?}"),
+        }
     }
 }
