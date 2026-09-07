@@ -115,6 +115,27 @@ impl From<WsMessage> for WsStreamMessage {
     }
 }
 
+/// Build the handshake request from the URL, then apply configured headers.
+fn build_request(
+    config: &WebSocketConfig,
+) -> StreamResult<tokio_tungstenite::tungstenite::http::Request<()>> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request = config
+        .url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| StreamError::Connection(format!("invalid websocket url: {e}")))?;
+    for (name, value) in &config.headers {
+        let name = tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| StreamError::Connection(format!("invalid header name '{name}': {e}")))?;
+        let value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(value)
+            .map_err(|e| StreamError::Connection(format!("invalid header value: {e}")))?;
+        request.headers_mut().insert(name, value);
+    }
+    Ok(request)
+}
+
 /// WebSocket stream wrapper for LLM streaming.
 pub struct WebSocketStream {
     inner: TungsteniteStream<MaybeTlsStream<TcpStream>>,
@@ -123,9 +144,21 @@ pub struct WebSocketStream {
 
 impl WebSocketStream {
     /// Connect to a WebSocket endpoint.
+    ///
+    /// Configured headers (e.g. `Authorization` from
+    /// [`WebSocketConfig::with_auth`]) are applied to the handshake request,
+    /// and the connection attempt is bounded by the configured timeout.
     pub async fn connect(config: WebSocketConfig) -> StreamResult<Self> {
-        let (ws_stream, _) = connect_async(&config.url)
+        let request = build_request(&config)?;
+        let timeout = std::time::Duration::from_secs(config.timeout);
+        let (ws_stream, _) = tokio::time::timeout(timeout, connect_async(request))
             .await
+            .map_err(|_| {
+                StreamError::Connection(format!(
+                    "websocket connect timed out after {}s",
+                    config.timeout
+                ))
+            })?
             .map_err(|e| StreamError::Connection(e.to_string()))?;
 
         Ok(Self {
@@ -294,6 +327,26 @@ mod tests {
         assert_eq!(config.timeout, 60);
         assert_eq!(config.ping_interval, Some(15));
         assert!(config.headers.iter().any(|(k, _)| k == "Authorization"));
+    }
+
+    #[test]
+    fn configured_headers_reach_handshake_request() {
+        let config = WebSocketConfig::new("wss://example.com/stream")
+            .with_auth("token123")
+            .with_header("OpenAI-Beta", "responses=experimental");
+
+        let request = build_request(&config).expect("request builds");
+        let headers = request.headers();
+        assert_eq!(
+            headers.get("Authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer token123")
+        );
+        assert_eq!(
+            headers.get("OpenAI-Beta").and_then(|v| v.to_str().ok()),
+            Some("responses=experimental")
+        );
+        // tungstenite fills in the websocket handshake headers from the URL.
+        assert!(headers.get("host").is_some());
     }
 
     #[test]
