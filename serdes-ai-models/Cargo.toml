@@ -70,3 +70,10 @@ wiremock = { workspace = true }
 mockall = { workspace = true }
 rstest = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# Open Responses test rig (tests/rig): local axum server, engine, store.
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+http-body = "1"
+uuid = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
