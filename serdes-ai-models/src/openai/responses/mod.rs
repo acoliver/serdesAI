@@ -9,6 +9,14 @@
 //! - Supports built-in tools (web search, code interpreter, file search, etc.)
 //! - Different output format with `ResponseOutputItem` variants
 
+/// The Open Responses wire model: request/response types, tools, and error
+/// envelopes defined by the Open Responses specification.
+pub mod wire;
+
+/// The Open Responses streaming event model and its translation onto
+/// serdesAI model stream events.
+pub mod events;
+
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::{ModelProfile, openai_o1_profile};
