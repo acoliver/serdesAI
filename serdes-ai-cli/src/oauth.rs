@@ -202,12 +202,9 @@ async fn exchange_code_for_token(
 
 /// Generate PKCE code verifier
 fn generate_code_verifier() -> String {
-    use rand::Rng;
-
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let mut rng = rand::thread_rng();
     (0..128)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .map(|_| CHARSET[rand::random_range(0..CHARSET.len())] as char)
         .collect()
 }
 
@@ -221,12 +218,9 @@ fn generate_code_challenge(verifier: &str) -> String {
 
 /// Generate random state parameter
 fn generate_state() -> String {
-    use rand::Rng;
-
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::thread_rng();
     (0..32)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .map(|_| CHARSET[rand::random_range(0..CHARSET.len())] as char)
         .collect()
 }
 
