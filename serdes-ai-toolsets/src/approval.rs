@@ -144,14 +144,14 @@ pub mod checkers {
     use serdes_ai_tools::{RunContext, ToolDefinition};
 
     /// Always require approval.
-    pub fn always<Deps>(
-    ) -> impl Fn(&RunContext<Deps>, &ToolDefinition, &JsonValue) -> bool + Send + Sync {
+    pub fn always<Deps>()
+    -> impl Fn(&RunContext<Deps>, &ToolDefinition, &JsonValue) -> bool + Send + Sync {
         |_, _, _| true
     }
 
     /// Never require approval.
-    pub fn never<Deps>(
-    ) -> impl Fn(&RunContext<Deps>, &ToolDefinition, &JsonValue) -> bool + Send + Sync {
+    pub fn never<Deps>()
+    -> impl Fn(&RunContext<Deps>, &ToolDefinition, &JsonValue) -> bool + Send + Sync {
         |_, _, _| false
     }
 

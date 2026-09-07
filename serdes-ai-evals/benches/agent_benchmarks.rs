@@ -1,6 +1,6 @@
 //! Benchmarks for agent evaluation.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn benchmark_evaluator(_c: &mut Criterion) {
     // Placeholder benchmark - will be implemented

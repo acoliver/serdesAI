@@ -62,10 +62,13 @@ impl ProviderRegistry {
     pub fn infer_provider(&self, model: &str) -> Result<(BoxedProvider, String), ProviderError> {
         // Check for explicit prefix
         if let Some((provider_name, model_name)) = model.split_once(':') {
-            if let Some(provider) = self.get(provider_name) {
-                return Ok((provider, model_name.to_string()));
-            } else {
-                return Err(ProviderError::UnknownProvider(provider_name.to_string()));
+            match self.get(provider_name) {
+                Some(provider) => {
+                    return Ok((provider, model_name.to_string()));
+                }
+                _ => {
+                    return Err(ProviderError::UnknownProvider(provider_name.to_string()));
+                }
             }
         }
 
@@ -156,8 +159,8 @@ pub fn global_registry() -> &'static ProviderRegistry {
 mod tests {
     use super::*;
     use crate::Provider;
-    use reqwest::header::HeaderMap;
     use reqwest::Client;
+    use reqwest::header::HeaderMap;
     use serdes_ai_models::ModelProfile;
 
     #[derive(Debug)]

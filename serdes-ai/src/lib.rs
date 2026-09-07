@@ -298,7 +298,7 @@ pub use serdes_ai_core::{RequestUsage, RunUsage, UsageLimits};
 
 // Format
 pub use serdes_ai_core::{
-    format_as_xml, format_as_xml_with_options, XmlFormatError, XmlFormatOptions,
+    XmlFormatError, XmlFormatOptions, format_as_xml, format_as_xml_with_options,
 };
 
 // Agent
@@ -309,7 +309,7 @@ pub use serdes_ai_agent::{
 
 // Models
 pub use serdes_ai_models::Model;
-pub use serdes_ai_models::{build_model_extended, build_model_with_config, ExtendedModelConfig};
+pub use serdes_ai_models::{ExtendedModelConfig, build_model_extended, build_model_with_config};
 
 #[cfg(feature = "openai")]
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
@@ -368,8 +368,8 @@ pub use serdes_ai_retries::{
 
 // Direct model access
 pub use direct::{
-    model_request, model_request_stream, model_request_stream_sync, model_request_sync,
-    DirectError, ModelSpec, StreamedResponseSync,
+    DirectError, ModelSpec, StreamedResponseSync, model_request, model_request_stream,
+    model_request_stream_sync, model_request_sync,
 };
 
 // ============================================================================
@@ -461,14 +461,14 @@ pub mod prelude {
     };
 
     // Direct model access
-    pub use crate::direct::{model_request, model_request_stream, DirectError, ModelSpec};
+    pub use crate::direct::{DirectError, ModelSpec, model_request, model_request_stream};
 
     // Format
-    pub use crate::core::{format_as_xml, XmlFormatOptions};
+    pub use crate::core::{XmlFormatOptions, format_as_xml};
 
     // Macros
     #[cfg(feature = "macros")]
-    pub use crate::{tool, OutputSchema as DeriveOutputSchema, Tool as DeriveTool};
+    pub use crate::{OutputSchema as DeriveOutputSchema, Tool as DeriveTool, tool};
 
     // MCP
     #[cfg(feature = "mcp")]

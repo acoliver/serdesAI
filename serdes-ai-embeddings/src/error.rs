@@ -103,11 +103,13 @@ mod tests {
     #[test]
     fn test_retryable() {
         assert!(EmbeddingError::RateLimited { retry_after: None }.is_retryable());
-        assert!(EmbeddingError::Http {
-            status: 500,
-            body: String::new()
-        }
-        .is_retryable());
+        assert!(
+            EmbeddingError::Http {
+                status: 500,
+                body: String::new()
+            }
+            .is_retryable()
+        );
         assert!(!EmbeddingError::Api("bad".into()).is_retryable());
     }
 }

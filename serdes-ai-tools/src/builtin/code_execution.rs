@@ -10,12 +10,12 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::{
+    RunContext,
     definition::ToolDefinition,
     errors::ToolError,
     return_types::{ToolResult, ToolReturn},
     schema::SchemaBuilder,
     tool::Tool,
-    RunContext,
 };
 
 /// Configuration for the code execution tool.
@@ -469,9 +469,11 @@ mod tests {
             .get("required")
             .and_then(|value| value.as_array())
             .unwrap();
-        assert!(required
-            .iter()
-            .any(|value| value.as_str() == Some("language")));
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("language"))
+        );
         assert!(required.iter().any(|value| value.as_str() == Some("code")));
     }
 

@@ -4,7 +4,7 @@ use crate::config::{RetryConfig, RetryPolicy};
 use crate::error::{RetryFailure, RetryResult, RetryableError};
 use std::future::Future;
 use std::time::Duration;
-use tokio::time::{sleep, sleep_until, timeout_at, Instant};
+use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 use tracing::{debug, warn};
 
 /// Classification returned to the generic retry executor.
@@ -315,8 +315,8 @@ impl<T, E: Into<RetryableError>> IntoRetryable<T> for Result<T, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[tokio::test]
     async fn test_with_retry_immediate_success() {

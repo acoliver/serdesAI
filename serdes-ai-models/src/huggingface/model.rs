@@ -10,9 +10,9 @@ use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::ModelProfile;
 use serdes_ai_core::{
-    messages::{ModelResponseStreamEvent, StreamCompleteEvent},
     FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
     TextPart, UserContent, UserContentPart,
+    messages::{ModelResponseStreamEvent, StreamCompleteEvent},
 };
 
 /// HuggingFace Inference API base URL.

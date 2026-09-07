@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use serdes_ai_core::{
-    messages::ModelResponseStreamEvent, ModelRequest, ModelResponse, ModelSettings,
+    ModelRequest, ModelResponse, ModelSettings, messages::ModelResponseStreamEvent,
 };
 use serdes_ai_models::{BoxedModel, Model, ModelError, ModelRequestParameters, StreamedResponse};
 use thiserror::Error;

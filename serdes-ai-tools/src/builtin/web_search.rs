@@ -26,12 +26,12 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
 use crate::{
+    RunContext,
     definition::ToolDefinition,
     errors::ToolError,
     return_types::{ToolResult, ToolReturn},
     schema::SchemaBuilder,
     tool::Tool,
-    RunContext,
 };
 
 /// Errors that can occur during web search configuration or usage.

@@ -1,8 +1,8 @@
 //! Google AI / Vertex AI provider implementations.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
 
 /// Google AI (Generative Language API) provider.

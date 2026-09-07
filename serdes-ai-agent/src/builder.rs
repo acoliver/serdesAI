@@ -58,7 +58,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use serdes_ai_core::ModelSettings;
 use serdes_ai_models::{Model, ModelError};
-use serdes_ai_tools::{ToolDefinition, ToolError, ToolReturn};
+use serdes_ai_tools::{ObjectJsonSchema, ToolDefinition, ToolError, ToolReturn};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -485,12 +485,18 @@ where
         self
     }
 
-    /// Add a tool from a sync function.
+    /// Add a tool from a function, describing its parameters.
+    ///
+    /// The schema is what tells the model which arguments the tool takes. A
+    /// tool registered without one advertises no parameters at all, so a model
+    /// has to guess the argument names and the call is rejected when it guesses
+    /// differently — see [`Self::tool_fn`].
     #[must_use]
-    pub fn tool_fn<F, Args>(
+    pub fn tool_fn_with_schema<F, Args>(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
+        parameters: JsonValue,
         f: F,
     ) -> Self
     where
@@ -498,7 +504,8 @@ where
         Args: DeserializeOwned + Send + 'static,
     {
         let tool_name = name.into();
-        let definition = ToolDefinition::new(tool_name.clone(), description.into());
+        let definition =
+            ToolDefinition::new(tool_name.clone(), description.into()).with_parameters(parameters);
 
         let executor = SyncFnExecutor {
             func: Arc::new(move |ctx, args: JsonValue| {
@@ -519,19 +526,21 @@ where
 
     /// Add a tool from an async function.
     #[must_use]
-    pub fn tool_fn_async<F, Fut, Args>(
+    pub fn tool_fn_async_with_schema<F, Fut, Args>(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
+        parameters: JsonValue,
         f: F,
     ) -> Self
     where
         F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + Sync + 'static,
-        Args: DeserializeOwned + Send + Sync + 'static,
+        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + 'static,
+        Args: DeserializeOwned + Send + 'static,
     {
         let tool_name = name.into();
-        let definition = ToolDefinition::new(tool_name.clone(), description.into());
+        let definition =
+            ToolDefinition::new(tool_name.clone(), description.into()).with_parameters(parameters);
 
         let executor = AsyncFnExecutor {
             func: Arc::new(f),
@@ -545,6 +554,44 @@ where
             max_retries: self.max_tool_retries,
         });
         self
+    }
+
+    /// Add a tool from a function.
+    ///
+    /// The tool advertises **no parameters**. Prefer
+    /// [`Self::tool_fn_with_schema`] for any tool that takes arguments: without
+    /// a schema the model is not told what to pass, and a call built from
+    /// guessed argument names fails to deserialize.
+    #[must_use]
+    pub fn tool_fn<F, Args>(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        f: F,
+    ) -> Self
+    where
+        F: Fn(&RunContext<Deps>, Args) -> Result<ToolReturn, ToolError> + Send + Sync + 'static,
+        Args: DeserializeOwned + Send + 'static,
+    {
+        self.tool_fn_with_schema(name, description, empty_parameters(), f)
+    }
+
+    /// Add a tool from an async function.
+    ///
+    /// The tool advertises **no parameters** — see [`Self::tool_fn`].
+    #[must_use]
+    pub fn tool_fn_async<F, Fut, Args>(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        f: F,
+    ) -> Self
+    where
+        F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + 'static,
+        Args: DeserializeOwned + Send + 'static,
+    {
+        self.tool_fn_async_with_schema(name, description, empty_parameters(), f)
     }
 
     /// Set custom output schema.
@@ -676,12 +723,30 @@ where
 
         // Pre-compute tool definitions at build time.
         // This avoids cloning tool definitions on every agent step.
-        let cached_tool_defs = Arc::new(
-            self.tools
-                .iter()
-                .map(|t| t.definition.clone())
-                .collect::<Vec<_>>(),
-        );
+        let mut tool_defs = self
+            .tools
+            .iter()
+            .map(|t| t.definition.clone())
+            .collect::<Vec<_>>();
+
+        // A tool-mode output schema has to advertise its tool, or the model is
+        // never told the tool exists and can never produce structured output.
+        // The definition is not added to `self.tools`: it has no executor, and
+        // `is_output_tool` intercepts the call before tool dispatch.
+        if let (Some(name), Some(schema)) = (output_schema.tool_name(), output_schema.json_schema())
+        {
+            if let Ok(parameters) = serde_json::from_value::<ObjectJsonSchema>(schema) {
+                tool_defs.push(
+                    ToolDefinition::new(
+                        name,
+                        "Return the final result. Call this when the task is complete.",
+                    )
+                    .with_parameters(parameters),
+                );
+            }
+        }
+
+        let cached_tool_defs = Arc::new(tool_defs);
 
         Agent {
             model: self.model,
@@ -829,15 +894,15 @@ where
 {
     func: Arc<F>,
     tool_name: String,
-    _phantom: PhantomData<(Deps, Args, Fut)>,
+    _phantom: PhantomData<fn(&RunContext<Deps>, Args)>,
 }
 
 #[async_trait::async_trait]
 impl<F, Deps, Args, Fut> ToolExecutor<Deps> for AsyncFnExecutor<F, Deps, Args, Fut>
 where
     F: Fn(&RunContext<Deps>, Args) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<ToolReturn, ToolError>> + Send + Sync,
-    Args: DeserializeOwned + Send + Sync,
+    Fut: Future<Output = Result<ToolReturn, ToolError>> + Send,
+    Args: DeserializeOwned + Send,
     Deps: Send + Sync,
 {
     async fn execute(
@@ -861,6 +926,11 @@ pub fn agent_with_deps<Deps: Send + Sync + 'static, M: Model + 'static>(
     model: M,
 ) -> AgentBuilder<Deps, String> {
     AgentBuilder::new(model)
+}
+
+/// The schema for a tool that takes no arguments.
+fn empty_parameters() -> JsonValue {
+    serde_json::json!({"type": "object", "properties": {}})
 }
 
 #[cfg(test)]
@@ -1064,5 +1134,117 @@ mod tests {
             }
             Ok(_) => panic!("Expected error for unknown provider"),
         }
+    }
+
+    // ===== Structured output must be advertised to the model =====
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Answer {
+        #[allow(dead_code)]
+        value: String,
+    }
+
+    fn answer_schema() -> JsonValue {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        })
+    }
+
+    fn advertised(agent: &Agent<(), Answer>) -> Vec<String> {
+        agent
+            .tool_definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn output_tool_is_advertised_to_the_model() {
+        // Without this the model is never told the tool exists, so it has no way
+        // to produce structured output at all.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        assert!(
+            advertised(&agent).contains(&"submit_answer".to_string()),
+            "output tool missing from the definitions sent to the model"
+        );
+    }
+
+    #[test]
+    fn the_advertised_output_tool_carries_its_schema() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        let defs = agent.tool_definitions();
+        let tool = defs
+            .iter()
+            .find(|d| d.name == "submit_answer")
+            .expect("output tool missing");
+
+        assert!(
+            tool.parameters().get("properties").is_some(),
+            "the output tool must carry its parameter schema"
+        );
+    }
+
+    #[test]
+    fn advertising_the_output_tool_keeps_regular_tools() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .tool_fn("echo", "echo", |_c: &RunContext<()>, _a: JsonValue| {
+                    Ok(ToolReturn::text("ok"))
+                })
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        let names = advertised(&agent);
+        assert!(names.contains(&"echo".to_string()), "{names:?}");
+        assert!(names.contains(&"submit_answer".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn json_mode_advertises_no_output_tool() {
+        // JSON mode sends the schema on the request instead of as a tool.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_type_with_schema::<Answer>(answer_schema())
+                .build();
+
+        assert!(
+            advertised(&agent).is_empty(),
+            "json mode should advertise no tool"
+        );
+    }
+
+    #[test]
+    fn a_json_mode_schema_is_offered_as_a_native_schema() {
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_type_with_schema::<Answer>(answer_schema())
+                .build();
+
+        assert!(
+            agent.native_output_schema().is_some(),
+            "the provider must receive the schema, or nothing asks for JSON"
+        );
+    }
+
+    #[test]
+    fn a_tool_mode_schema_is_not_also_offered_natively() {
+        // Sending both would ask the provider for a tool call and a JSON
+        // response_format at the same time.
+        let agent =
+            AgentBuilder::<(), String>::new(serdes_ai_models::FunctionModel::constant_text("x"))
+                .output_tool::<Answer>("submit_answer", answer_schema())
+                .build();
+
+        assert!(agent.native_output_schema().is_none());
     }
 }

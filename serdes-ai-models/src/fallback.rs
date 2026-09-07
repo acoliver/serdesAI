@@ -23,7 +23,7 @@ use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::ModelProfile;
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use serdes_ai_core::{
     ClassifyModelFailure, ModelFailure, ModelRequest, ModelResponse, ModelSettings,
 };
@@ -325,8 +325,8 @@ mod tests {
     use crate::mock::MockModel;
     use serdes_ai_core::messages::{ModelResponseStreamEvent, StreamCompleteEvent, TextPart};
     use serdes_ai_core::{FinishReason, ModelResponsePart};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// A mock model that can fail with configurable errors.

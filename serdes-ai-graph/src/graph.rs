@@ -4,7 +4,7 @@ use crate::edge::Edge;
 use crate::error::{GraphError, GraphResult};
 use crate::executor::ExecutionOptions;
 use crate::node::{BaseNode, Node, NodeDef, NodeResult};
-use crate::state::{generate_run_id, GraphRunContext, GraphRunResult, GraphState};
+use crate::state::{GraphRunContext, GraphRunResult, GraphState, generate_run_id};
 use std::collections::HashMap;
 
 /// A graph for multi-agent workflows.

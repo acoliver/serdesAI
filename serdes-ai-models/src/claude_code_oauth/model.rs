@@ -3,7 +3,7 @@
 use super::types::*;
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
-use crate::profile::{anthropic_claude_profile, ModelProfile};
+use crate::profile::{ModelProfile, anthropic_claude_profile};
 use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
@@ -473,7 +473,7 @@ impl Model for ClaudeCodeOAuthModel {
         params: &ModelRequestParameters,
     ) -> Result<ModelResponse, ModelError> {
         use reqwest::header::{
-            HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
+            ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
         };
 
         let request_body = self.build_request(messages, settings, params, false);
@@ -558,7 +558,7 @@ impl Model for ClaudeCodeOAuthModel {
     ) -> Result<StreamedResponse, ModelError> {
         use super::stream::ClaudeCodeStreamParser;
         use reqwest::header::{
-            HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
+            ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
         };
 
         // Build request with stream: true

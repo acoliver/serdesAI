@@ -4,8 +4,7 @@ components = ["rustfmt", "clippy", "rust-analyzer"]
 profile = "default"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 
-# Minimum supported Rust version: 1.75.0
-# This is required for:
-# - async fn in traits (AFIT) stabilization
-# - impl Trait in type aliases
-# - let-else stabilization improvements
+# Minimum supported Rust version: 1.85.0
+# Required by edition 2024, which the workspace and its dependencies use.
+# The previous claim of 1.75 had not been buildable for some time: a
+# dependency moved to edition 2024, which no 1.75 compiler can read.

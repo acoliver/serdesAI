@@ -164,9 +164,9 @@ impl<Deps, Output> std::fmt::Debug for A2AServer<Deps, Output> {
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        agent_to_a2a, A2AConfig, A2AServer, AgentCard, Artifact, Broker, InMemoryBroker,
-        InMemoryStorage, Message, MessageRole, Part, Skill, Storage, Task, TaskIdParams,
-        TaskResult, TaskSendParams, TaskStatus,
+        A2AConfig, A2AServer, AgentCard, Artifact, Broker, InMemoryBroker, InMemoryStorage,
+        Message, MessageRole, Part, Skill, Storage, Task, TaskIdParams, TaskResult, TaskSendParams,
+        TaskStatus, agent_to_a2a,
     };
 }
 

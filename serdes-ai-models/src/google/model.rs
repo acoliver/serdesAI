@@ -774,8 +774,10 @@ mod tests {
         use serdes_ai_tools::ObjectJsonSchema;
 
         let model = GoogleModel::new("gemini-2.0-flash", "key").with_code_execution();
-        let tools = vec![ToolDefinition::new("search", "Search the web")
-            .with_parameters(ObjectJsonSchema::new())];
+        let tools = vec![
+            ToolDefinition::new("search", "Search the web")
+                .with_parameters(ObjectJsonSchema::new()),
+        ];
 
         let converted = model.convert_tools(&tools);
         assert_eq!(converted.len(), 2); // function + code_execution

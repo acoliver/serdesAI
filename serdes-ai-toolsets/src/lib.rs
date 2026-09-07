@@ -75,14 +75,14 @@ pub mod wrapper;
 pub use abstract_toolset::{
     AbstractToolset, BoxedToolset, ToolsetInfo, ToolsetResult, ToolsetTool,
 };
-pub use approval::{checkers as approval_checkers, ApprovalRequiredToolset};
+pub use approval::{ApprovalRequiredToolset, checkers as approval_checkers};
 pub use combined::CombinedToolset;
 pub use dynamic::DynamicToolset;
 pub use external::ExternalToolset;
-pub use filtered::{filters, FilteredToolset};
+pub use filtered::{FilteredToolset, filters};
 pub use function::{AsyncFnTool, FunctionToolset};
 pub use prefixed::PrefixedToolset;
-pub use prepared::{preparers, PreparedToolset};
+pub use prepared::{PreparedToolset, preparers};
 pub use renamed::RenamedToolset;
 pub use wrapper::{LoggingWrapper, WrapperToolset};
 

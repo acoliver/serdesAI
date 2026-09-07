@@ -10,8 +10,8 @@ use crate::instructions::{InstructionFn, SystemPromptFn};
 use crate::output::{OutputMode, OutputSchema, OutputValidator};
 use crate::run::{AgentRun, AgentRunResult, RunOptions};
 use crate::stream::AgentStream;
-use serdes_ai_core::messages::UserContent;
 use serdes_ai_core::ModelSettings;
+use serdes_ai_core::messages::UserContent;
 use serdes_ai_models::Model;
 use serdes_ai_tools::ToolDefinition;
 use std::marker::PhantomData;
@@ -319,6 +319,19 @@ where
     #[allow(dead_code)]
     pub(crate) fn output_tool_name(&self) -> Option<String> {
         self.output_schema.tool_name().map(|s| s.to_string())
+    }
+
+    /// The output schema to send as a native structured-output request, if the
+    /// schema asks for JSON rather than a tool call.
+    ///
+    /// Tool-mode schemas advertise a tool instead, so returning a schema here
+    /// too would ask the provider for both at once.
+    pub(crate) fn native_output_schema(&self) -> Option<serdes_ai_tools::ObjectJsonSchema> {
+        if self.output_schema.tool_name().is_some() {
+            return None;
+        }
+        let schema = self.output_schema.json_schema()?;
+        serde_json::from_value(schema).ok()
     }
 
     /// Get the static system prompt.

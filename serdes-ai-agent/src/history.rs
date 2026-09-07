@@ -129,7 +129,7 @@ fn remove_orphaned_tool_results(
                         let dominated = tr
                             .tool_call_id
                             .as_ref()
-                            .map_or(true, |id| valid_tool_ids.contains(id));
+                            .is_none_or(|id| valid_tool_ids.contains(id));
                         if !dominated {
                             debug!(
                                 tool_name = %tr.tool_name,
@@ -158,7 +158,7 @@ fn remove_orphaned_tool_results(
                         let keep = rp
                             .tool_call_id
                             .as_ref()
-                            .map_or(true, |id| valid_tool_ids.contains(id));
+                            .is_none_or(|id| valid_tool_ids.contains(id));
                         if !keep {
                             debug!(
                                 tool_name = ?rp.tool_name,
@@ -223,7 +223,7 @@ fn remove_orphaned_tool_uses(
                                         // INTENTIONAL: Keep if no tool_call_id (None)
                                         let keep = tc.tool_call_id
                                             .as_ref()
-                                            .map_or(true, |id| valid_result_ids.contains(id));
+                                            .is_none_or(|id| valid_result_ids.contains(id));
                                         if !keep {
                                             debug!(
                                                 tool_name = %tc.tool_name,
@@ -237,7 +237,7 @@ fn remove_orphaned_tool_uses(
                                         // BuiltinToolCall has Option<String> tool_call_id
                                         let keep = btc.tool_call_id
                                             .as_ref()
-                                            .map_or(true, |id| !id.is_empty() && valid_result_ids.contains(id));
+                                            .is_none_or(|id| !id.is_empty() && valid_result_ids.contains(id));
                                         if !keep {
                                             debug!(
                                                 tool_name = %btc.tool_name,
@@ -902,7 +902,7 @@ mod tests {
     // ========================================================================
 
     use serdes_ai_core::{
-        messages::tool_return::ToolReturnContent, ModelResponse, ToolCallPart, ToolReturnPart,
+        ModelResponse, ToolCallPart, ToolReturnPart, messages::tool_return::ToolReturnContent,
     };
 
     /// Create a message with a tool call (ModelResponse containing ToolCallPart)

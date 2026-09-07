@@ -89,8 +89,8 @@ pub mod server;
 
 // Re-exports
 pub use error::{McpError, McpResult};
-pub use resources::{parse_resource_uri, read_file_resource, ResourceManager, ResourceUri};
-pub use toolset::{load_mcp_servers, McpServerConfig, McpToolset, McpTransportConfig};
+pub use resources::{ResourceManager, ResourceUri, parse_resource_uri, read_file_resource};
+pub use toolset::{McpServerConfig, McpToolset, McpTransportConfig, load_mcp_servers};
 pub use transport::{McpTransport, MemoryTransport, StdioTransport};
 pub use types::{
     CallToolParams, CallToolResult, ClientCapabilities, Implementation, InitializeParams,

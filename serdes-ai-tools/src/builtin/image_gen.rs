@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
+    RunContext,
     definition::ToolDefinition,
     errors::ToolError,
     return_types::{ToolResult, ToolReturn},
     schema::SchemaBuilder,
     tool::Tool,
-    RunContext,
 };
 
 // ============================================================================
@@ -647,9 +647,11 @@ mod tests {
             .get("required")
             .and_then(|value| value.as_array())
             .unwrap();
-        assert!(required
-            .iter()
-            .any(|value| value.as_str() == Some("prompt")));
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("prompt"))
+        );
     }
 
     #[tokio::test]

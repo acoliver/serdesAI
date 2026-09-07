@@ -120,10 +120,10 @@ mod tests {
     use super::*;
     #[test]
     fn test_provider_preferences() {
-        assert!(serde_json::to_string(
-            &ProviderPreferences::new().with_order(vec!["anthropic".into()])
-        )
-        .unwrap()
-        .contains("anthropic"));
+        assert!(
+            serde_json::to_string(&ProviderPreferences::new().with_order(vec!["anthropic".into()]))
+                .unwrap()
+                .contains("anthropic")
+        );
     }
 }

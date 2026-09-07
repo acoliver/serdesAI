@@ -17,12 +17,14 @@ members = [
     "serdes-ai-evals",
     "serdes-ai-macros",
     "serdes-ai-ui",
-    "serdes-ai-a2a"
+    "serdes-ai-a2a",
+    "serdes-ai-cli",
+    "serdes-ai-orchestrator"
 ]
 
 [workspace.package]
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["serdes-ai contributors"]
 repository = "https://github.com/janfeddersen-wq/serdesAI"
@@ -31,7 +33,7 @@ documentation = "https://docs.rs/serdes-ai"
 readme = "README.md"
 keywords = ["ai", "llm", "agent", "serde", "pydantic"]
 categories = ["development-tools", "api-bindings", "asynchronous"]
-rust-version = "1.75.0"
+rust-version = "1.85.0"
 
 [workspace.dependencies]
 # Serialization
@@ -57,8 +59,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
-opentelemetry_sdk = "0.31"
-opentelemetry-otlp = "0.31"
 
 # Data Types
 bytes = "1.0"
@@ -85,7 +85,6 @@ darling = "0.20"
 tokio-test = "0.4"
 mockall = "0.14"
 wiremock = "0.6"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 rstest = "0.26"
 pretty_assertions = "1.4"
 
@@ -107,7 +106,7 @@ serdes-ai-retries = { path = "serdes-ai-retries", version = "0.3.0" }
 serdes-ai-graph = { path = "serdes-ai-graph", version = "0.3.0" }
 serdes-ai-evals = { path = "serdes-ai-evals", version = "0.3.0" }
 serdes-ai-macros = { path = "serdes-ai-macros", version = "0.3.0" }
-serdes-ai-a2a = { path = "serdes-ai-a2a", version = "0.3.0" }
+serdes-ai-orchestrator = { path = "serdes-ai-orchestrator", version = "0.3.0" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

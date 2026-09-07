@@ -8,11 +8,11 @@ use crate::error::ModelError;
 use bytes::Bytes;
 use futures::Stream;
 use pin_project_lite::pin_project;
+use serdes_ai_core::ModelResponsePart;
 use serdes_ai_core::messages::{
     FinishReason, ModelResponsePartDelta, ModelResponseStreamEvent, PartDeltaEvent, PartEndEvent,
     PartStartEvent, StreamCompleteEvent, TextPart, ThinkingPart, ThinkingPartDelta, ToolCallPart,
 };
-use serdes_ai_core::ModelResponsePart;
 use serdes_ai_streaming::{SseParser, StreamError};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -423,8 +423,8 @@ fn map_stop_reason(reason: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use futures::StreamExt;
+    use futures::stream;
 
     fn make_sse_bytes(event_type: &str, data: &str) -> Bytes {
         Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, data))

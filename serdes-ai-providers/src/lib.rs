@@ -77,7 +77,7 @@ mod gateway;
 pub mod oauth;
 pub use oauth::config::{chatgpt_oauth_config, claude_code_oauth_config};
 pub use oauth::{
-    refresh_token, run_pkce_flow, OAuthConfig, OAuthContext, OAuthError, TokenResponse,
+    OAuthConfig, OAuthContext, OAuthError, TokenResponse, refresh_token, run_pkce_flow,
 };
 
 // Re-exports
@@ -206,8 +206,8 @@ pub fn infer(model_string: &str) -> Result<(BoxedProvider, String), ProviderErro
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        from_env, global_registry, infer, BoxedProvider, GatewayProvider, Provider, ProviderConfig,
-        ProviderError, ProviderRegistry,
+        BoxedProvider, GatewayProvider, Provider, ProviderConfig, ProviderError, ProviderRegistry,
+        from_env, global_registry, infer,
     };
 
     #[cfg(feature = "anthropic")]

@@ -4,11 +4,11 @@ use super::stream::OpenAIStreamParser;
 use super::types::*;
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
-use crate::profile::{openai_gpt4o_profile, ModelProfile};
+use crate::profile::{ModelProfile, openai_gpt4o_profile};
 use async_trait::async_trait;
 use base64::Engine;
-use reqwest::header::HeaderMap;
 use reqwest::Client;
+use reqwest::header::HeaderMap;
 use serdes_ai_core::messages::{
     ImageContent, RetryPromptPart, SystemPromptPart, TextPart, ThinkingPart, ToolCallArgs,
     ToolCallPart, ToolReturnPart, UserContent, UserContentPart, UserPromptPart,
@@ -623,8 +623,10 @@ mod tests {
         use serdes_ai_tools::ObjectJsonSchema;
 
         let model = OpenAIChatModel::new("gpt-4o", "key");
-        let tools = vec![ToolDefinition::new("search", "Search the web")
-            .with_parameters(ObjectJsonSchema::new())];
+        let tools = vec![
+            ToolDefinition::new("search", "Search the web")
+                .with_parameters(ObjectJsonSchema::new()),
+        ];
 
         let converted = model.convert_tools(&tools);
         assert_eq!(converted.len(), 1);

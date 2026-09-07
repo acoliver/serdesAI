@@ -3,7 +3,7 @@
 //! This module contains the core execution logic for agent runs.
 
 use crate::agent::{Agent, EndStrategy};
-use crate::context::{generate_run_id, RunContext, RunUsage, UsageLimits};
+use crate::context::{RunContext, RunUsage, UsageLimits, generate_run_id};
 use crate::errors::{AgentRunError, OutputParseError, OutputValidationError};
 use chrono::Utc;
 use serde_json::Value as JsonValue;
@@ -377,9 +377,15 @@ where
         let tool_defs = self.agent.tool_definitions();
 
         // Build request parameters
-        let params = ModelRequestParameters::new()
+        let mut params = ModelRequestParameters::new()
             .with_tools_arc(tool_defs)
             .with_allow_text(true);
+
+        // Carry the structured-output request to the provider. Without this the
+        // model is never told to produce structured output at all.
+        if let Some(schema) = self.agent.native_output_schema() {
+            params = params.with_output_schema(schema);
+        }
 
         // Process message history
         let messages = self.process_history().await;
@@ -394,9 +400,11 @@ where
         // Persist canonical tool args to avoid carrying malformed raw args in history.
         canonicalize_tool_call_args_in_response(&mut response);
 
-        // Update usage
-        if let Some(usage) = &response.usage {
-            self.state.usage.add_request(usage.clone());
+        // Update usage. The request is counted either way: not every provider
+        // reports usage, and max_requests must still bound the loop.
+        match &response.usage {
+            Some(usage) => self.state.usage.add_request(usage.clone()),
+            None => self.state.usage.record_request(),
         }
 
         // Store response

@@ -66,7 +66,7 @@ pub use backoff::{ExponentialBackoff, ExponentialBackoffBuilder, FixedDelay, Lin
 pub use config::{RetryCondition, RetryConfig, RetryPolicy, WaitStrategy};
 pub use error::{RetryFailure, RetryResult, RetryableError};
 pub use executor::{
-    with_retry, with_retry_policy, with_retry_state, AttemptInfo, Retry, RetryDecision, RetryState,
+    AttemptInfo, Retry, RetryDecision, RetryState, with_retry, with_retry_policy, with_retry_state,
 };
 pub use strategy::{NoRetry, RetryStrategy};
 pub use transport::{RetryClient, RetryClientBuilder};
@@ -74,9 +74,9 @@ pub use transport::{RetryClient, RetryClientBuilder};
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        with_retry, with_retry_policy, ExponentialBackoff, Retry, RetryClient, RetryConfig,
-        RetryDecision, RetryFailure, RetryPolicy, RetryResult, RetryStrategy, RetryableError,
-        WaitStrategy,
+        ExponentialBackoff, Retry, RetryClient, RetryConfig, RetryDecision, RetryFailure,
+        RetryPolicy, RetryResult, RetryStrategy, RetryableError, WaitStrategy, with_retry,
+        with_retry_policy,
     };
 }
 

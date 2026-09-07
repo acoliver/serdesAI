@@ -3,8 +3,8 @@
 //! These providers use the OpenAI API format but with different endpoints.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
 
 // ============================================================================

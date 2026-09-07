@@ -12,12 +12,12 @@ use bytes::Bytes;
 use futures::Stream;
 use reqwest::Client;
 use serdes_ai_core::{
+    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
+    RequestUsage,
     messages::{
         ModelResponseStreamEvent, StreamCompleteEvent, TextPart, ToolCallArgs, ToolCallPart,
         UserContent, UserContentPart,
     },
-    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
-    RequestUsage,
 };
 use serdes_ai_tools::ToolDefinition;
 use std::{
@@ -546,7 +546,7 @@ mod tests {
 
     /// Collect every event a parser yields for the given NDJSON lines.
     async fn parse_ndjson(lines: &[&str]) -> Vec<ModelResponseStreamEvent> {
-        use futures::{stream, StreamExt};
+        use futures::{StreamExt, stream};
 
         let bytes = lines
             .iter()

@@ -4,7 +4,7 @@
 //! character-by-character streaming from the model.
 
 use crate::agent::{Agent, RegisteredTool};
-use crate::context::{generate_run_id, RunContext, RunUsage};
+use crate::context::{RunContext, RunUsage, generate_run_id};
 use crate::errors::AgentRunError;
 use crate::run::{CompressionStrategy, RunOptions};
 use chrono::Utc;
@@ -223,6 +223,7 @@ impl AgentStream {
         let static_system_prompt = agent.static_system_prompt().to_string();
 
         let tool_definitions = agent.tool_definitions();
+        let native_output_schema = agent.native_output_schema();
         let _end_strategy = agent.end_strategy;
         let usage_limits = agent.usage_limits.clone();
         let run_usage_limits = options.usage_limits.clone();
@@ -311,9 +312,15 @@ impl AgentStream {
                 }
 
                 // Build request parameters
-                let params = ModelRequestParameters::new()
+                let mut params = ModelRequestParameters::new()
                     .with_tools_arc(tool_definitions.clone())
                     .with_allow_text(true);
+
+                // Carry the structured-output request to the provider, as the
+                // blocking path does.
+                if let Some(schema) = native_output_schema.clone() {
+                    params = params.with_output_schema(schema);
+                }
 
                 // === Context Size Calculation & Compression ===
 
@@ -615,7 +622,7 @@ impl AgentStream {
                                                 }))
                                                 .await;
                                             // Update the part
-                                            if let Some(ModelResponsePart::Text(ref mut text)) =
+                                            if let Some(ModelResponsePart::Text(text)) =
                                                 response_parts.get_mut(delta.index)
                                             {
                                                 text.content.push_str(&t.content_delta);
@@ -638,9 +645,8 @@ impl AgentStream {
                                                 }))
                                                 .await;
                                             // Update args - accumulate the delta into the tool call
-                                            if let Some(ModelResponsePart::ToolCall(
-                                                ref mut tool_call,
-                                            )) = response_parts.get_mut(delta.index)
+                                            if let Some(ModelResponsePart::ToolCall(tool_call)) =
+                                                response_parts.get_mut(delta.index)
                                             {
                                                 tc.apply(tool_call);
                                             }
@@ -651,9 +657,8 @@ impl AgentStream {
                                                     text: t.content_delta.clone(),
                                                 }))
                                                 .await;
-                                            if let Some(ModelResponsePart::Thinking(
-                                                ref mut think,
-                                            )) = response_parts.get_mut(delta.index)
+                                            if let Some(ModelResponsePart::Thinking(think)) =
+                                                response_parts.get_mut(delta.index)
                                             {
                                                 t.apply(think);
                                             }
@@ -736,9 +741,12 @@ impl AgentStream {
                 responses.push(response.clone());
 
                 // Accumulate run-wide usage, mirroring the non-streaming run()
-                // path (run.rs:398-399) so streaming and non-streaming agree.
-                if let Some(u) = &response.usage {
-                    usage.add_request(u.clone());
+                // path so streaming and non-streaming agree. The request is
+                // counted either way, so max_requests bounds the loop even
+                // against a provider that reports no usage.
+                match &response.usage {
+                    Some(u) => usage.add_request(u.clone()),
+                    None => usage.record_request(),
                 }
 
                 // Emit ResponseComplete
@@ -962,6 +970,7 @@ impl AgentStream {
 
         let static_system_prompt = agent.static_system_prompt().to_string();
         let tool_definitions = agent.tool_definitions();
+        let native_output_schema = agent.native_output_schema();
         let _end_strategy = agent.end_strategy;
         let usage_limits = agent.usage_limits.clone();
         let run_usage_limits = options.usage_limits.clone();
@@ -1064,9 +1073,15 @@ impl AgentStream {
                     return;
                 }
 
-                let params = ModelRequestParameters::new()
+                let mut params = ModelRequestParameters::new()
                     .with_tools_arc(tool_definitions.clone())
                     .with_allow_text(true);
+
+                // Carry the structured-output request to the provider, as the
+                // blocking path does.
+                if let Some(schema) = native_output_schema.clone() {
+                    params = params.with_output_schema(schema);
+                }
 
                 // Context size calculation (simplified - full version in main new())
                 let (request_bytes, estimated_tokens) = {
@@ -1210,7 +1225,7 @@ impl AgentStream {
                                                             text: t.content_delta.clone(),
                                                         }))
                                                         .await;
-                                                    if let Some(ModelResponsePart::Text(ref mut text)) =
+                                                    if let Some(ModelResponsePart::Text(text)) =
                                                         response_parts.get_mut(delta.index)
                                                     {
                                                         text.content.push_str(&t.content_delta);
@@ -1232,7 +1247,7 @@ impl AgentStream {
                                                         }))
                                                         .await;
                                                     if let Some(ModelResponsePart::ToolCall(
-                                                        ref mut tool_call,
+                                                        tool_call,
                                                     )) = response_parts.get_mut(delta.index)
                                                     {
                                                         tc.apply(tool_call);
@@ -1246,7 +1261,7 @@ impl AgentStream {
                                                         }))
                                                         .await;
                                                     if let Some(ModelResponsePart::Thinking(
-                                                        ref mut think,
+                                                        think,
                                                     )) = response_parts.get_mut(delta.index)
                                                     {
                                                         t.apply(think);
@@ -1328,9 +1343,12 @@ impl AgentStream {
                 responses.push(response.clone());
 
                 // Accumulate run-wide usage, mirroring the non-streaming run()
-                // path (run.rs:398-399) so streaming and non-streaming agree.
-                if let Some(u) = &response.usage {
-                    usage.add_request(u.clone());
+                // path so streaming and non-streaming agree. The request is
+                // counted either way, so max_requests bounds the loop even
+                // against a provider that reports no usage.
+                match &response.usage {
+                    Some(u) => usage.add_request(u.clone()),
+                    None => usage.record_request(),
                 }
 
                 let _ = tx
@@ -1565,14 +1583,14 @@ impl Stream for AgentStream {
 mod tests {
     use super::*;
     use crate::builder::agent;
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
     use serdes_ai_core::messages::{
         FinishReason, ModelRequestPart, StreamCompleteEvent, TextPart, ToolCallPart,
     };
     use serdes_ai_models::FunctionModel;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[test]
@@ -1989,8 +2007,13 @@ mod tests {
     /// T7 (R2 / AC1.2 + AC3.2): a mid-run step with NO provider usage must not
     /// corrupt or double-count the run aggregate. Step 0 reports usage (10/5)
     /// and triggers a tool; step 1 reports no token fields. Step 1's
-    /// `ResponseComplete.usage` is `None`, and the terminal aggregate reflects
-    /// only the one usage-bearing step (`request_count == 1`).
+    /// `ResponseComplete.usage` is `None`, and the token aggregate reflects only
+    /// the one usage-bearing step.
+    ///
+    /// `request_count` is deliberately not token-gated: it counts requests
+    /// actually issued, both of them here. It is the quantity `max_requests`
+    /// bounds, and counting only usage-bearing responses left that limit inert
+    /// against any provider that omits usage.
     #[tokio::test]
     async fn test_run_complete_aggregate_ignores_usage_none_step() {
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -2074,7 +2097,8 @@ mod tests {
         assert_eq!(usage.request_tokens, 10);
         assert_eq!(usage.response_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
-        assert_eq!(usage.request_count, 1);
+        // Tokens come only from the usage-bearing step, but both requests count.
+        assert_eq!(usage.request_count, 2);
     }
 
     /// T8 (R1 + R3, billing): cache-creation and cache-read tokens survive from

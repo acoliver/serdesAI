@@ -3,8 +3,8 @@
 //! Groq provides ultra-fast inference for open models like Llama, Mixtral, etc.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
 
 /// Groq provider.

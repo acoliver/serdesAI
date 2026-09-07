@@ -3,8 +3,8 @@
 //! Ollama runs LLMs locally with an OpenAI-compatible API.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
 
 /// Ollama provider.

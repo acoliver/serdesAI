@@ -33,10 +33,10 @@ use serde_json::Value as JsonValue;
 use std::env;
 
 use crate::{
+    RunContext, ToolError,
     definition::ToolDefinition,
     return_types::{ToolResult, ToolReturn},
     schema::SchemaBuilder,
-    RunContext, ToolError,
 };
 
 /// Search depth for Tavily queries.
@@ -520,7 +520,14 @@ mod tests {
     #[test]
     fn test_from_env_missing() {
         // Ensure env var is not set for this test
-        env::remove_var("TAVILY_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            env::remove_var("TAVILY_API_KEY")
+        };
         let result = TavilyTool::from_env();
         assert!(result.is_err());
     }

@@ -3,9 +3,9 @@
 use crate::error::{GraphError, GraphResult};
 use crate::graph::Graph;
 use crate::persistence::StatePersistence;
-use crate::state::{generate_run_id, GraphRunResult, GraphState};
+use crate::state::{GraphRunResult, GraphState, generate_run_id};
 use std::sync::Arc;
-use tracing::{info, span, Level};
+use tracing::{Level, info, span};
 
 /// Graph executor with optional persistence and instrumentation.
 pub struct GraphExecutor<State, Deps, End, P = NoPersistence>

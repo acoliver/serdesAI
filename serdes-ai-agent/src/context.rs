@@ -95,7 +95,7 @@ impl<Deps> RunContext<Deps> {
         let meta = self
             .metadata
             .get_or_insert_with(|| JsonValue::Object(Default::default()));
-        if let JsonValue::Object(ref mut map) = meta {
+        if let JsonValue::Object(map) = meta {
             if let Ok(v) = serde_json::to_value(value) {
                 map.insert(key.to_string(), v);
             }
@@ -212,6 +212,15 @@ impl RunUsage {
         if let Some(cache) = usage.cache_read_tokens {
             *self.cache_read_tokens.get_or_insert(0) += cache;
         }
+        self.request_count += 1;
+    }
+
+    /// Record a model request that reported no usage.
+    ///
+    /// The request still has to be counted: `max_requests` is the only bound on
+    /// a runaway agent loop, and a provider that omits usage would otherwise
+    /// leave it permanently inert.
+    pub fn record_request(&mut self) {
         self.request_count += 1;
     }
 

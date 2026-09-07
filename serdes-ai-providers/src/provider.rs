@@ -2,8 +2,8 @@
 //!
 //! A provider represents an AI API service with authentication and configuration.
 
-use reqwest::header::HeaderMap;
 use reqwest::Client;
+use reqwest::header::HeaderMap;
 use serdes_ai_models::ModelProfile;
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,8 +199,22 @@ mod tests {
     #[test]
     fn test_provider_config_from_env() {
         // Set env vars for test
-        std::env::set_var("TEST_PROVIDER_API_KEY", "test-key");
-        std::env::set_var("TEST_PROVIDER_BASE_URL", "https://test.com");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TEST_PROVIDER_API_KEY", "test-key")
+        };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TEST_PROVIDER_BASE_URL", "https://test.com")
+        };
 
         let config = ProviderConfig::from_env("TEST_PROVIDER");
 
@@ -208,8 +222,22 @@ mod tests {
         assert_eq!(config.base_url, Some("https://test.com".to_string()));
 
         // Clean up
-        std::env::remove_var("TEST_PROVIDER_API_KEY");
-        std::env::remove_var("TEST_PROVIDER_BASE_URL");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("TEST_PROVIDER_API_KEY")
+        };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("TEST_PROVIDER_BASE_URL")
+        };
     }
 
     #[test]

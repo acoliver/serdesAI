@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser;
-use syn::{parse_macro_input, punctuated::Punctuated, Error, ItemStruct, Meta, Token};
+use syn::{Error, ItemStruct, Meta, Token, parse_macro_input, punctuated::Punctuated};
 
 /// Implementation for `#[agent]` attribute macro
 pub fn agent_attribute_impl(attr: TokenStream, item: TokenStream) -> TokenStream {

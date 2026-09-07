@@ -43,8 +43,8 @@
 //! ```
 
 use crate::provider::{Provider, ProviderError};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serdes_ai_models::ModelProfile;
 use std::collections::HashMap;
 use std::time::Duration;

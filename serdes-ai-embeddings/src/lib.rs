@@ -70,7 +70,7 @@ pub mod openai;
 pub mod cohere;
 
 // Re-exports
-pub use embedder::{infer_embedding_model, Embedder, EmbedderBuilder};
+pub use embedder::{Embedder, EmbedderBuilder, infer_embedding_model};
 pub use embedding::{Embedding, EmbeddingBatch};
 pub use error::{EmbeddingError, EmbeddingResult};
 pub use model::{
@@ -91,8 +91,8 @@ pub use cohere::CohereEmbeddingModel;
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        cosine_similarity, dot_product, Embedder, Embedding, EmbeddingBatch, EmbeddingError,
-        EmbeddingModel, EmbeddingOutput, EmbeddingResult,
+        Embedder, Embedding, EmbeddingBatch, EmbeddingError, EmbeddingModel, EmbeddingOutput,
+        EmbeddingResult, cosine_similarity, dot_product,
     };
 
     #[cfg(feature = "openai")]

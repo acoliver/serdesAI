@@ -4,13 +4,13 @@ use super::types::{OpenRouterExtras, ProviderPreferences};
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse, ToolChoice};
 use crate::openai::{stream::OpenAIStreamParser, types::*};
-use crate::profile::{openai_gpt4o_profile, ModelProfile};
+use crate::profile::{ModelProfile, openai_gpt4o_profile};
 use async_trait::async_trait;
 use reqwest::Client;
 use serdes_ai_core::{
-    messages::{TextPart, ToolCallArgs, ToolCallPart, UserContent, UserContentPart},
     FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
     RequestUsage,
+    messages::{TextPart, ToolCallArgs, ToolCallPart, UserContent, UserContentPart},
 };
 use serdes_ai_tools::ToolDefinition;
 use std::time::Duration;
@@ -473,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn openrouter_stream_inherits_terminal_stream_complete() {
         use bytes::Bytes;
-        use futures::{stream, StreamExt};
+        use futures::{StreamExt, stream};
         use serdes_ai_core::messages::ModelResponseStreamEvent;
 
         let content = r#"{"id":"gen-1","object":"chat.completion.chunk","created":1234567890,"model":"anthropic/claude-3-opus","choices":[{"index":0,"delta":{"content":"Hi"}}]}"#;

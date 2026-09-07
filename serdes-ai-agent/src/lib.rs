@@ -83,8 +83,8 @@ pub mod stream;
 
 // Re-exports
 pub use agent::{Agent, EndStrategy, InstrumentationSettings, RegisteredTool, ToolExecutor};
-pub use builder::{agent, agent_with_deps, AgentBuilder, ModelConfig};
-pub use context::{generate_run_id, RunContext, RunUsage, UsageLimits};
+pub use builder::{AgentBuilder, ModelConfig, agent, agent_with_deps};
+pub use context::{RunContext, RunUsage, UsageLimits, generate_run_id};
 pub use errors::{
     AgentBuildError, AgentRunError, OutputParseError, OutputValidationError, UsageLimitError,
 };
@@ -113,10 +113,10 @@ pub use tokio_util::sync::CancellationToken;
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        agent, agent_with_deps, Agent, AgentBuilder, AgentRun, AgentRunError, AgentRunResult,
-        AgentStream, AgentStreamEvent, CancellationToken, CompressionStrategy, ContextCompression,
-        EndStrategy, OutputMode, OutputSchema, OutputValidator, RunContext, RunOptions, RunUsage,
-        StepResult, UsageLimits,
+        Agent, AgentBuilder, AgentRun, AgentRunError, AgentRunResult, AgentStream,
+        AgentStreamEvent, CancellationToken, CompressionStrategy, ContextCompression, EndStrategy,
+        OutputMode, OutputSchema, OutputValidator, RunContext, RunOptions, RunUsage, StepResult,
+        UsageLimits, agent, agent_with_deps,
     };
 }
 

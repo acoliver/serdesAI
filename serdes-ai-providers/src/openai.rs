@@ -1,10 +1,10 @@
 //! OpenAI provider implementation.
 
 use crate::provider::{Provider, ProviderConfig, ProviderError};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
-use serdes_ai_models::profile::openai_gpt4o_profile;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serdes_ai_models::ModelProfile;
+use serdes_ai_models::profile::openai_gpt4o_profile;
 
 /// OpenAI provider.
 #[derive(Debug)]
@@ -197,7 +197,14 @@ mod tests {
     #[test]
     fn test_openai_provider_from_env_missing() {
         // Clear any existing env var
-        std::env::remove_var("OPENAI_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: this runs in a test before any other thread reads the
+        // environment. Edition 2024 marks it unsafe because a concurrent
+        // reader elsewhere in the process would be a data race.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY")
+        };
 
         let result = OpenAIProvider::from_env();
         assert!(result.is_err());

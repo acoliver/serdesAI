@@ -82,7 +82,7 @@ pub use evaluator::{
 pub use metrics::{AggregateMetrics, EvalMetrics, TokenUsage};
 pub use report::{CaseResult, EvaluationReport, EvaluatorStats, ReportSummary};
 pub use result::EvalResult as LegacyEvalResult;
-pub use runner::{quick_eval, EvalOptions, EvalRunner};
+pub use runner::{EvalOptions, EvalRunner, quick_eval};
 pub use scorers::{
     AlwaysFailScorer, AlwaysPassScorer, ContainsScorer, ExactMatchScorer, FunctionScorer,
     LengthScorer, LlmJudgeScorer, NotContainsScorer, RegexScorer, Scorer,
@@ -92,8 +92,8 @@ pub use suite::EvalSuite;
 /// Prelude for common imports.
 pub mod prelude {
     pub use crate::{
-        quick_eval, Case, ContainsScorer, Dataset, EvalCase, EvalOptions, EvalRunner, EvalSuite,
-        EvaluationReport, EvaluationResult, Evaluator, ExactMatchScorer,
+        Case, ContainsScorer, Dataset, EvalCase, EvalOptions, EvalRunner, EvalSuite,
+        EvaluationReport, EvaluationResult, Evaluator, ExactMatchScorer, quick_eval,
     };
 }
 

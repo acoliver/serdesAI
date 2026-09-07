@@ -308,8 +308,8 @@ impl<S: Stream<Item = String>> TextStreamExt for S {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use futures::StreamExt;
+    use futures::stream;
 
     #[tokio::test]
     async fn test_debounced_stream() {

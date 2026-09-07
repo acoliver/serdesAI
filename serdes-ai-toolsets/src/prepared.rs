@@ -176,8 +176,8 @@ pub mod preparers {
     }
 
     /// Sort tools by name.
-    pub fn sort_by_name<Deps>(
-    ) -> impl Fn(&RunContext<Deps>, Vec<ToolDefinition>) -> Option<Vec<ToolDefinition>> + Send + Sync
+    pub fn sort_by_name<Deps>()
+    -> impl Fn(&RunContext<Deps>, Vec<ToolDefinition>) -> Option<Vec<ToolDefinition>> + Send + Sync
     {
         |_, mut defs| {
             defs.sort_by(|a, b| a.name.cmp(&b.name));
