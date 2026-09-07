@@ -254,8 +254,10 @@ pub struct ResponsesApiRequest {
     /// Model to use.
     pub model: String,
     /// Conversation input items. Always a list on the wire, including when
-    /// empty: a chained turn with nothing new still sends `[]`, and the API
-    /// rejects the empty string a text input would serialize to.
+    /// empty: an empty history serializes to `[]`, and the API rejects the
+    /// empty string a text input would serialize to. (A history that adds
+    /// nothing to a chained conversation is not an empty turn — the chain
+    /// resets and the full input is re-sent; see `session::Conv::plan`.)
     pub input: Vec<wire::InputItem>,
     /// System instructions (replaces system message).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -599,9 +601,14 @@ pub struct OpenAIResponsesModel {
     /// Whether turns chain per conversation (session state, delta-only
     /// continuation input).
     chaining: bool,
+    /// How long an untouched conversation is kept before it is evicted —
+    /// and its websocket, if any, closed — at the next conversation
+    /// lookup.
+    conversation_idle_ttl: Duration,
     /// Conversation state, keyed by first-request fingerprint. The map lock
-    /// guards lookup and insert only (no await is performed under it);
-    /// each conversation serializes its own turns on its lock.
+    /// guards lookup, insert, and the idle-eviction scan (no await is
+    /// performed under it); each conversation serializes its own turns on
+    /// its lock.
     conversations: Arc<std::sync::Mutex<HashMap<u64, SharedConv>>>,
 }
 
@@ -638,6 +645,7 @@ impl OpenAIResponsesModel {
             transport: Transport::Http,
             headers: Vec::new(),
             chaining: false,
+            conversation_idle_ttl: session::CONVERSATION_IDLE_TTL,
             conversations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -747,6 +755,19 @@ impl OpenAIResponsesModel {
     #[must_use]
     pub fn with_session_chaining(mut self, chaining: bool) -> Self {
         self.chaining = chaining;
+        self
+    }
+
+    /// Set how long an untouched conversation is kept before lazy
+    /// eviction.
+    ///
+    /// A conversation idle past this TTL is dropped — and its websocket,
+    /// if any, closed with a proper handshake — at the next conversation
+    /// lookup; the default is five minutes. Eviction runs only on lookup;
+    /// no background task is spawned.
+    #[must_use]
+    pub fn with_conversation_idle_ttl(mut self, ttl: Duration) -> Self {
+        self.conversation_idle_ttl = ttl;
         self
     }
 
@@ -917,6 +938,51 @@ impl OpenAIResponsesModel {
         }
 
         ModelError::http(status, body)
+    }
+}
+
+/// Close every conversation socket still open when the last model handle
+/// drops, so the peer observes a websocket Close frame instead of a bare
+/// connection reset.
+///
+/// Best-effort by design: with a tokio runtime on the current thread the
+/// handshakes are awaited on spawned tasks; without one there is nothing
+/// to await on, so the sockets drop without a handshake. Conversations
+/// locked by an in-flight turn are skipped — that turn closes or reuses
+/// its own socket.
+#[cfg(feature = "responses-ws")]
+impl Drop for OpenAIResponsesModel {
+    fn drop(&mut self) {
+        // Only the last handle runs the teardown: clones share the
+        // conversation map, and a dropped clone (one is moved into every
+        // streaming task) must not tear down sockets the surviving
+        // handles still use.
+        if Arc::strong_count(&self.conversations) != 1 {
+            return;
+        }
+        let mut sockets = Vec::new();
+        {
+            let conversations = self
+                .conversations
+                .lock()
+                .expect("conversations map lock poisoned; it is only held for lookup/insert");
+            for conv in conversations.values() {
+                if let Ok(mut state) = conv.try_lock() {
+                    sockets.extend(state.take_socket());
+                }
+            }
+        }
+        if sockets.is_empty() {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                for mut socket in sockets {
+                    session::close_socket(&mut socket).await;
+                }
+            });
+        }
+        // Without a runtime the sockets drop here, sans handshake.
     }
 }
 

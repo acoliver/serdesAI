@@ -8,7 +8,7 @@
 //! escapes.
 
 use super::events::{StreamEvent, failure, failure_kind, translate};
-use super::session::{ChannelSink, CollectSink, EventSink, MAX_ATTEMPTS};
+use super::session::{ChannelSink, CollectSink, EventSink, MAX_ATTEMPTS, close_socket};
 use super::wire::{ResponseObject, WsErrorEnvelope, codes};
 use super::{RequestOverlay, ResponsesApiRequest};
 use crate::error::ModelError;
@@ -68,7 +68,7 @@ async fn run_ws_turn(
     sink: &mut dyn EventSink,
 ) -> Result<ResponseObject, ModelError> {
     let fingerprints: Vec<u64> = messages.iter().map(super::session::fingerprint).collect();
-    let conv = model.conversation(messages);
+    let conv = model.conversation(messages).await;
     let mut state = conv.lock().await;
     let mut streamed_any = false;
     let mut last_cause: Option<String> = None;
@@ -127,7 +127,12 @@ async fn run_ws_turn(
                 continue;
             }
             AttemptOutcome::Retry(RetryKind::Reconnect) => {
-                state.socket = None;
+                // Close the retired socket with a handshake so the peer
+                // sees a Close frame rather than a reset; a socket that
+                // already failed may reject the handshake, which is fine.
+                if let Some(mut socket) = state.socket.take() {
+                    close_socket(&mut socket).await;
+                }
                 continue;
             }
             AttemptOutcome::Failed(error) => return Err(error),

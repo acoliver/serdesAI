@@ -160,7 +160,7 @@ pub(crate) async fn request(
     params: &ModelRequestParameters,
 ) -> Result<ModelResponse, ModelError> {
     let fingerprints: Vec<u64> = messages.iter().map(fingerprint).collect();
-    let conv = model.conversation(messages);
+    let conv = model.conversation(messages).await;
     let mut state = conv.lock().await;
 
     let response = post_turn(
@@ -229,7 +229,7 @@ async fn stream_events(
     tx: &mpsc::Sender<Result<ModelResponseStreamEvent, ModelError>>,
 ) -> Result<(), ModelError> {
     let fingerprints: Vec<u64> = messages.iter().map(fingerprint).collect();
-    let conv = model.conversation(messages);
+    let conv = model.conversation(messages).await;
     let mut state = conv.lock().await;
 
     let response = post_turn(

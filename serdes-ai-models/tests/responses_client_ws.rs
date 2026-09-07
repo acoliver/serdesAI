@@ -2,8 +2,9 @@
 //! the local rig: response mapping, delta-only chained sends, terminal-last
 //! streaming, and TTL-triggered reconnect. The fake servers here pin the
 //! wire contracts the rig cannot observe: function-tool type tags,
-//! conversation isolation, chain resets on mutated history, and concurrent
-//! conversations.
+//! conversation isolation, chain resets on mutated or replayed history,
+//! idle conversation eviction, the close handshake on model drop, and
+//! concurrent conversations.
 //!
 //! The four scripted-fake recovery tests (stale continuation, connection
 //! limit, hard error, mid-stream no-replay) live in `responses_ws_fakes.rs`.
@@ -377,5 +378,163 @@ async fn ws_concurrent_conversations_run_in_parallel() {
     .expect("concurrent conversations must not deadlock");
     assert_eq!(text_of(&a.expect("conversation A")), "ok");
     assert_eq!(text_of(&b.expect("conversation B")), "ok");
+    server.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Chain reset on replayed history, idle eviction, and close handshakes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ws_identical_history_restarts_the_chain() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+
+        // Turn 1: full input (the system turn maps to instructions), no
+        // continuation.
+        let request = read_turn(&mut ws).await;
+        assert!(request.previous_response_id.is_none());
+        assert_eq!(input_len(&request), 1);
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+
+        // Turn 2: an extension chains as usual, sending only the new item.
+        let request = read_turn(&mut ws).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_1"));
+        assert_eq!(input_len(&request), 1);
+        send_completed_turn(&mut ws, "resp_2", &request).await;
+
+        // Turn 3: the exact same history arrives again. A continuation
+        // must add material, so the chain resets: no continuation id and
+        // the full input, not a chained turn with empty input.
+        let request = read_turn(&mut ws).await;
+        assert!(
+            request.previous_response_id.is_none(),
+            "an identical history must reset the chain, not chain onto it"
+        );
+        assert_eq!(input_len(&request), 3, "the replay re-sends the full input");
+        send_completed_turn(&mut ws, "resp_3", &request).await;
+
+        // Turn 4: extending the history chains again from the replay.
+        let request = read_turn(&mut ws).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_3"));
+        assert_eq!(input_len(&request), 1);
+        send_completed_turn(&mut ws, "resp_4", &request).await;
+
+        // The reset happens in place: no extra connection may appear.
+        let extra = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(
+            extra.is_err(),
+            "a replay reset must reuse the socket, not reconnect"
+        );
+    });
+
+    let client = ws_client(addr).with_session_chaining(true);
+    let mut history = vec![system_turn("sys"), user_turn("first")];
+    let first = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 1");
+    history.push(response_turn(first));
+    history.push(user_turn("second"));
+    let second = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 2");
+    assert_eq!(text_of(&second), "ok");
+
+    // Replay the identical history.
+    let replay = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 3 (replayed history)");
+    assert_eq!(text_of(&replay), "ok");
+
+    // Chained turns still work after the reset.
+    history.push(response_turn(replay));
+    history.push(user_turn("third"));
+    let fourth = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 4 after the reset");
+    assert_eq!(text_of(&fourth), "ok");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ws_idle_conversations_are_evicted_with_a_clean_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // Turn 1 completes; the conversation then goes idle past the TTL.
+        let mut ws = accept_ws(&listener).await;
+        let request = read_turn(&mut ws).await;
+        assert!(request.previous_response_id.is_none());
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+
+        // Eviction closes the idle socket before the client reconnects.
+        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the eviction close");
+        match frame {
+            Some(Ok(Message::Close(_))) => {}
+            other => panic!("expected a Close frame on eviction, got {other:?}"),
+        }
+
+        // The same conversation resumes on a fresh socket: full input, no
+        // continuation id.
+        let mut ws = accept_ws(&listener).await;
+        let request = read_turn(&mut ws).await;
+        assert!(
+            request.previous_response_id.is_none(),
+            "an evicted conversation must not chain"
+        );
+        assert_eq!(input_len(&request), 1, "full input after eviction");
+        send_completed_turn(&mut ws, "resp_2", &request).await;
+    });
+
+    let client = ws_client(addr)
+        .with_session_chaining(true)
+        .with_conversation_idle_ttl(Duration::from_millis(50));
+    let history = vec![system_turn("sys"), user_turn("hello")];
+    client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 1");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 2 after eviction");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_model_closes_the_socket_with_a_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+        let request = read_turn(&mut ws).await;
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+
+        // The model is dropped after the turn completes; the next frame
+        // must be a Close handshake, not a TCP reset.
+        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the close on drop");
+        match frame {
+            Some(Ok(Message::Close(_))) => {}
+            other => panic!("expected a Close frame on model drop, got {other:?}"),
+        }
+    });
+
+    let client = ws_client(addr);
+    client
+        .request(&[user_turn("hello")], &settings(), &params())
+        .await
+        .expect("turn ok");
+    drop(client);
     server.await.unwrap();
 }
