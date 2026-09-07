@@ -136,6 +136,7 @@ impl WebSocketStream {
 
     /// Send a text message.
     pub async fn send_text(&mut self, text: impl Into<String>) -> StreamResult<()> {
+        let text: String = text.into();
         self.inner
             .send(WsMessage::Text(text.into()))
             .await
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_ws_message_conversion() {
-        let text_msg = WsMessage::Text("hello".to_string());
+        let text_msg = WsMessage::Text("hello".into());
         let converted: WsStreamMessage = text_msg.into();
         assert!(matches!(converted, WsStreamMessage::Text(s) if s == "hello"));
 
