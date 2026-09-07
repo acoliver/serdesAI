@@ -1,17 +1,17 @@
-//! Client-side conversions between Open Responses wire types and serdesAI
-//! core types.
-//
-// Every consumer lives in the websocket transport today and moves to the
-// HTTP chaining path later; with `responses-ws` compiled out these items
-// are expected to be unused, not dead.
-#![cfg_attr(not(feature = "responses-ws"), allow(dead_code))]
+//! Conversions between Open Responses wire types and serdesAI core types.
+//!
+//! This is the request and response mapping every transport shares: the
+//! HTTP request path, the websocket transport, and (from S7) the rig-only
+//! protocol helpers all go through these functions.
 
 use super::wire::*;
+use crate::error::ModelError;
 use crate::model::ToolChoice;
 use base64::Engine as _;
 use serdes_ai_core::messages::{
     BuiltinToolReturnPart, ImageContent, ModelRequest, ModelRequestPart, ModelResponse,
-    ModelResponsePart, ToolReturnContent, ToolReturnPart, UserContent, UserContentPart,
+    ModelResponsePart, TextPart, ThinkingPart, ToolCallArgs, ToolCallPart, ToolReturnContent,
+    ToolReturnPart, UserContent, UserContentPart,
 };
 use serdes_ai_tools::ToolDefinition;
 
@@ -93,11 +93,7 @@ pub(crate) fn history_to_wire(
     let instructions = if instructions.is_empty() {
         None
     } else {
-        Some(instructions.join(
-            "
-
-",
-        ))
+        Some(instructions.join("\n\n"))
     };
     Ok((instructions, items))
 }
@@ -214,6 +210,102 @@ fn response_parts_to_items(response: &ModelResponse) -> Vec<InputItem> {
             ModelResponsePart::File(_) | ModelResponsePart::BuiltinToolCall(_) => None,
         })
         .collect()
+}
+
+impl From<ResponsesError> for ModelError {
+    fn from(error: ResponsesError) -> Self {
+        ModelError::provider(
+            "openai",
+            error.code(),
+            error.to_string(),
+            super::events::failure_kind(error.code()),
+            None,
+        )
+    }
+}
+
+/// Map completed response output items onto model response parts.
+///
+/// This is the non-streaming (HTTP) output mapping: reasoning summaries
+/// become thinking parts with any encrypted content stashed in provider
+/// details for replay on chained turns, message text becomes text parts,
+/// refusals surface as content-filter errors, and function calls become
+/// tool call parts. Provider-internal items (web search, code interpreter,
+/// file search, image generation, MCP calls and their outputs) carry no
+/// user-visible part.
+pub(crate) fn parts_from_output(
+    output: Vec<super::ResponseOutputItem>,
+) -> Result<Vec<ModelResponsePart>, ModelError> {
+    use super::{MessageContentItem, ReasoningSummaryItem, ResponseOutputItem};
+
+    let mut parts = Vec::new();
+    for item in output {
+        match item {
+            ResponseOutputItem::Reasoning {
+                id,
+                summary,
+                encrypted_content,
+                ..
+            } => {
+                let content = summary
+                    .iter()
+                    .map(|s| match s {
+                        ReasoningSummaryItem::Text { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if content.is_empty() && encrypted_content.is_none() {
+                    continue;
+                }
+                let mut thinking = ThinkingPart::new(content)
+                    .with_id(&id)
+                    .with_provider_name("openai");
+                if let Some(encrypted) = encrypted_content {
+                    thinking = thinking.with_provider_details(
+                        [(
+                            "encrypted_content".to_string(),
+                            serde_json::Value::String(encrypted),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    );
+                }
+                parts.push(ModelResponsePart::Thinking(thinking));
+            }
+            ResponseOutputItem::Message { content, .. } => {
+                for item in content {
+                    match item {
+                        MessageContentItem::Text { text, .. } => {
+                            if !text.is_empty() {
+                                parts.push(ModelResponsePart::Text(TextPart::new(text)));
+                            }
+                        }
+                        MessageContentItem::Refusal { refusal } => {
+                            return Err(ModelError::ContentFiltered(refusal));
+                        }
+                    }
+                }
+            }
+            ResponseOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                parts.push(ModelResponsePart::ToolCall(
+                    ToolCallPart::new(name, ToolCallArgs::from(arguments))
+                        .with_tool_call_id(call_id),
+                ));
+            }
+            ResponseOutputItem::WebSearchCall { .. }
+            | ResponseOutputItem::CodeInterpreterCall { .. }
+            | ResponseOutputItem::FileSearchCall { .. }
+            | ResponseOutputItem::ImageGenerationCall { .. }
+            | ResponseOutputItem::McpCall { .. }
+            | ResponseOutputItem::FunctionCallOutput { .. } => {}
+        }
+    }
+    Ok(parts)
 }
 
 /// Map a serdesAI tool choice onto the wire tool choice.

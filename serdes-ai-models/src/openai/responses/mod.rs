@@ -30,20 +30,12 @@ use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::{ModelProfile, openai_o1_profile};
 use async_trait::async_trait;
-use base64::Engine;
+use convert::{history_to_wire, parts_from_output, tool_choice_to_wire, tool_to_wire};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use serdes_ai_core::messages::{
-    ImageContent, ModelResponseStreamEvent, PartStartEvent, RetryPromptPart, StreamCompleteEvent,
-    TextPart, ThinkingPart, ToolCallArgs, ToolCallPart, ToolReturnPart, UserContent,
-    UserContentPart, UserPromptPart,
-};
-use serdes_ai_core::{
-    FinishReason, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelSettings,
-    RequestUsage,
-};
-use serdes_ai_tools::ToolDefinition;
+use serdes_ai_core::messages::{ModelResponseStreamEvent, PartStartEvent, StreamCompleteEvent};
+use serdes_ai_core::{FinishReason, ModelRequest, ModelResponse, ModelSettings, RequestUsage};
 use session::SharedConv;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -250,18 +242,28 @@ impl Serialize for TruncationMode {
 // ============================================================================
 
 /// Request body for the Responses API.
+///
+/// Shared by the HTTP path and the websocket `response.create` frame: both
+/// transports serialize this one type, so their request shapes cannot
+/// drift. `stream`, `store`, and `service_tier` are transport concerns and
+/// stay `None` where a transport must not send them.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponsesApiRequest {
     /// Model to use.
     pub model: String,
-    /// Input messages/content.
-    pub input: Vec<ResponseInput>,
+    /// Conversation input items. Always a list on the wire, including when
+    /// empty: a chained turn with nothing new still sends `[]`, and the API
+    /// rejects the empty string a text input would serialize to.
+    pub input: Vec<wire::InputItem>,
     /// System instructions (replaces system message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// Tool definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ResponseTool>>,
+    pub tools: Option<Vec<wire::ResponsesTool>>,
+    /// Tool selection strategy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<wire::ResponsesToolChoice>,
     /// Reasoning configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
@@ -274,8 +276,13 @@ pub struct ResponsesApiRequest {
     /// Top-p sampling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    /// Whether to stream the response.
-    pub stream: bool,
+    /// Whether to stream the response. HTTP always sends the key;
+    /// websocket frames omit it entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Whether tool calls may run in parallel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     /// Previous response ID for multi-turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
@@ -313,184 +320,6 @@ pub struct TruncationConfig {
     /// Truncation type.
     #[serde(rename = "type")]
     pub truncation_type: TruncationMode,
-}
-
-/// Input item for the Responses API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "role")]
-#[allow(missing_docs)]
-pub enum ResponseInput {
-    /// User message.
-    #[serde(rename = "user")]
-    User { content: ResponseInputContent },
-    /// Assistant message (for multi-turn).
-    #[serde(rename = "assistant")]
-    Assistant {
-        content: ResponseInputContent,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reasoning_id: Option<String>,
-    },
-    /// Tool output.
-    #[serde(rename = "tool")]
-    Tool {
-        tool_call_id: String,
-        content: String,
-    },
-}
-
-/// Content for response input.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum ResponseInputContent {
-    /// Simple text.
-    Text(String),
-    /// Multi-part content.
-    Parts(Vec<ResponseInputPart>),
-}
-
-/// Part of multi-part input content.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-#[allow(missing_docs)]
-pub enum ResponseInputPart {
-    /// Text content.
-    #[serde(rename = "input_text")]
-    Text { text: String },
-    /// Image from URL.
-    #[serde(rename = "input_image")]
-    ImageUrl {
-        image_url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-    /// Image from base64.
-    #[serde(rename = "input_image")]
-    ImageBase64 {
-        image_url: String, // data:mime;base64,xxx format
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-    /// Audio input.
-    #[serde(rename = "input_audio")]
-    Audio { data: String, format: String },
-}
-
-// ============================================================================
-// Responses API Tool Types
-// ============================================================================
-
-/// Tool definition for Responses API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-#[allow(missing_docs)]
-pub enum ResponseTool {
-    /// Function tool (custom functions).
-    #[serde(rename = "function")]
-    Function {
-        name: String,
-        description: String,
-        parameters: JsonValue,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        strict: Option<bool>,
-    },
-    /// Web search built-in tool.
-    #[serde(rename = "web_search_preview")]
-    WebSearch {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        search_context_size: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        user_location: Option<UserLocation>,
-    },
-    /// Code interpreter built-in tool.
-    #[serde(rename = "code_interpreter")]
-    CodeInterpreter {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        container: Option<ContainerConfig>,
-    },
-    /// File search built-in tool.
-    #[serde(rename = "file_search")]
-    FileSearch {
-        vector_store_ids: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_num_results: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ranking_options: Option<RankingOptions>,
-    },
-    /// Image generation built-in tool.
-    #[serde(rename = "image_generation")]
-    ImageGeneration {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        background: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        input_image_mask: Option<ImageMask>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        moderation: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_compression: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_format: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        partial_images: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        quality: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        size: Option<String>,
-    },
-    /// MCP (Model Context Protocol) tool.
-    #[serde(rename = "mcp")]
-    Mcp {
-        server_label: String,
-        server_url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        allowed_tools: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        headers: Option<JsonValue>,
-    },
-}
-
-/// User location for web search.
-#[derive(Debug, Clone, Serialize)]
-#[allow(missing_docs)]
-pub struct UserLocation {
-    #[serde(rename = "type")]
-    pub location_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub city: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-}
-
-/// Container configuration for code interpreter.
-#[derive(Debug, Clone, Serialize)]
-#[allow(missing_docs)]
-pub struct ContainerConfig {
-    #[serde(rename = "type")]
-    pub container_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_ids: Option<Vec<String>>,
-}
-
-/// Ranking options for file search.
-#[derive(Debug, Clone, Serialize)]
-#[allow(missing_docs)]
-pub struct RankingOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ranker: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub score_threshold: Option<f64>,
-}
-
-/// Image mask for image generation.
-#[derive(Debug, Clone, Serialize)]
-#[allow(missing_docs)]
-pub struct ImageMask {
-    pub image_url: String,
-    #[serde(rename = "type")]
-    pub mask_type: String,
 }
 
 // ============================================================================
@@ -557,6 +386,10 @@ pub enum ResponseOutputItem {
         id: String,
         #[serde(default)]
         summary: Vec<ReasoningSummaryItem>,
+        /// Encrypted reasoning payload, replayed on chained turns so
+        /// stateless requests keep the model's reasoning context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
         status: Option<String>,
     },
     /// Text message output.
@@ -699,6 +532,32 @@ pub struct OutputTokensDetails {
     pub reasoning_tokens: Option<u64>,
 }
 
+/// Transport-specific pieces of one request: what HTTP and websocket turns
+/// legitimately differ on.
+///
+/// Everything else — input items, instructions, tools, tool choice,
+/// reasoning, sampling — flows through the same shared mapping so the two
+/// transports cannot drift apart.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RequestOverlay {
+    /// Requests already delivered on the session and excluded from the
+    /// input (websocket continuation turns); HTTP replays everything.
+    pub(crate) skip: usize,
+    /// The `stream` key: HTTP always sends it, websocket frames omit it.
+    pub(crate) stream: Option<bool>,
+    /// The `store` key: HTTP omits it, websocket sends the session mode.
+    pub(crate) store: Option<bool>,
+    /// Continuation id: HTTP carries the configured default, websocket the
+    /// session chain.
+    pub(crate) previous_response_id: Option<String>,
+    /// Service tier: HTTP honors the model settings, the websocket
+    /// transport has never sent it.
+    pub(crate) service_tier: Option<ServiceTier>,
+    /// Truncation: HTTP honors the model settings, the websocket transport
+    /// has never sent it.
+    pub(crate) truncation: Option<TruncationConfig>,
+}
+
 // ============================================================================
 // OpenAI Responses Model
 // ============================================================================
@@ -742,6 +601,20 @@ pub struct OpenAIResponsesModel {
     /// guards lookup and insert only (no await is performed under it);
     /// each conversation serializes its own turns on its lock.
     conversations: Arc<std::sync::Mutex<HashMap<u64, SharedConv>>>,
+}
+
+/// Map the model's reasoning settings onto the request's reasoning config.
+///
+/// Absent settings serialize nothing at all, matching an unconfigured
+/// request.
+fn reasoning_config(settings: &OpenAIResponsesModelSettings) -> Option<ReasoningConfig> {
+    if settings.reasoning_effort.is_none() && settings.reasoning_summary.is_none() {
+        return None;
+    }
+    Some(ReasoningConfig {
+        effort: settings.reasoning_effort.clone(),
+        summary: settings.reasoning_summary,
+    })
 }
 
 impl OpenAIResponsesModel {
@@ -886,213 +759,78 @@ impl OpenAIResponsesModel {
         }
     }
 
-    /// Convert our messages to Responses API input format.
-    fn map_messages(
-        &self,
-        messages: &[ModelRequest],
-        _settings: &OpenAIResponsesModelSettings,
-    ) -> (Vec<ResponseInput>, Option<String>) {
-        let mut inputs = Vec::new();
-        let mut instructions = None;
-
-        for req in messages {
-            for part in &req.parts {
-                match part {
-                    ModelRequestPart::SystemPrompt(sys) => {
-                        // System prompts become instructions in Responses API
-                        instructions = Some(sys.content.clone());
-                    }
-                    ModelRequestPart::UserPrompt(user) => {
-                        inputs.push(self.convert_user_prompt(user));
-                    }
-                    ModelRequestPart::ToolReturn(tool_ret) => {
-                        inputs.push(self.convert_tool_return(tool_ret));
-                    }
-                    ModelRequestPart::RetryPrompt(retry) => {
-                        inputs.push(self.convert_retry_prompt(retry));
-                    }
-                    ModelRequestPart::BuiltinToolReturn(builtin) => {
-                        // Convert builtin tool return to tool input
-                        let content_str = serde_json::to_string(&builtin.content)
-                            .unwrap_or_else(|_| builtin.content_type().to_string());
-                        inputs.push(ResponseInput::Tool {
-                            tool_call_id: builtin.tool_call_id.clone(),
-                            content: content_str,
-                        });
-                    }
-                    ModelRequestPart::ModelResponse(response) => {
-                        // Add the assistant response to inputs for proper alternation
-                        inputs.push(self.convert_response_to_input(response));
-                    }
-                }
-            }
-        }
-
-        (inputs, instructions)
-    }
-
-    fn convert_user_prompt(&self, user: &UserPromptPart) -> ResponseInput {
-        let content = self.convert_user_content(&user.content);
-        ResponseInput::User { content }
-    }
-
-    fn convert_user_content(&self, content: &UserContent) -> ResponseInputContent {
-        match content {
-            UserContent::Text(text) => ResponseInputContent::Text(text.clone()),
-            UserContent::Parts(parts) => {
-                let converted: Vec<ResponseInputPart> = parts
-                    .iter()
-                    .filter_map(|p| self.convert_content_part(p))
-                    .collect();
-                if converted.len() == 1 {
-                    if let ResponseInputPart::Text { text } = &converted[0] {
-                        return ResponseInputContent::Text(text.clone());
-                    }
-                }
-                ResponseInputContent::Parts(converted)
-            }
-        }
-    }
-
-    fn convert_content_part(&self, part: &UserContentPart) -> Option<ResponseInputPart> {
-        match part {
-            UserContentPart::Text { text } => Some(ResponseInputPart::Text { text: text.clone() }),
-            UserContentPart::Image { image } => {
-                let url = match image {
-                    ImageContent::Url(u) => u.url.clone(),
-                    ImageContent::Binary(b) => {
-                        format!(
-                            "data:{};base64,{}",
-                            b.media_type.mime_type(),
-                            base64::engine::general_purpose::STANDARD.encode(&b.data)
-                        )
-                    }
-                };
-                Some(ResponseInputPart::ImageUrl {
-                    image_url: url,
-                    detail: None,
-                })
-            }
-            _ => None, // Skip unsupported types
-        }
-    }
-
-    fn convert_tool_return(&self, tool_ret: &ToolReturnPart) -> ResponseInput {
-        ResponseInput::Tool {
-            tool_call_id: tool_ret.tool_call_id.clone().unwrap_or_default(),
-            content: tool_ret.content.to_string_content(),
-        }
-    }
-
-    fn convert_retry_prompt(&self, retry: &RetryPromptPart) -> ResponseInput {
-        ResponseInput::User {
-            content: ResponseInputContent::Text(retry.content.message().to_string()),
-        }
-    }
-
-    /// Convert a ModelResponse to an assistant input for multi-turn conversations.
-    fn convert_response_to_input(&self, response: &ModelResponse) -> ResponseInput {
-        let mut content_parts = Vec::new();
-
-        for part in &response.parts {
-            match part {
-                ModelResponsePart::Text(text) => {
-                    content_parts.push(text.content.clone());
-                }
-                ModelResponsePart::ToolCall(_) => {
-                    // Tool calls are handled by the model, not included in assistant input
-                }
-                ModelResponsePart::Thinking(_) => {
-                    // Thinking parts are not sent back
-                }
-                ModelResponsePart::File(_) => {
-                    // Files are not sent back
-                }
-                ModelResponsePart::BuiltinToolCall(_) => {
-                    // Builtin tool calls are not sent back
-                }
-            }
-        }
-
-        let content = if content_parts.is_empty() {
-            ResponseInputContent::Text(String::new())
-        } else {
-            ResponseInputContent::Text(content_parts.join(""))
-        };
-
-        ResponseInput::Assistant {
-            content,
-            reasoning_id: None,
-        }
-    }
-
-    /// Convert tool definitions to Responses API format.
-    fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<ResponseTool> {
-        tools
-            .iter()
-            .map(|t| {
-                let params = serde_json::to_value(&t.parameters_json_schema)
-                    .unwrap_or(serde_json::json!({}));
-
-                ResponseTool::Function {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: params,
-                    strict: t.strict,
-                }
-            })
-            .collect()
-    }
-
-    /// Build the request body.
+    /// Build the request body for an HTTP turn.
+    ///
+    /// The mapping itself is shared with the websocket transport (see
+    /// [`Self::compose_request`]); HTTP pins the transport fields: full
+    /// replay, `stream` always sent, `store` omitted, routing fields from
+    /// the model settings.
     fn build_request(
         &self,
         messages: &[ModelRequest],
         settings: &ModelSettings,
         params: &ModelRequestParameters,
         stream: bool,
-    ) -> ResponsesApiRequest {
-        let (input, instructions) = self.map_messages(messages, &self.default_settings);
+    ) -> Result<ResponsesApiRequest, ModelError> {
+        self.compose_request(
+            messages,
+            settings,
+            params,
+            RequestOverlay {
+                skip: 0,
+                stream: Some(stream),
+                store: None,
+                previous_response_id: self.default_settings.previous_response_id.clone(),
+                service_tier: self.default_settings.service_tier,
+                truncation: self
+                    .default_settings
+                    .truncation
+                    .map(|t| TruncationConfig { truncation_type: t }),
+            },
+        )
+    }
+
+    /// Compose the request body from the shared mapping plus a transport
+    /// overlay.
+    ///
+    /// History converts via [`history_to_wire`], tools via [`tool_to_wire`],
+    /// and tool choice via [`tool_choice_to_wire`]; one malformed part
+    /// (unsupported media, for instance) fails the request instead of being
+    /// silently dropped.
+    fn compose_request(
+        &self,
+        messages: &[ModelRequest],
+        settings: &ModelSettings,
+        params: &ModelRequestParameters,
+        overlay: RequestOverlay,
+    ) -> Result<ResponsesApiRequest, ModelError> {
+        let (instructions, input) = history_to_wire(messages, overlay.skip)?;
 
         let tools = if params.tools.is_empty() {
             None
         } else {
-            Some(self.convert_tools(&params.tools))
+            Some(params.tools.iter().map(tool_to_wire).collect())
         };
 
-        let reasoning = if self.default_settings.reasoning_effort.is_some()
-            || self.default_settings.reasoning_summary.is_some()
-        {
-            Some(ReasoningConfig {
-                effort: self.default_settings.reasoning_effort.clone(),
-                summary: self.default_settings.reasoning_summary,
-            })
-        } else {
-            None
-        };
-
-        let truncation = self
-            .default_settings
-            .truncation
-            .map(|t| TruncationConfig { truncation_type: t });
-
-        ResponsesApiRequest {
+        Ok(ResponsesApiRequest {
             model: self.model_name.clone(),
             input,
             instructions,
             tools,
-            reasoning,
+            tool_choice: tool_choice_to_wire(params.tool_choice.as_ref()),
+            reasoning: reasoning_config(&self.default_settings),
             max_output_tokens: settings.max_tokens,
             temperature: settings.temperature,
             top_p: settings.top_p,
-            stream,
-            previous_response_id: self.default_settings.previous_response_id.clone(),
-            service_tier: self.default_settings.service_tier,
-            truncation,
+            stream: overlay.stream,
+            parallel_tool_calls: settings.parallel_tool_calls,
+            previous_response_id: overlay.previous_response_id,
+            service_tier: overlay.service_tier,
+            truncation: overlay.truncation,
             user: None,
-            store: None,
+            store: overlay.store,
             metadata: None,
-        }
+        })
     }
 
     /// Parse the Responses API response into our format.
@@ -1108,65 +846,7 @@ impl OpenAIResponsesModel {
             return Err(ModelError::api("Response failed with unknown error"));
         }
 
-        let mut parts = Vec::new();
-
-        for output in resp.output {
-            match output {
-                ResponseOutputItem::Reasoning { id, summary, .. } => {
-                    // Convert reasoning to ThinkingPart
-                    let content: String = summary
-                        .iter()
-                        .map(|s| match s {
-                            ReasoningSummaryItem::Text { text } => text.as_str(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if !content.is_empty() {
-                        let thinking = ThinkingPart::new(content)
-                            .with_id(&id)
-                            .with_provider_name("openai");
-                        parts.push(ModelResponsePart::Thinking(thinking));
-                    }
-                }
-                ResponseOutputItem::Message { content, .. } => {
-                    for item in content {
-                        match item {
-                            MessageContentItem::Text { text, .. } => {
-                                if !text.is_empty() {
-                                    parts.push(ModelResponsePart::Text(TextPart::new(text)));
-                                }
-                            }
-                            MessageContentItem::Refusal { refusal } => {
-                                return Err(ModelError::ContentFiltered(refusal));
-                            }
-                        }
-                    }
-                }
-                ResponseOutputItem::FunctionCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    let args: JsonValue =
-                        serde_json::from_str(&arguments).unwrap_or(serde_json::json!({}));
-                    parts.push(ModelResponsePart::ToolCall(
-                        ToolCallPart::new(name, ToolCallArgs::Json(args))
-                            .with_tool_call_id(call_id),
-                    ));
-                }
-                // Built-in tool results are typically internal, but we can expose them
-                ResponseOutputItem::WebSearchCall { .. }
-                | ResponseOutputItem::CodeInterpreterCall { .. }
-                | ResponseOutputItem::FileSearchCall { .. }
-                | ResponseOutputItem::ImageGenerationCall { .. }
-                | ResponseOutputItem::McpCall { .. }
-                | ResponseOutputItem::FunctionCallOutput { .. } => {
-                    // These are intermediate results, usually not exposed to user
-                }
-            }
-        }
+        let parts = parts_from_output(resp.output)?;
 
         let finish_reason = match resp.status {
             ResponseStatus::Completed => Some(FinishReason::Stop),
@@ -1314,7 +994,7 @@ impl Model for OpenAIResponsesModel {
                 if self.chaining {
                     return Err(http_chaining_unavailable());
                 }
-                let body = self.build_request(messages, settings, params, false);
+                let body = self.build_request(messages, settings, params, false)?;
 
                 let timeout = settings.timeout.unwrap_or(self.default_timeout);
 
@@ -1432,6 +1112,12 @@ fn stream_complete_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProviderErrorKind;
+    use serdes_ai_core::ModelRequestPart;
+    use serdes_ai_core::messages::{
+        ModelResponsePart, RetryPromptPart, SystemPromptPart, TextPart, ThinkingPart, ToolCallArgs,
+        ToolCallPart, ToolReturnPart, UserContent, UserContentPart, UserPromptPart, VideoContent,
+    };
 
     /// Every effort variant serializes as its API string; custom values
     /// pass through verbatim.
@@ -1540,12 +1226,14 @@ mod tests {
         let mut req = ModelRequest::new();
         req.add_user_prompt("Hello");
 
-        let request = model.build_request(
-            &[req],
-            &ModelSettings::new(),
-            &ModelRequestParameters::new(),
-            false,
-        );
+        let request = model
+            .build_request(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect("request builds");
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(
@@ -1572,9 +1260,11 @@ mod tests {
         assert_eq!(model.base_url, "https://custom.api.com/v1");
     }
 
+    /// A function tool serializes in the wire form with its `type` tag and
+    /// strict flag.
     #[test]
     fn test_response_tool_serialization() {
-        let tool = ResponseTool::Function {
+        let tool = wire::ResponsesTool::Function {
             name: "search".to_string(),
             description: "Search the web".to_string(),
             parameters: serde_json::json!({"type": "object"}),
@@ -1585,35 +1275,46 @@ mod tests {
         assert!(json.contains("\"name\":\"search\""));
     }
 
+    /// Hosted tool types pass through as builtin tools carrying their wire
+    /// tag; the receiving side decides whether it can execute them.
     #[test]
     fn test_web_search_tool_serialization() {
-        let tool = ResponseTool::WebSearch {
-            search_context_size: Some("medium".to_string()),
-            user_location: None,
+        let tool = wire::ResponsesTool::Builtin {
+            tool_type: "web_search_preview".to_string(),
         };
         let json = serde_json::to_string(&tool).unwrap();
-        assert!(json.contains("web_search_preview"));
+        assert!(json.contains("\"type\":\"web_search_preview\""));
     }
 
+    /// User turns serialize as "easy input messages": role and content with
+    /// no `type` tag, matching the API's easy-message shape.
     #[test]
     fn test_response_input_serialization() {
-        let input = ResponseInput::User {
-            content: ResponseInputContent::Text("Hello".to_string()),
-        };
+        let input = wire::InputItem::Easy(wire::EasyInputMessage {
+            role: wire::InputRole::User,
+            content: Some(wire::InputMessageContent::Text("Hello".to_string())),
+        });
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("\"content\":\"Hello\""));
+        assert!(
+            !json.contains("input_text"),
+            "plain text stays a string, got: {json}"
+        );
     }
 
+    /// Tool returns serialize as function_call_output items keyed by call
+    /// id, not role:"tool" messages.
     #[test]
     fn test_tool_input_serialization() {
-        let input = ResponseInput::Tool {
-            tool_call_id: "call_123".to_string(),
-            content: "Result: 42".to_string(),
-        };
+        let input = wire::InputItem::Typed(wire::TypedInputItem::FunctionCallOutput {
+            call_id: "call_123".to_string(),
+            output: "Result: 42".to_string(),
+        });
         let json = serde_json::to_string(&input).unwrap();
-        assert!(json.contains("\"role\":\"tool\""));
-        assert!(json.contains("\"tool_call_id\":\"call_123\""));
+        assert!(json.contains("\"type\":\"function_call_output\""));
+        assert!(json.contains("\"call_id\":\"call_123\""));
+        assert!(json.contains("\"output\":\"Result: 42\""));
     }
 
     // Streaming fallback over wiremock (real HTTP request path).
@@ -1743,5 +1444,355 @@ mod tests {
             }
             other => panic!("expected terminal StreamComplete last, got {:?}", other),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // S6a: wire-accurate request/response mapping pins
+    // ------------------------------------------------------------------
+
+    /// Build one model request carrying a single part.
+    fn single_request(part: ModelRequestPart) -> ModelRequest {
+        ModelRequest::with_parts(vec![part])
+    }
+
+    /// An assistant response carrying one of each replayable part kind.
+    fn assistant_response() -> ModelResponse {
+        let thinking = ThinkingPart::new("pondering")
+            .with_provider_name("openai")
+            .with_provider_details(
+                [(
+                    "encrypted_content".to_string(),
+                    JsonValue::String("enc-1".to_string()),
+                )]
+                .into_iter()
+                .collect(),
+            );
+        ModelResponse {
+            parts: vec![
+                ModelResponsePart::Thinking(thinking),
+                ModelResponsePart::Text(TextPart::new("the answer")),
+                ModelResponsePart::ToolCall(
+                    ToolCallPart::new(
+                        "get_weather",
+                        ToolCallArgs::Json(serde_json::json!({ "city": "NYC" })),
+                    )
+                    .with_tool_call_id("call_9"),
+                ),
+            ],
+            model_name: None,
+            timestamp: chrono::Utc::now(),
+            finish_reason: None,
+            usage: None,
+            vendor_id: None,
+            vendor_details: None,
+            kind: "response".to_string(),
+        }
+    }
+
+    /// System prompts join into one instructions string. The legacy mapping
+    /// let the last system prompt win; the shared mapping joins every
+    /// system prompt, so none is silently lost.
+    #[test]
+    fn build_request_joins_system_prompts_into_instructions() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let history = [
+            single_request(ModelRequestPart::SystemPrompt(SystemPromptPart::new(
+                "be brief",
+            ))),
+            single_request(ModelRequestPart::SystemPrompt(SystemPromptPart::new(
+                "answer in French",
+            ))),
+            single_request(ModelRequestPart::UserPrompt(UserPromptPart::new("Hello"))),
+        ];
+
+        let request = model
+            .build_request(
+                &history,
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect("request builds");
+
+        assert_eq!(
+            request.instructions.as_deref(),
+            Some("be brief\n\nanswer in French")
+        );
+        assert_eq!(request.input.len(), 1, "only the user turn is input");
+    }
+
+    /// Assistant history echoes back as typed wire items — a reasoning item
+    /// with its encrypted content, an assistant message, and a function
+    /// call — and retry prompts are dropped instead of becoming user text.
+    #[test]
+    fn build_request_echoes_assistant_history_as_typed_items() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let history = [
+            single_request(ModelRequestPart::UserPrompt(UserPromptPart::new("hi"))),
+            single_request(ModelRequestPart::ModelResponse(Box::new(
+                assistant_response(),
+            ))),
+            single_request(ModelRequestPart::RetryPrompt(RetryPromptPart::new(
+                "recover",
+            ))),
+            single_request(ModelRequestPart::UserPrompt(UserPromptPart::new("next"))),
+        ];
+
+        let request = model
+            .build_request(
+                &history,
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect("request builds");
+
+        // user + (reasoning, message, function call) + user; the retry
+        // prompt would add a sixth item if it leaked into the input.
+        assert_eq!(
+            request.input.len(),
+            5,
+            "retry prompt dropped, all response parts replayed"
+        );
+        match &request.input[1] {
+            wire::InputItem::Typed(wire::TypedInputItem::Reasoning {
+                summary,
+                encrypted_content,
+                ..
+            }) => {
+                assert_eq!(summary.len(), 1);
+                assert_eq!(summary[0].text, "pondering");
+                assert_eq!(encrypted_content.as_deref(), Some("enc-1"));
+            }
+            other => panic!("expected a reasoning item, got {other:?}"),
+        }
+        match &request.input[3] {
+            wire::InputItem::Typed(wire::TypedInputItem::FunctionCall {
+                call_id, name, ..
+            }) => {
+                assert_eq!(call_id, "call_9");
+                assert_eq!(name, "get_weather");
+            }
+            other => panic!("expected a function call item, got {other:?}"),
+        }
+    }
+
+    /// Tool returns serialize on the wire as function_call_output items
+    /// keyed by call id, not role:"tool" messages.
+    #[test]
+    fn build_request_maps_tool_returns_to_function_call_outputs() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let history = [single_request(ModelRequestPart::ToolReturn(
+            ToolReturnPart::success("get_weather", "sunny").with_tool_call_id("call_9"),
+        ))];
+
+        let request = model
+            .build_request(
+                &history,
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect("request builds");
+
+        assert_eq!(request.input.len(), 1);
+        match &request.input[0] {
+            wire::InputItem::Typed(wire::TypedInputItem::FunctionCallOutput {
+                call_id,
+                output,
+            }) => {
+                assert_eq!(call_id, "call_9");
+                assert_eq!(output, "sunny");
+            }
+            other => panic!("expected a function_call_output item, got {other:?}"),
+        }
+    }
+
+    /// Unsupported media parts fail the request with an invalid-request
+    /// error instead of being silently skipped.
+    #[test]
+    fn build_request_rejects_unsupported_media_parts() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let history = [single_request(ModelRequestPart::UserPrompt(
+            UserPromptPart::new(UserContent::Parts(vec![UserContentPart::Video {
+                video: VideoContent::url("https://example.com/clip.mp4"),
+            }])),
+        ))];
+
+        let error = model
+            .build_request(
+                &history,
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect_err("video input must be rejected");
+
+        match error {
+            ModelError::Provider { kind, .. } => {
+                assert_eq!(kind, ProviderErrorKind::InvalidRequest)
+            }
+            other => panic!("expected an invalid-request provider error, got {other:?}"),
+        }
+    }
+
+    /// The stream key is a transport concern: HTTP turns still send it
+    /// (false for the buffered non-streaming request), websocket frames
+    /// omit it entirely.
+    #[test]
+    fn stream_serializes_only_when_set() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+
+        let http = model
+            .build_request(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+                false,
+            )
+            .expect("request builds");
+        let http_json = serde_json::to_string(&http).unwrap();
+        assert!(
+            http_json.contains("\"stream\":false"),
+            "HTTP requests keep the legacy stream key, got: {http_json}"
+        );
+
+        let ws = ResponsesApiRequest {
+            model: "gpt-5.1".to_string(),
+            input: Vec::new(),
+            instructions: None,
+            tools: None,
+            tool_choice: None,
+            reasoning: None,
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: None,
+            parallel_tool_calls: None,
+            previous_response_id: None,
+            service_tier: None,
+            truncation: None,
+            user: None,
+            store: None,
+            metadata: None,
+        };
+        let ws_json = serde_json::to_string(&ws).unwrap();
+        assert!(
+            !ws_json.contains("stream"),
+            "websocket frames omit stream, got: {ws_json}"
+        );
+    }
+
+    /// Reasoning output stashes the encrypted content in provider details,
+    /// and replaying the response as history puts it back on the wire
+    /// reasoning item — the stateless chaining loop for reasoning models.
+    #[test]
+    fn reasoning_encrypted_content_survives_the_round_trip() {
+        let model = OpenAIResponsesModel::new("gpt-5.1", "sk-test");
+        let resp: ResponsesApiResponse = serde_json::from_value(serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "model": "gpt-5.1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "hmm"}],
+                    "encrypted_content": "enc-1",
+                    "status": "completed"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "ok", "annotations": []}]
+                }
+            ],
+            "error": null
+        }))
+        .expect("response parses");
+
+        let response = model.process_response(resp).expect("response maps");
+        let thinking = response
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                ModelResponsePart::Thinking(thinking) => Some(thinking),
+                _ => None,
+            })
+            .expect("thinking part present");
+        assert_eq!(
+            thinking
+                .provider_details
+                .as_ref()
+                .and_then(|details| details.get("encrypted_content"))
+                .and_then(|value| value.as_str()),
+            Some("enc-1")
+        );
+
+        let (_, items) = history_to_wire(
+            &[single_request(ModelRequestPart::ModelResponse(Box::new(
+                response,
+            )))],
+            0,
+        )
+        .expect("history converts");
+        match &items[0] {
+            wire::InputItem::Typed(wire::TypedInputItem::Reasoning {
+                encrypted_content, ..
+            }) => assert_eq!(encrypted_content.as_deref(), Some("enc-1")),
+            other => panic!("expected a reasoning item, got {other:?}"),
+        }
+    }
+
+    /// Over real HTTP the request body carries the wire item forms: input
+    /// as an array whose user turn is an easy message, the legacy
+    /// `stream:false` key, and no optional keys the caller did not set.
+    #[tokio::test]
+    async fn http_request_body_uses_wire_item_forms() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/responses"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(completed_response_body(None)),
+            )
+            .mount(&server)
+            .await;
+
+        let model = OpenAIResponsesModel::new("o3-mini", "sk-test").with_base_url(server.uri());
+        let mut req = ModelRequest::new();
+        req.add_user_prompt("Hello");
+        model
+            .request(
+                &[req],
+                &ModelSettings::new(),
+                &ModelRequestParameters::new(),
+            )
+            .await
+            .expect("turn ok");
+
+        let received = server.received_requests().await.expect("requests recorded");
+        assert_eq!(received.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+
+        assert_eq!(body["stream"], false);
+        let input = body["input"].as_array().expect("input is a list");
+        assert_eq!(input.len(), 1);
+        assert_eq!(
+            input[0],
+            serde_json::json!({"role": "user", "content": "Hello"})
+        );
+        assert!(
+            input[0].get("type").is_none(),
+            "user input stays an easy message, got: {}",
+            input[0]
+        );
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
     }
 }

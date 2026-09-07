@@ -7,12 +7,10 @@
 //! connection lifetime limit — but only before any caller-visible event
 //! escapes.
 
-use super::convert::{history_to_wire, tool_choice_to_wire, tool_to_wire};
 use super::events::{StreamEvent, failure, failure_kind, translate};
 use super::session::{ChannelSink, CollectSink, EventSink, MAX_ATTEMPTS};
-use super::wire::{
-    CreateResponseRequest, ReasoningSettings, ResponseInput, ResponseObject, WsErrorEnvelope, codes,
-};
+use super::wire::{ResponseObject, WsErrorEnvelope, codes};
+use super::{RequestOverlay, ResponsesApiRequest};
 use crate::error::ModelError;
 use crate::model::{ModelRequestParameters, StreamedResponse};
 use crate::openai::responses::OpenAIResponsesModel;
@@ -20,7 +18,6 @@ use serde::Serialize;
 use serdes_ai_core::messages::{ModelRequest, ModelResponseStreamEvent};
 use serdes_ai_core::{FinishReason, ModelResponse, ModelSettings, RequestUsage};
 use serdes_ai_streaming::websocket::{WebSocketConfig, WebSocketStream, WsStreamMessage};
-use serdes_ai_tools::ToolDefinition;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -29,13 +26,15 @@ use tokio_stream::wrappers::ReceiverStream;
 /// The codex wire form is flat: `type` plus the response parameters at the
 /// top level (`{"type":"response.create","model":…,"input":…}`), with no
 /// `response` wrapper. The live backend reads `model` from the frame root
-/// and reports `None` when it is nested.
+/// and reports `None` when it is nested. HTTP and the websocket share one
+/// request type; the frame flattens it, and the unified request leaves
+/// `stream` unset on this transport.
 #[derive(Serialize)]
 struct ResponseCreateFrame<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     #[serde(flatten)]
-    response: &'a CreateResponseRequest,
+    response: &'a ResponsesApiRequest,
 }
 
 /// Outcome of one websocket attempt.
@@ -248,7 +247,13 @@ async fn read_ws_events(
     }
 }
 
-/// Build the request body for a turn.
+/// Build the request body for a websocket turn.
+///
+/// The mapping is shared with the HTTP path (see
+/// `OpenAIResponsesModel::compose_request`); the websocket pins its
+/// transport fields: delta-only input past the session's skip point,
+/// `store` from the session mode, `stream` omitted entirely, no routing
+/// fields the transport has never sent.
 pub(super) fn build_request(
     model: &OpenAIResponsesModel,
     messages: &[ModelRequest],
@@ -257,76 +262,19 @@ pub(super) fn build_request(
     skip: usize,
     previous_response_id: Option<String>,
     store: bool,
-) -> Result<CreateResponseRequest, ModelError> {
-    let (instructions, items) = history_to_wire(messages, skip).map_err(client_error)?;
-    let tools: Option<Vec<_>> = if params.tools.is_empty() {
-        None
-    } else {
-        Some(
-            params
-                .tools
-                .iter()
-                .map(|tool: &ToolDefinition| tool_to_wire(tool))
-                .collect(),
-        )
-    };
-    Ok(CreateResponseRequest {
-        model: model.model_name.clone(),
-        // Always a list, including when empty. A chained turn whose new
-        // items are all skipped has nothing left to add, and the API rejects
-        // the empty string an untagged Text variant serializes to with
-        // "Input must be a list".
-        input: ResponseInput::Items(items),
-        instructions,
-        tools,
-        tool_choice: tool_choice_to_wire(params.tool_choice.as_ref()),
-        temperature: settings.temperature,
-        top_p: settings.top_p,
-        max_output_tokens: settings.max_tokens,
-        stream: None,
-        background: None,
-        store: Some(store),
-        previous_response_id,
-        reasoning: reasoning_from_settings(&model.default_settings),
-        parallel_tool_calls: settings.parallel_tool_calls,
-        metadata: None,
-        user: None,
-        truncation: None,
-        include: None,
-        text: None,
-        service_tier: None,
-    })
-}
-
-/// Map the model's reasoning settings onto the wire form.
-///
-/// Effort passes through verbatim; the summary is one of three plain
-/// strings on the wire.
-fn reasoning_from_settings(
-    settings: &super::OpenAIResponsesModelSettings,
-) -> Option<ReasoningSettings> {
-    let effort = settings
-        .reasoning_effort
-        .as_ref()
-        .map(|effort| effort.as_str().to_string());
-    let summary = settings
-        .reasoning_summary
-        .map(|summary| serde_json::Value::String(summary.as_str().to_string()));
-    if effort.is_none() && summary.is_none() {
-        None
-    } else {
-        Some(ReasoningSettings { effort, summary })
-    }
-}
-
-/// Map a protocol error onto a model error.
-fn client_error(error: super::convert::ResponsesError) -> ModelError {
-    ModelError::provider(
-        "openai",
-        error.code(),
-        error.to_string(),
-        failure_kind(error.code()),
-        None,
+) -> Result<ResponsesApiRequest, ModelError> {
+    model.compose_request(
+        messages,
+        settings,
+        params,
+        RequestOverlay {
+            skip,
+            stream: None,
+            store: Some(store),
+            previous_response_id,
+            service_tier: None,
+            truncation: None,
+        },
     )
 }
 
