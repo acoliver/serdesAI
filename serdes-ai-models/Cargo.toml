@@ -69,3 +69,4 @@ tokio-test = { workspace = true }
 wiremock = { workspace = true }
 mockall = { workspace = true }
 rstest = { workspace = true }
+tokio-tungstenite = { workspace = true }

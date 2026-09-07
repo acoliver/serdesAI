@@ -4420,6 +4420,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-test",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "url",
  "uuid",
