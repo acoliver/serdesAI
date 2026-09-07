@@ -7,12 +7,12 @@
 //! failed turn surfaces as an error instead of a synthetic completion.
 
 use crate::types::{OutputItem, ResponseObject, StreamEvent};
+use serdes_ai_core::FinishReason;
 use serdes_ai_core::messages::{
     ModelResponsePart, ModelResponsePartDelta, ModelResponseStreamEvent, PartDeltaEvent,
     PartEndEvent, PartStartEvent, StreamCompleteEvent, TextPart, TextPartDelta, ThinkingPart,
     ThinkingPartDelta, ToolCallArgs, ToolCallPart, ToolCallPartDelta,
 };
-use serdes_ai_core::FinishReason;
 use serdes_ai_models::ModelError;
 
 /// Translate one wire event into zero or more model stream events.

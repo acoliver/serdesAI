@@ -14,12 +14,12 @@ use crate::error::{HttpErrorEnvelope, ResponsesError};
 use crate::types::{CreateResponseRequest, StreamEvent};
 use crate::websocket::{self, WebSocketSessionConfig};
 use axum::{
+    Json, Router,
     body::{Body, Bytes},
-    extract::{ws::WebSocketUpgrade, State},
-    http::{header, StatusCode},
+    extract::{State, ws::WebSocketUpgrade},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};

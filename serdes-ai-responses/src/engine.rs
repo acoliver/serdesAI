@@ -8,7 +8,7 @@
 use crate::convert::{
     input_to_history, new_id, output_items_from_response, tool_choice, tool_definitions,
 };
-use crate::error::{codes, ResponsesError};
+use crate::error::{ResponsesError, codes};
 use crate::store::{InMemoryResponseStore, SessionResponseCache, StoredResponse};
 use crate::types::*;
 use chrono::Utc;

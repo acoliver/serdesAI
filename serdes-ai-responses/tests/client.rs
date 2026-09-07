@@ -14,8 +14,8 @@ use serdes_ai_core::messages::{
     ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, ModelResponseStreamEvent,
     SystemPromptPart, TextPart, UserPromptPart,
 };
-use serdes_ai_models::model::{Model, ModelRequestParameters};
 use serdes_ai_models::ModelError;
+use serdes_ai_models::model::{Model, ModelRequestParameters};
 use serdes_ai_responses::client::OpenResponsesModel;
 use serdes_ai_responses::types::{
     CreateResponseRequest, OutputContent, OutputItem, ResponseObject, ResponseStatus,
@@ -25,7 +25,7 @@ use serdes_ai_tools::ToolDefinition;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{accept_async, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, accept_async};
 
 /// A user turn with a plain text prompt.
 fn user_turn(text: &str) -> ModelRequest {
@@ -74,11 +74,13 @@ async fn ws_turns_map_responses_and_send_only_new_items() {
         .expect("first turn");
 
     assert_eq!(text_of(&first), "ok");
-    assert!(first
-        .vendor_id
-        .as_deref()
-        .unwrap_or("")
-        .starts_with("resp_"));
+    assert!(
+        first
+            .vendor_id
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("resp_")
+    );
     let first_id = first.vendor_id.clone().unwrap();
 
     history.push(ModelRequest::with_parts(vec![
@@ -607,7 +609,7 @@ async fn client_sends_function_tools_with_wire_type_tag() {
         let value = loop {
             match ws.next().await.unwrap().unwrap() {
                 Message::Text(text) => {
-                    break serde_json::from_str::<serde_json::Value>(&text).unwrap()
+                    break serde_json::from_str::<serde_json::Value>(&text).unwrap();
                 }
                 Message::Close(_) => panic!("client closed before sending a turn"),
                 _ => continue,

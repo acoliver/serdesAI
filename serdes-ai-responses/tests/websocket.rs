@@ -6,7 +6,7 @@ mod common;
 
 use common::{recording_model, spawn_server_with_ws_config};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -73,23 +73,31 @@ async fn turns_stream_events_with_terminal_completion() {
     assert_eq!(find(&events, "response.created")["sequence_number"], 0);
     let completed = find(&events, "response.completed");
     assert_eq!(completed["response"]["status"], "completed");
-    assert!(completed["response"]["id"]
-        .as_str()
-        .unwrap()
-        .starts_with("resp_"));
+    assert!(
+        completed["response"]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("resp_")
+    );
     // wire names use the unprefixed forms for item-level events
-    assert!(events
-        .iter()
-        .any(|event| event["type"] == "response.output_item.added"));
-    assert!(events
-        .iter()
-        .any(|event| event["type"] == "response.output_text.delta"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.output_item.added")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.output_text.delta")
+    );
 
     // A second turn on the same socket works (sequential turns).
     let events = run_turn(&mut ws, json!({"model": "m", "input": "again"})).await;
-    assert!(events
-        .iter()
-        .any(|event| event["type"] == "response.completed"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.completed")
+    );
 }
 
 #[tokio::test]
@@ -147,9 +155,11 @@ async fn unknown_continuation_reports_error_and_connection_survives() {
 
     // Full-input replay still works on the same connection.
     let events = run_turn(&mut ws, json!({"model": "m", "input": "replayed"})).await;
-    assert!(events
-        .iter()
-        .any(|event| event["type"] == "response.completed"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.completed")
+    );
 }
 
 #[tokio::test]
@@ -231,9 +241,11 @@ async fn connection_lifetime_limit_closes_the_socket() {
 
     // Before the TTL the turn works.
     let events = run_turn(&mut ws, json!({"model": "m", "input": "early"})).await;
-    assert!(events
-        .iter()
-        .any(|event| event["type"] == "response.completed"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.completed")
+    );
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 

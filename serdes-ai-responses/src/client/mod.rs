@@ -8,23 +8,23 @@
 mod assembler;
 
 use crate::convert::{history_to_wire, tool_choice_to_wire, tool_to_wire};
-use crate::error::{codes, WsErrorEnvelope};
+use crate::error::{WsErrorEnvelope, codes};
 use crate::types::{
     CreateResponseRequest, ReasoningSettings, ResponseObject, ResponseStatus, StreamEvent,
 };
 use async_trait::async_trait;
 use serde::Serialize;
-use serdes_ai_core::messages::{ModelRequest, ModelRequestPart, ModelResponseStreamEvent};
 use serdes_ai_core::FinishReason;
 use serdes_ai_core::ModelFailureKind;
+use serdes_ai_core::messages::{ModelRequest, ModelRequestPart, ModelResponseStreamEvent};
 use serdes_ai_core::{ModelResponse, ModelSettings, RequestUsage};
-use serdes_ai_models::model::{Model, ModelRequestParameters, StreamedResponse};
-use serdes_ai_models::profile::{openai_gpt4o_profile, ModelProfile};
 use serdes_ai_models::ModelError;
+use serdes_ai_models::model::{Model, ModelRequestParameters, StreamedResponse};
+use serdes_ai_models::profile::{ModelProfile, openai_gpt4o_profile};
 use serdes_ai_streaming::websocket::{WebSocketConfig, WebSocketStream, WsStreamMessage};
 use serdes_ai_tools::ToolDefinition;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Transport used to reach the endpoint.
@@ -860,9 +860,9 @@ async fn run_http_stream(
 
 #[cfg(test)]
 mod input_shape_tests {
-    use super::{build_request, Inner, Session, Transport};
-    use serdes_ai_core::messages::request::ModelRequest;
+    use super::{Inner, Session, Transport, build_request};
     use serdes_ai_core::ModelSettings;
+    use serdes_ai_core::messages::request::ModelRequest;
     use serdes_ai_models::model::ModelRequestParameters;
 
     fn inner() -> Inner {

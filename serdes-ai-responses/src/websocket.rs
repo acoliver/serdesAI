@@ -30,7 +30,7 @@
 //!   which turn an event belongs to.
 
 use crate::engine::ResponsesEngine;
-use crate::error::{codes, ResponsesError, WsErrorEnvelope};
+use crate::error::{ResponsesError, WsErrorEnvelope, codes};
 use crate::store::SessionResponseCache;
 use crate::types::StreamEvent;
 use axum::extract::ws::{Message, WebSocket};
@@ -172,7 +172,7 @@ async fn run_turn(
         Err(err) => {
             return Some(ResponsesError::InvalidRequest(format!(
                 "frame is not valid JSON: {err}"
-            )))
+            )));
         }
     };
     let kind = match frame.get("type").and_then(Value::as_str) {
@@ -180,7 +180,7 @@ async fn run_turn(
         None => {
             return Some(ResponsesError::InvalidRequest(
                 "frame must carry a \"type\" field".to_string(),
-            ))
+            ));
         }
     };
     if kind != "response.create" {
@@ -196,7 +196,7 @@ async fn run_turn(
         _ => {
             return Some(ResponsesError::InvalidRequest(
                 "frame must be a JSON object".to_string(),
-            ))
+            ));
         }
     };
     response_object.remove("type");
@@ -216,7 +216,7 @@ async fn run_turn(
             Err(err) => {
                 return Some(ResponsesError::InvalidRequest(format!(
                     "invalid response payload: {err}"
-                )))
+                )));
             }
         };
 

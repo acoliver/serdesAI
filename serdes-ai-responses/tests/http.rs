@@ -4,7 +4,7 @@
 mod common;
 
 use common::{recording_model, spawn_server};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

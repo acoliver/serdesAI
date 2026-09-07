@@ -17,16 +17,16 @@
 //! and reused while fresh, so a second run within ~25 minutes skips the
 //! browser.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::StreamExt;
+use serdes_ai_core::ModelSettings;
 use serdes_ai_core::messages::{
     ModelRequest, ModelRequestPart, ModelResponsePartDelta, ModelResponseStreamEvent,
     UserPromptPart,
 };
-use serdes_ai_core::ModelSettings;
 use serdes_ai_models::model::{Model, ModelRequestParameters};
-use serdes_ai_providers::{chatgpt_oauth_config, run_pkce_flow, TokenResponse};
+use serdes_ai_providers::{TokenResponse, chatgpt_oauth_config, run_pkce_flow};
 use serdes_ai_responses::client::OpenResponsesModel;
 use std::io::Write as _;
 use std::path::PathBuf;
