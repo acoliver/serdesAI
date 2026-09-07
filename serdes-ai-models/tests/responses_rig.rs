@@ -1,8 +1,7 @@
 //! Raw-protocol tests against the wire-accurate Open Responses rig adopted
 //! under `tests/rig`: JSON and SSE turns over HTTP plus websocket turns
 //! (sequential turns, session-local `store: false` state, continuation
-//! errors, forbidden keys, ping/pong, connection lifetime), ported from the
-//! `serdes-ai-responses` rig suite.
+//! errors, forbidden keys, ping/pong, connection lifetime).
 
 mod rig;
 

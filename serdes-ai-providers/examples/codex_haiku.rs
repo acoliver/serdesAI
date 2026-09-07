@@ -1,21 +1,28 @@
-//! Live smoke test for the WebSocket transport against the real codex backend.
+//! Live smoke test for the responses model's WebSocket transport.
 //!
-//! Runs the ChatGPT OAuth PKCE flow from `serdes-ai-providers` (the codex
-//! CLI's client id, browser opens automatically, callback on
-//! localhost:1455), then exercises the selected model over `wss://`.
+//! Two variants share one code path:
+//!
+//! - **default**: `wss://api.openai.com/v1/responses`, token read from the
+//!   `OPENAI_API_KEY` environment variable.
+//! - **codex** (`--codex` flag or `CODEX=1`): the ChatGPT codex backend at
+//!   `wss://chatgpt.com/backend-api/codex/responses`, authenticated by the
+//!   OAuth PKCE flow from `serdes-ai-providers` (the codex CLI's client id,
+//!   browser opens automatically, callback on localhost:1455).
 //!
 //! ```bash
 //! # one haiku, streamed as deltas
-//! cargo run -p serdes-ai-responses --example codex_haiku
-//! cargo run -p serdes-ai-responses --example codex_haiku -- gpt-5.6-sol
+//! cargo run -p serdes-ai-providers --example codex_haiku
+//! cargo run -p serdes-ai-providers --example codex_haiku -- gpt-5.6-sol
+//! # codex backend instead of the plain API endpoint
+//! cargo run -p serdes-ai-providers --example codex_haiku -- --codex
 //! # tool-call round trip: model calls get_weather, example answers,
 //! # chained second turn returns the final answer
-//! cargo run -p serdes-ai-responses --example codex_haiku -- tools
+//! cargo run -p serdes-ai-providers --example codex_haiku -- tools
 //! ```
 //!
-//! Tokens are cached in `~/.keys/.serdes_codex_token.json` (never printed)
-//! and reused while fresh, so a second run within ~25 minutes skips the
-//! browser.
+//! Codex tokens are cached in `~/.keys/.serdes_codex_token.json` (never
+//! printed) and reused while fresh, so a second run within ~25 minutes
+//! skips the browser.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -26,14 +33,21 @@ use serdes_ai_core::messages::{
     UserPromptPart,
 };
 use serdes_ai_models::model::{Model, ModelRequestParameters};
+use serdes_ai_models::openai::OpenAIResponsesModel;
+use serdes_ai_models::openai::responses::Transport;
 use serdes_ai_providers::{TokenResponse, chatgpt_oauth_config, run_pkce_flow};
-use serdes_ai_responses::client::OpenResponsesModel;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const ENDPOINT: &str = "wss://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL: &str = "gpt-5.6-luna";
+/// Plain OpenAI Responses websocket endpoint (default variant).
+const DEFAULT_ENDPOINT: &str = "wss://api.openai.com/v1/responses";
+/// ChatGPT codex backend (`--codex` / `CODEX=1`).
+const CODEX_ENDPOINT: &str = "wss://chatgpt.com/backend-api/codex/responses";
+/// Default model on the plain OpenAI endpoint.
+const DEFAULT_MODEL: &str = "gpt-5.1";
+/// Default model on the codex backend.
+const CODEX_DEFAULT_MODEL: &str = "gpt-5.6-luna";
 /// Conservative reuse window; grants are typically valid for an hour.
 const REUSE_SECS: u64 = 25 * 60;
 
@@ -113,7 +127,7 @@ fn user_turn(text: &str) -> ModelRequest {
 /// Full tool-call round trip against the live backend: register a function
 /// tool, let the model call it, answer locally, and finish on a chained
 /// turn. Fails loudly if any leg of the loop is broken on the wire.
-async fn tool_round_trip(model: &OpenResponsesModel) -> Result<(), Box<dyn std::error::Error>> {
+async fn tool_round_trip(model: &OpenAIResponsesModel) -> Result<(), Box<dyn std::error::Error>> {
     use serdes_ai_core::messages::{ModelResponsePart, ToolCallArgs, ToolReturnPart};
     use serdes_ai_tools::ToolDefinition;
 
@@ -212,29 +226,52 @@ async fn tool_round_trip(model: &OpenResponsesModel) -> Result<(), Box<dyn std::
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    let mut model_name = DEFAULT_MODEL.to_owned();
+    let mut model_name: Option<String> = None;
     let mut tools_mode = false;
+    let mut codex = std::env::var("CODEX").is_ok_and(|v| v == "1");
     for arg in std::env::args().skip(1) {
-        if arg == "tools" {
-            tools_mode = true;
-        } else {
-            model_name = arg;
+        match arg.as_str() {
+            "tools" => tools_mode = true,
+            "--codex" => codex = true,
+            _ => model_name = Some(arg),
         }
     }
+    let name = model_name.unwrap_or_else(|| {
+        if codex {
+            CODEX_DEFAULT_MODEL.to_owned()
+        } else {
+            DEFAULT_MODEL.to_owned()
+        }
+    });
 
-    let token = obtain_token().await?;
-    let account = account_id(token.id_token.as_deref());
+    let (model, endpoint) = if codex {
+        let token = obtain_token().await?;
+        let mut model = OpenAIResponsesModel::new(&name, token.access_token.clone())
+            .with_base_url(CODEX_ENDPOINT)
+            .with_transport(Transport::WebSocket)
+            .with_session_chaining(true)
+            .with_header("Authorization", format!("Bearer {}", token.access_token))
+            .with_header("OpenAI-Beta", "responses_websockets=2026-02-06")
+            .with_header("originator", "serdesai_miniclient")
+            .with_header("User-Agent", "serdesai_miniclient/0.1 (codex ws smoke)");
+        if let Some(id) = account_id(token.id_token.as_deref()) {
+            model = model.with_header("chatgpt-account-id", id);
+        }
+        (model, CODEX_ENDPOINT)
+    } else {
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(
+            |_| "OPENAI_API_KEY not set; export it or pass --codex for the ChatGPT OAuth flow",
+        )?;
+        let model = OpenAIResponsesModel::new(&name, api_key.clone())
+            .with_base_url(DEFAULT_ENDPOINT)
+            .with_transport(Transport::WebSocket)
+            .with_session_chaining(true)
+            .with_header("Authorization", format!("Bearer {api_key}"));
+        (model, DEFAULT_ENDPOINT)
+    };
 
-    let mut model = OpenResponsesModel::new(model_name.clone(), ENDPOINT)
-        .bearer(token.access_token.clone())
-        .header("OpenAI-Beta", "responses_websockets=2026-02-06")
-        .header("originator", "serdesai_miniclient")
-        .header("User-Agent", "serdesai_miniclient/0.1 (codex ws smoke)");
-    if let Some(id) = &account {
-        model = model.header("chatgpt-account-id", id.clone());
-    }
     println!();
-    println!("Connecting: model={model_name} endpoint={ENDPOINT} transport=websocket");
+    println!("Connecting: model={name} endpoint={endpoint} transport=websocket");
     println!();
 
     if tools_mode {

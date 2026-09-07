@@ -9,10 +9,9 @@
 //! tokio-tungstenite at a spawned rig so the Responses client is validated
 //! against real protocol shapes instead of hand-built fakes.
 //!
-//! The rig originated as feature-gated source in `serdes-ai-responses`
-//! (feature `test-server`, not a product surface) and lives here so the
-//! client's integration tests can share it without the client crate. The
-//! wire and event model it serves is the crate's own
+//! The rig is test support, not a product surface, and lives here so the
+//! responses client's integration tests can run against real protocol
+//! shapes. The wire and event model it serves is the crate's own
 //! `openai::responses::{wire, events}`.
 //!
 //! Declare `mod rig;` from a test binary in `tests/` to use it:

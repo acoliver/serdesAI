@@ -223,11 +223,6 @@ pub use serdes_ai_graph as graph;
 #[cfg_attr(docsrs, doc(cfg(feature = "evals")))]
 pub use serdes_ai_evals as evals;
 
-/// OpenAI Responses API / Open Responses server.
-#[cfg(feature = "open-responses")]
-#[cfg_attr(docsrs, doc(cfg(feature = "open-responses")))]
-pub use serdes_ai_responses as responses;
-
 // ============================================================================
 // Macro Re-exports
 // ============================================================================

@@ -1,7 +1,8 @@
 //! Conversions between Open Responses wire types and serdesAI core types.
 //!
 //! Server half only: request-to-history and response-to-output-items, as
-//! used by the rig engine. The client half remains in `serdes-ai-responses`.
+//! used by the rig engine. The client half lives in
+//! `serdes_ai_models::openai::responses`.
 
 use super::error::ResponsesError;
 use chrono::Utc;

@@ -5,9 +5,8 @@
 //! conversation isolation, chain resets on mutated history, and concurrent
 //! conversations.
 //!
-//! The four scripted-fake recovery tests from the old `serdes-ai-responses`
-//! client suite (stale continuation, connection limit, hard error,
-//! mid-stream no-replay) already live in `responses_ws_fakes.rs`.
+//! The four scripted-fake recovery tests (stale continuation, connection
+//! limit, hard error, mid-stream no-replay) live in `responses_ws_fakes.rs`.
 #![cfg(feature = "responses-ws")]
 
 mod rig;
