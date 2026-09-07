@@ -333,15 +333,23 @@ usage, and the agent surfaces that usage through `AgentStreamEvent`.
 ## [Unreleased]
 
 ### Added
-- New `serdes-ai-responses` crate: a serdesAI `Model` client for the OpenAI Responses API as spoken by the codex CLI and [Open Responses](https://openresponses.org)-compatible servers (#65):
-  - `OpenResponsesModel` implements the `Model` trait, so agents run against any Responses endpoint unchanged (`agent.run(...)` / `agent.run_stream(...)`).
-  - WebSocket transport (`wss://…/v1/responses`): sends `{"type":"response.create","model":…,"input":[…]}` frames and maps the event stream (`output_item.added`, `output_text.delta`, `reasoning_summary_text.delta`, `function_call_arguments.delta`, …) onto `ModelResponseStreamEvent`s, ending with exactly one terminal `StreamComplete` carrying finish reason and usage.
-  - Session-stateful mode: the socket session keeps `previous_response_id` and sends `store: false` plus only the *new* input items each turn, instead of replaying the full history every run. Assistant output already known to the server is never re-sent. When a continuation fails (`previous_response_not_found`) the cached id is dropped and the full input replayed; when the server enforces its connection lifetime (`websocket_connection_limit_reached`) or the socket dies, the client reconnects and replays. Recovery applies only before any event has reached the caller, so partial output is never duplicated.
-  - HTTP stateful mode (`POST /v1/responses` with `store: true` + `previous_response_id` chaining, SSE parsing for streaming) for endpoints without websockets, including the codex endpoint shape (`{base_url}/responses` with a bearer token and extra headers, e.g. `chatgpt.com/backend-api/codex`).
-  - History mapping covers system prompts (as `instructions`), user text/image input, tool calls and tool returns (as `function_call` / `function_call_output` items), and reasoning with `encrypted_content` round-trip.
+- `OpenAIResponsesModel` in `serdes-ai-models` gains a WebSocket transport behind the `responses-ws` feature and opt-in conversation-keyed session chaining on both transports (#65, #66):
+  - WebSocket turns send the flat `{"type":"response.create","model":...}` frame the codex CLI and [Open Responses](https://openresponses.org) servers speak and map the event stream (`output_item.added`, `output_text.delta`, `reasoning_summary_text.delta`, `function_call_arguments.delta`, ...) onto `ModelResponseStreamEvent`s, ending with exactly one terminal `StreamComplete` carrying finish reason and usage.
+  - Session chaining (`with_session_chaining(true)`) keeps per-conversation state (`previous_response_id` plus the requests already delivered) and sends only each turn's new input items: the websocket holds a live socket per conversation with `store: false`, HTTP persists every turn with `store: true` and streams SSE. Stale continuations replay the full input; connection-limit and dead-socket failures reconnect. Recovery applies only before any event has reached the caller, so partial output is never duplicated.
+  - Request building is wire-accurate: history maps to `instructions` plus wire `InputItems` (tool calls and returns as `function_call` / `function_call_output` items, reasoning with `encrypted_content` round-trip), and SSE streaming enforces the terminal-event contract: exactly one terminal event, always last.
+  - Model errors from response envelopes map to `ModelError::Provider { code }` on both transports.
+  - The wire-accurate Open Responses server that exercised the client now ships as serdes-ai-models test support (`tests/rig`, not a product surface), exercising both transports, chaining, and connection-lifetime enforcement.
+  - The `codex_haiku` example moved to `serdes-ai-providers/examples` and now defaults to `wss://api.openai.com/v1/responses` with `OPENAI_API_KEY`; the codex backend (PKCE OAuth, codex headers) activates behind `--codex` or `CODEX=1`.
 - `WebSocketStream::connect` in `serdes-ai-streaming` now applies configured headers to the HTTP upgrade request (auth previously silently dropped) and bounds the handshake by the configured timeout.
-- `serdes-ai` facade gains an `open-responses` feature (also part of `full`) re-exporting the crate as `serdes_ai::responses`.
-- A wire-accurate Open Responses server ships behind the non-default `test-server` feature as the crate's integration-test rig (not a product surface): it exercises both transports, chaining, TTL enforcement, and the error codes above.
+
+### Breaking
+- The `serdes-ai-responses` crate is removed; the client is the `openai::responses` module of `serdes-ai-models` (`OpenAIResponsesModel`), with the WebSocket transport behind the `responses-ws` feature (#65, #66).
+- The `serdes-ai` facade feature `open-responses` is replaced by `openai-responses-ws = ["serdes-ai-models/responses-ws"]`, also part of `full`; the `serdes_ai::responses` re-export is gone (#66).
+- `ResponsesApiRequest.input` is now the wire `InputItems` type; the bespoke `ResponseInput` / `ResponseInputContent` / `ResponseInputPart` types are removed (#66).
+- Tool returns serialize as `function_call_output` items instead of bespoke messages (#66).
+- Multiple system prompts join into `instructions` instead of last-wins (#66).
+- Unsupported media parts fail the request instead of being silently skipped (#66).
+- Model errors from response envelopes map to `Provider { code }` on both transports (#66).
 
 ### Planned
 - OpenAI Realtime API support
