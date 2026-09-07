@@ -5,149 +5,27 @@
 //! reconnect after the server's connection lifetime limit, hard error
 //! surfacing, and the no-replay guarantee once a stream event has escaped
 //! to the caller. Full protocol behavior (mapping, delta-only chained
-//! sends) is covered by the local test rig in serdes-ai-responses and the
-//! session unit tests.
+//! sends, conversation isolation) is covered against the local rig by
+//! `responses_rig.rs` and `responses_client_ws.rs`, and by the session
+//! unit tests.
 #![cfg(feature = "responses-ws")]
 
 use futures::{SinkExt, StreamExt};
-use serdes_ai_core::messages::{
-    ModelRequest, ModelRequestPart, ModelResponseStreamEvent, SystemPromptPart, UserPromptPart,
-};
+use serdes_ai_core::messages::{ModelRequest, ModelRequestPart, ModelResponseStreamEvent};
 use serdes_ai_models::ModelError;
-use serdes_ai_models::model::{Model, ModelRequestParameters};
+use serdes_ai_models::model::Model;
 use serdes_ai_models::openai::responses::events::StreamEvent;
-use serdes_ai_models::openai::responses::wire::{
-    CreateResponseRequest, OutputContent, OutputItem, OutputItemStatus, ResponseInput,
-    ResponseObject, ResponseStatus, ResponseUsage,
-};
-use serdes_ai_models::openai::responses::{OpenAIResponsesModel, Transport};
+use serdes_ai_models::openai::responses::wire::{OutputItem, OutputItemStatus, ResponseInput};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 
-/// A user turn with a plain text prompt.
-fn user_turn(text: &str) -> ModelRequest {
-    ModelRequest::with_parts(vec![ModelRequestPart::UserPrompt(UserPromptPart::new(
-        text,
-    ))])
-}
+mod ws_fakes_common;
 
-/// A system turn.
-fn system_turn(text: &str) -> ModelRequest {
-    ModelRequest::with_parts(vec![ModelRequestPart::SystemPrompt(SystemPromptPart::new(
-        text,
-    ))])
-}
-
-fn params() -> ModelRequestParameters {
-    ModelRequestParameters::new()
-}
-
-fn settings() -> serdes_ai_core::ModelSettings {
-    serdes_ai_core::ModelSettings::default()
-}
-
-/// Concatenated text parts of a response.
-fn text_of(response: &serdes_ai_core::ModelResponse) -> String {
-    response
-        .text_parts()
-        .map(|part| part.content.as_str())
-        .collect()
-}
-
-/// A websocket-transport model dialing the fake server's endpoint.
-fn ws_client(addr: std::net::SocketAddr) -> OpenAIResponsesModel {
-    OpenAIResponsesModel::new("test-model", "test-key")
-        .with_base_url(format!("ws://{addr}/v1/responses"))
-        .with_transport(Transport::WebSocket)
-}
-
-type FakeWs = WebSocketStream<tokio::net::TcpStream>;
-
-/// Accept one websocket connection.
-async fn accept_ws(listener: &TcpListener) -> FakeWs {
-    let (stream, _) = listener.accept().await.unwrap();
-    accept_async(stream).await.unwrap()
-}
-
-/// Read one `response.create` frame from the client.
-async fn read_turn(ws: &mut FakeWs) -> CreateResponseRequest {
-    loop {
-        let message = ws.next().await.expect("frame").expect("ws ok");
-        match message {
-            Message::Text(text) => {
-                let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(value["type"], "response.create", "unexpected frame: {text}");
-                // Codex frames are flat; everything except `type` is the
-                // response payload.
-                value.as_object_mut().expect("frame object").remove("type");
-                return serde_json::from_value(value).unwrap();
-            }
-            Message::Close(_) => panic!("client closed before sending a turn"),
-            _ => continue,
-        }
-    }
-}
-
-/// Run a minimal-but-realistic turn: item added, text delta, item done,
-/// completed. The client assembles parts from the streamed item events, so
-/// a bare `response.completed` would leave the folded response empty.
-async fn send_completed_turn(ws: &mut FakeWs, id: &str, request: &CreateResponseRequest) {
-    let mut response = ResponseObject::in_progress(id, 0, request.model.clone(), request);
-    response.status = ResponseStatus::Completed;
-    response.output = vec![OutputItem::Message {
-        id: format!("msg_{id}"),
-        role: "assistant".to_string(),
-        status: OutputItemStatus::Completed,
-        content: vec![OutputContent::OutputText {
-            text: "ok".to_string(),
-            annotations: Vec::new(),
-        }],
-    }];
-    response.usage = Some(ResponseUsage {
-        input_tokens: Some(1),
-        output_tokens: Some(1),
-        total_tokens: Some(2),
-    });
-
-    let events = vec![
-        StreamEvent::OutputItemAdded {
-            sequence_number: 1,
-            output_index: 0,
-            item: OutputItem::Message {
-                id: format!("msg_{id}"),
-                role: "assistant".to_string(),
-                status: OutputItemStatus::InProgress,
-                content: Vec::new(),
-            },
-        },
-        StreamEvent::OutputTextDelta {
-            sequence_number: 2,
-            item_id: format!("msg_{id}"),
-            output_index: 0,
-            content_index: 0,
-            delta: "ok".to_string(),
-        },
-        StreamEvent::OutputItemDone {
-            sequence_number: 3,
-            output_index: 0,
-            item: response.output[0].clone(),
-        },
-        StreamEvent::ResponseCompleted {
-            sequence_number: 4,
-            response,
-        },
-    ];
-    for event in &events {
-        send_event(ws, event).await;
-    }
-}
-
-async fn send_event(ws: &mut FakeWs, event: &StreamEvent) {
-    ws.send(Message::text(serde_json::to_string(event).unwrap()))
-        .await
-        .unwrap();
-}
+use ws_fakes_common::{
+    accept_ws, params, read_turn, send_completed_turn, send_event, settings, system_turn, text_of,
+    user_turn, ws_client,
+};
 
 #[tokio::test]
 async fn stale_continuation_clears_chain_and_replays_full_input() {
