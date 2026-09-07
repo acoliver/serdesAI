@@ -305,7 +305,7 @@ async fn send_completed_turn(ws: &mut FakeWs, id: &str, request: &CreateResponse
 }
 
 async fn send_event(ws: &mut FakeWs, event: &StreamEvent) {
-    ws.send(Message::Text(serde_json::to_string(event).unwrap()))
+    ws.send(Message::text(serde_json::to_string(event).unwrap()))
         .await
         .unwrap();
 }
@@ -340,7 +340,7 @@ async fn stale_continuation_clears_chain_and_replays_full_input() {
                 "message": "previous response not found: resp_1",
             }
         });
-        ws.send(Message::Text(envelope.to_string())).await.unwrap();
+        ws.send(Message::text(envelope.to_string())).await.unwrap();
 
         // Retry: no continuation id, full input replayed.
         let replay = read_turn(&mut ws).await;
@@ -392,7 +392,7 @@ async fn connection_limit_error_reconnects_on_a_fresh_socket() {
                 "message": "websocket connection lifetime limit reached",
             }
         });
-        ws.send(Message::Text(envelope.to_string())).await.unwrap();
+        ws.send(Message::text(envelope.to_string())).await.unwrap();
         ws.send(Message::Close(None)).await.unwrap();
         drop(ws);
 
@@ -424,7 +424,7 @@ async fn hard_error_surfaces_as_model_error() {
             "status_code": 502,
             "error": {"code": "model_error", "message": "model boom"}
         });
-        ws.send(Message::Text(envelope.to_string())).await.unwrap();
+        ws.send(Message::text(envelope.to_string())).await.unwrap();
     });
 
     let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
@@ -453,6 +453,19 @@ fn text_response(text: &str) -> ModelResponse {
         vendor_id: None,
         vendor_details: None,
         kind: "response".to_string(),
+    }
+}
+
+/// An assistant-echo turn for extending a conversation history.
+fn response_turn(response: ModelResponse) -> ModelRequest {
+    ModelRequest::with_parts(vec![ModelRequestPart::ModelResponse(Box::new(response))])
+}
+
+/// Number of input items a `response.create` request carries.
+fn input_len(request: &CreateResponseRequest) -> usize {
+    match &request.input {
+        serdes_ai_responses::types::ResponseInput::Items(items) => items.len(),
+        other => panic!("expected items input, got {other:?}"),
     }
 }
 
@@ -505,7 +518,7 @@ async fn mid_stream_error_is_surfaced_without_replay() {
                 "message": "previous response not found: resp_1",
             }
         });
-        ws.send(Message::Text(envelope.to_string())).await.unwrap();
+        ws.send(Message::text(envelope.to_string())).await.unwrap();
 
         // The delta already escaped to the caller, so the client must NOT
         // send another response.create frame on this turn.
@@ -651,4 +664,219 @@ async fn client_sends_function_tools_with_wire_type_tag() {
         .expect("turn with tools");
     assert_eq!(text_of(&response), "ok");
     server.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Conversation keying: one model instance, many conversations
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ws_independent_conversations_stay_isolated() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // Conversation A keeps its own socket and chains across turns.
+        let mut ws_a = accept_ws(&listener).await;
+        let request = read_turn(&mut ws_a).await;
+        assert!(request.previous_response_id.is_none());
+        send_completed_turn(&mut ws_a, "resp_a1", &request).await;
+
+        let request = read_turn(&mut ws_a).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_a1"));
+        assert_eq!(input_len(&request), 1, "chained turn sends only new input");
+        send_completed_turn(&mut ws_a, "resp_a2", &request).await;
+
+        // A different first request starts a second conversation: its own
+        // socket, no continuation id, full input.
+        let mut ws_b = accept_ws(&listener).await;
+        let request_b = read_turn(&mut ws_b).await;
+        assert!(
+            request_b.previous_response_id.is_none(),
+            "a fresh conversation must not chain onto conversation A"
+        );
+        assert_eq!(
+            input_len(&request_b),
+            2,
+            "fresh conversation sends full input"
+        );
+
+        // The client awaits B's turn before sending A's next one, so B is
+        // completed here first.
+        send_completed_turn(&mut ws_b, "resp_b1", &request_b).await;
+
+        // Conversation A is unaffected by its sibling: it still chains on
+        // its own last response.
+        let request = read_turn(&mut ws_a).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_a2"));
+        send_completed_turn(&mut ws_a, "resp_a3", &request).await;
+    });
+
+    let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
+
+    let mut convo_a = vec![system_turn("sys a"), user_turn("first")];
+    let first = client
+        .request(&convo_a, &settings(), &params())
+        .await
+        .expect("conversation A turn 1");
+    convo_a.push(response_turn(first));
+    convo_a.push(user_turn("second"));
+    let second = client
+        .request(&convo_a, &settings(), &params())
+        .await
+        .expect("conversation A turn 2");
+
+    let convo_b = vec![system_turn("sys b"), user_turn("b1"), user_turn("b2")];
+    client
+        .request(&convo_b, &settings(), &params())
+        .await
+        .expect("conversation B turn 1");
+
+    convo_a.push(response_turn(second));
+    convo_a.push(user_turn("third"));
+    let third = client
+        .request(&convo_a, &settings(), &params())
+        .await
+        .expect("conversation A turn 3");
+    assert_eq!(text_of(&third), "ok");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ws_mutated_history_restarts_the_chain() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+
+        // Turn 1: full input, no continuation.
+        let request = read_turn(&mut ws).await;
+        assert!(request.previous_response_id.is_none());
+        send_completed_turn(&mut ws, "resp_1", &request).await;
+
+        // Turn 2: chains onto resp_1 with only the new item.
+        let request = read_turn(&mut ws).await;
+        assert_eq!(request.previous_response_id.as_deref(), Some("resp_1"));
+        assert_eq!(input_len(&request), 1);
+        send_completed_turn(&mut ws, "resp_2", &request).await;
+
+        // Turn 3: the caller mutated the conversation history (same first
+        // request, different later turn). The recorded chain no longer
+        // matches, so the client must drop the continuation id and replay
+        // the full input.
+        let request = read_turn(&mut ws).await;
+        assert!(
+            request.previous_response_id.is_none(),
+            "mutated history must drop the stale chain"
+        );
+        assert_eq!(input_len(&request), 3, "restart replays the full input");
+        send_completed_turn(&mut ws, "resp_3", &request).await;
+
+        // The restart happens in place: no extra connection may appear.
+        let extra = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(
+            extra.is_err(),
+            "a chain reset must reuse the socket, not reconnect"
+        );
+    });
+
+    let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
+    let mut history = vec![system_turn("sys"), user_turn("first")];
+    let first = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 1");
+    history.push(response_turn(first));
+    history.push(user_turn("second"));
+    let second = client
+        .request(&history, &settings(), &params())
+        .await
+        .expect("turn 2");
+    assert_eq!(text_of(&second), "ok");
+
+    // Same conversation, mutated history: replace the second user turn.
+    let mut mutated = history.clone();
+    mutated.pop();
+    mutated.push(user_turn("second, edited"));
+    let third = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request(&mutated, &settings(), &params()),
+    )
+    .await
+    .expect("turn 3 must not hang")
+    .expect("turn 3 succeeds after the chain reset");
+    assert_eq!(text_of(&third), "ok");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ws_concurrent_conversations_run_in_parallel() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // Accept the first conversation and hold its turn open. The second
+        // conversation must still connect and send while the first is in
+        // flight; a whole-model turn lock would deadlock here.
+        let mut ws_a = accept_ws(&listener).await;
+        let request_a = read_turn(&mut ws_a).await;
+        let mut ws_b = accept_ws(&listener).await;
+        let request_b = read_turn(&mut ws_b).await;
+        assert!(request_a.previous_response_id.is_none());
+        assert!(request_b.previous_response_id.is_none());
+        send_completed_turn(&mut ws_a, "resp_a", &request_a).await;
+        send_completed_turn(&mut ws_b, "resp_b", &request_b).await;
+    });
+
+    let client = OpenResponsesModel::new("test-model", format!("ws://{addr}/v1/responses"));
+    let turn_a = [user_turn("hello a")];
+    let turn_b = [user_turn("hello b")];
+    let settings = settings();
+    let params = params();
+    let (a, b) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            client.request(&turn_a, &settings, &params),
+            client.request(&turn_b, &settings, &params),
+        )
+    })
+    .await
+    .expect("concurrent conversations must not deadlock");
+    assert_eq!(text_of(&a.expect("conversation A")), "ok");
+    assert_eq!(text_of(&b.expect("conversation B")), "ok");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn http_conversations_stay_isolated() {
+    let (model, calls) = recording_model();
+    let addr = spawn_server(model).await;
+    let client = OpenResponsesModel::new("test-model", format!("http://{addr}/v1/responses"));
+
+    let mut convo_a = vec![system_turn("be brief"), user_turn("first")];
+    let first = client
+        .request(&convo_a, &settings(), &params())
+        .await
+        .expect("conversation A turn 1");
+    assert_eq!(text_of(&first), "ok");
+
+    // A different first request is a different conversation even through
+    // the same model instance: no chaining, full input.
+    let convo_b = vec![system_turn("other brief"), user_turn("b")];
+    let b = client
+        .request(&convo_b, &settings(), &params())
+        .await
+        .expect("conversation B turn 1");
+    assert_eq!(text_of(&b), "ok");
+
+    // Conversation A still chains onto its own last response.
+    convo_a.push(response_turn(first));
+    convo_a.push(user_turn("second"));
+    let second = client
+        .request(&convo_a, &settings(), &params())
+        .await
+        .expect("conversation A turn 2");
+    assert_eq!(text_of(&second), "ok");
+
+    // A1 sees 2; B1 sees 2 (a fresh conversation, not A's history); A2
+    // sees the chained 4. Under count-only skipping B would have chained
+    // onto A's response instead.
+    assert_eq!(*calls.lock().unwrap(), vec![2, 2, 4]);
 }

@@ -2,8 +2,10 @@
 //!
 //! [`OpenResponsesModel`] drives a Responses API endpoint (OpenAI, a codex
 //! endpoint, or any Open Responses-compatible server) over websockets or
-//! plain HTTP, and keeps conversation state in the session so each turn only
-//! sends the new input items.
+//! plain HTTP, and keeps per-conversation state so each turn only sends the
+//! new input items of its own conversation. Conversations are keyed by the
+//! first request of the history, so different conversations through one
+//! model instance stay isolated and run concurrently.
 
 mod assembler;
 
@@ -23,6 +25,8 @@ use serdes_ai_models::model::{Model, ModelRequestParameters, StreamedResponse};
 use serdes_ai_models::profile::{ModelProfile, openai_gpt4o_profile};
 use serdes_ai_streaming::websocket::{WebSocketConfig, WebSocketStream, WsStreamMessage};
 use serdes_ai_tools::ToolDefinition;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -72,17 +76,27 @@ struct ResponseCreateFrame<'a> {
 /// surfaces.
 const MAX_ATTEMPTS: usize = 3;
 
-/// Connection-local session state.
+/// Connection-local state for one conversation.
 ///
-/// The websocket variant keeps the socket alive across turns; conversation
-/// state (`previous_response_id`, how many requests were already sent) lives
-/// here, which is what makes delta-only continuation turns possible. Turns
-/// are sequential: the protocol has no way to match interleaved responses.
-struct Session {
+/// Conversations are keyed by the fingerprint of the history's first
+/// request (see [`fingerprint`]). The websocket variant keeps the socket
+/// alive across the conversation's turns; continuation state
+/// (`previous_response_id`, the requests already sent) lives here, which is
+/// what makes delta-only continuation turns possible. Turns of one
+/// conversation are sequential (the protocol has no way to match
+/// interleaved responses) while different conversations run concurrently,
+/// each on its own socket.
+struct Conv {
     socket: Option<WebSocketStream>,
     previous_response_id: Option<String>,
-    sent_requests: usize,
+    /// Fingerprints of the requests the server already holds, in order. A
+    /// turn's history must extend this sequence exactly; anything else
+    /// voids the chain and forces a full replay.
+    sent_fingerprints: Vec<u64>,
 }
+
+/// A conversation whose turns serialize on their own lock.
+type SharedConv = Arc<Mutex<Conv>>;
 
 struct Inner {
     model_name: String,
@@ -92,7 +106,10 @@ struct Inner {
     reasoning: Option<ReasoningSettings>,
     http: reqwest::Client,
     profile: ModelProfile,
-    session: Mutex<Session>,
+    /// Conversation state, keyed by first-request fingerprint. The map lock
+    /// guards lookup and insert only (no await is performed under it);
+    /// each conversation serializes its own turns on its lock.
+    conversations: parking_lot::Mutex<HashMap<u64, SharedConv>>,
 }
 
 /// A serdesAI [`Model`] that talks to an OpenAI Responses API endpoint.
@@ -172,11 +189,7 @@ impl OpenResponsesModel {
                 reasoning: None,
                 http: reqwest::Client::new(),
                 profile: openai_gpt4o_profile(),
-                session: Mutex::new(Session {
-                    socket: None,
-                    previous_response_id: None,
-                    sent_requests: 0,
-                }),
+                conversations: parking_lot::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -251,6 +264,47 @@ enum RetryKind {
     Reconnect,
 }
 
+/// Fingerprint a request for in-process conversation keying.
+///
+/// The hash covers the serialized request parts. `DefaultHasher` is not
+/// stable across processes or compiler releases, so fingerprints are
+/// in-process only: they key in-memory conversation state and are never
+/// persisted nor sent on the wire. Serialization of the parts is
+/// deterministic for a given value (serde writes fields in declaration
+/// order), and infallible for these serde-derived types, so equal requests
+/// always hash equally within a process.
+fn fingerprint(request: &ModelRequest) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(&request.parts)
+        .expect("request parts are serde types and always serialize")
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Look up or create the conversation state for this history.
+///
+/// Conversations are keyed by the first request's fingerprint: a continued
+/// history lands in the conversation it extends, a fresh first request
+/// starts its own conversation. The map lock is held only for the lookup;
+/// turn serialization happens on the conversation's own lock, so different
+/// conversations never wait on each other.
+fn conversation(inner: &Inner, messages: &[ModelRequest]) -> SharedConv {
+    let key = messages
+        .first()
+        .map_or_else(|| fingerprint(&ModelRequest::new()), fingerprint);
+    let mut conversations = inner.conversations.lock();
+    conversations
+        .entry(key)
+        .or_insert_with(|| {
+            Arc::new(Mutex::new(Conv {
+                socket: None,
+                previous_response_id: None,
+                sent_fingerprints: Vec::new(),
+            }))
+        })
+        .clone()
+}
+
 /// Advance the continuation skip point past the assistant echo.
 ///
 /// After a completed turn the caller appends the response to its local
@@ -271,6 +325,43 @@ fn continuation_skip(messages: &[ModelRequest], sent: usize) -> usize {
     skip
 }
 
+impl Conv {
+    /// Align the recorded chain with the incoming history and compute this
+    /// attempt's skip point and continuation id.
+    ///
+    /// The recorded fingerprints must be a prefix of `fingerprints`: a
+    /// conversation may only extend the history the server already holds.
+    /// When the incoming history does not extend it (same first request,
+    /// mutated middle, or truncated), the chain is void: it is cleared here
+    /// so the turn resends the full input without a continuation id.
+    fn plan(&mut self, fingerprints: &[u64], messages: &[ModelRequest]) -> (usize, Option<String>) {
+        let extends = self.sent_fingerprints.len() <= fingerprints.len()
+            && self
+                .sent_fingerprints
+                .iter()
+                .zip(fingerprints)
+                .all(|(sent, incoming)| sent == incoming);
+        if !extends {
+            tracing::debug!(
+                sent = self.sent_fingerprints.len(),
+                incoming = fingerprints.len(),
+                "history diverged from the sent chain; restarting the conversation"
+            );
+            self.previous_response_id = None;
+            self.sent_fingerprints.clear();
+        }
+        let chained = self.previous_response_id.is_some();
+        let skip = if chained {
+            continuation_skip(messages, self.sent_fingerprints.len())
+        } else {
+            0
+        };
+        // Invariant: chained was derived from the same Option above.
+        let previous = chained.then(|| self.previous_response_id.clone().expect("checked"));
+        (skip, previous)
+    }
+}
+
 /// Run one turn over the websocket transport.
 ///
 /// `sink` receives every model event; events are only emitted once the turn
@@ -283,32 +374,28 @@ async fn run_ws_turn(
     params: &ModelRequestParameters,
     sink: &mut dyn EventSink,
 ) -> Result<ResponseObject, ModelError> {
-    let mut session = inner.session.lock().await;
+    let fingerprints: Vec<u64> = messages.iter().map(fingerprint).collect();
+    let conv = conversation(inner, messages);
+    let mut state = conv.lock().await;
     let mut streamed_any = false;
     let mut last_cause: Option<String> = None;
 
     for _attempt in 0..MAX_ATTEMPTS {
         // Reconnect if needed. A fresh socket means a fresh server-side
         // session, so continuation state from the old socket is void.
-        if session.socket.is_none() {
+        if state.socket.is_none() {
             let mut config = WebSocketConfig::new(inner.endpoint.clone());
             config.headers = inner.headers.clone();
-            session.socket = Some(
+            state.socket = Some(
                 WebSocketStream::connect(config)
                     .await
                     .map_err(|e| ModelError::Connection(e.to_string()))?,
             );
-            session.previous_response_id = None;
-            session.sent_requests = 0;
+            state.previous_response_id = None;
+            state.sent_fingerprints.clear();
         }
 
-        let chained = session.previous_response_id.is_some();
-        let skip = if chained {
-            continuation_skip(messages, session.sent_requests)
-        } else {
-            0
-        };
-        let previous = chained.then(|| session.previous_response_id.clone().expect("checked"));
+        let (skip, previous) = state.plan(&fingerprints, messages);
         let request = build_request(inner, messages, settings, params, skip, previous, false)?;
         let frame = ResponseCreateFrame {
             kind: "response.create",
@@ -316,7 +403,7 @@ async fn run_ws_turn(
         };
         tracing::debug!(frame = %serde_json::to_string(&frame).unwrap_or_default(), "sending response.create");
 
-        let socket = session.socket.as_mut().expect("socket ensured above");
+        let socket = state.socket.as_mut().expect("socket ensured above");
         let mut outcome = match socket.send_json(&frame).await {
             Ok(()) => None,
             Err(e) => Some(if streamed_any {
@@ -333,17 +420,17 @@ async fn run_ws_turn(
 
         match outcome.expect("outcome set") {
             AttemptOutcome::Finished(response, _reason) => {
-                session.previous_response_id = Some(response.id.clone());
-                session.sent_requests = messages.len();
+                state.previous_response_id = Some(response.id.clone());
+                state.sent_fingerprints = fingerprints.clone();
                 return Ok(*response);
             }
             AttemptOutcome::Retry(RetryKind::StaleContinuation) => {
-                session.previous_response_id = None;
-                session.sent_requests = 0;
+                state.previous_response_id = None;
+                state.sent_fingerprints.clear();
                 continue;
             }
             AttemptOutcome::Retry(RetryKind::Reconnect) => {
-                session.socket = None;
+                state.socket = None;
                 continue;
             }
             AttemptOutcome::Failed(error) => return Err(error),
@@ -686,16 +773,13 @@ impl OpenResponsesModel {
         params: &ModelRequestParameters,
     ) -> Result<ModelResponse, ModelError> {
         let inner = &self.inner;
-        let mut session = inner.session.lock().await;
+        let fingerprints: Vec<u64> = messages.iter().map(fingerprint).collect();
+        let conv = conversation(inner, messages);
+        let mut state = conv.lock().await;
 
         for _attempt in 0..MAX_ATTEMPTS {
-            let chained = session.previous_response_id.is_some();
-            let skip = if chained {
-                continuation_skip(messages, session.sent_requests)
-            } else {
-                0
-            };
-            let previous = chained.then(|| session.previous_response_id.clone().expect("checked"));
+            let (skip, previous) = state.plan(&fingerprints, messages);
+            let chained = previous.is_some();
             let mut request =
                 build_request(inner, messages, settings, params, skip, previous, true)?;
             request.stream = Some(false);
@@ -717,8 +801,8 @@ impl OpenResponsesModel {
                     .map(|envelope| envelope.error.code)
                     .unwrap_or_default();
                 if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && chained {
-                    session.previous_response_id = None;
-                    session.sent_requests = 0;
+                    state.previous_response_id = None;
+                    state.sent_fingerprints.clear();
                     continue;
                 }
                 return Err(ModelError::http(status, format!("{code}: {body}")));
@@ -728,8 +812,8 @@ impl OpenResponsesModel {
                 .json()
                 .await
                 .map_err(|e| ModelError::InvalidResponse(e.to_string()))?;
-            session.previous_response_id = Some(object.id.clone());
-            session.sent_requests = messages.len();
+            state.previous_response_id = Some(object.id.clone());
+            state.sent_fingerprints = fingerprints.clone();
             return Ok(ModelResponse {
                 parts: crate::convert::parts_from_output(&object.output),
                 model_name: Some(inner.model_name.clone()),
@@ -775,16 +859,13 @@ async fn run_http_stream(
 ) -> Result<(), ModelError> {
     use futures::StreamExt;
 
-    let mut session = inner.session.lock().await;
+    let fingerprints: Vec<u64> = messages.iter().map(fingerprint).collect();
+    let conv = conversation(inner, messages);
+    let mut state = conv.lock().await;
 
     let response = loop {
-        let chained = session.previous_response_id.is_some();
-        let skip = if chained {
-            continuation_skip(messages, session.sent_requests)
-        } else {
-            0
-        };
-        let previous = chained.then(|| session.previous_response_id.clone().expect("checked"));
+        let (skip, previous) = state.plan(&fingerprints, messages);
+        let chained = previous.is_some();
         let mut request = build_request(inner, messages, settings, params, skip, previous, true)?;
         request.stream = Some(true);
 
@@ -806,8 +887,8 @@ async fn run_http_stream(
             .map(|envelope| envelope.error.code)
             .unwrap_or_default();
         if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && chained {
-            session.previous_response_id = None;
-            session.sent_requests = 0;
+            state.previous_response_id = None;
+            state.sent_fingerprints.clear();
             continue;
         }
         return Err(ModelError::http(status, format!("{code}: {body}")));
@@ -832,8 +913,8 @@ async fn run_http_stream(
             if let StreamEvent::ResponseCompleted { response, .. }
             | StreamEvent::ResponseIncomplete { response, .. } = &event
             {
-                session.previous_response_id = Some(response.id.clone());
-                session.sent_requests = messages.len();
+                state.previous_response_id = Some(response.id.clone());
+                state.sent_fingerprints = fingerprints.clone();
             }
             for translated in assembler::translate(event) {
                 match translated {
@@ -859,11 +940,13 @@ async fn run_http_stream(
 }
 
 #[cfg(test)]
-mod input_shape_tests {
-    use super::{Inner, Session, Transport, build_request};
+mod session_state_tests {
+    use super::{Conv, Inner, Transport, build_request, fingerprint};
     use serdes_ai_core::ModelSettings;
     use serdes_ai_core::messages::request::ModelRequest;
+    use serdes_ai_core::messages::{ModelRequestPart, UserPromptPart};
     use serdes_ai_models::model::ModelRequestParameters;
+    use std::collections::HashMap;
 
     fn inner() -> Inner {
         Inner {
@@ -874,19 +957,65 @@ mod input_shape_tests {
             reasoning: None,
             http: reqwest::Client::new(),
             profile: Default::default(),
-            session: tokio::sync::Mutex::new(Session {
-                socket: None,
-                previous_response_id: None,
-                sent_requests: 0,
-            }),
+            conversations: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    fn user_request(text: &str) -> ModelRequest {
+        ModelRequest::with_parts(vec![ModelRequestPart::UserPrompt(UserPromptPart::new(
+            text,
+        ))])
+    }
+
+    #[test]
+    fn fingerprints_match_identical_requests_and_split_different_ones() {
+        // Equality is by value: a conversation's history re-presents the
+        // same request values on every turn (parts carry their creation
+        // timestamp), so clones fingerprint alike.
+        let request = user_request("a");
+        assert_eq!(fingerprint(&request), fingerprint(&request.clone()));
+        assert_ne!(
+            fingerprint(&request),
+            fingerprint(&user_request("b")),
+            "different requests must not share a fingerprint"
+        );
+    }
+
+    #[test]
+    fn plan_keeps_the_chain_only_when_history_extends_the_sent_prefix() {
+        let mut conv = Conv {
+            socket: None,
+            previous_response_id: Some("resp_1".to_string()),
+            sent_fingerprints: vec![1, 2, 3],
+        };
+
+        // An extension chains and skips past the verified prefix.
+        let (skip, previous) = conv.plan(&[1, 2, 3, 4], &[]);
+        assert_eq!(previous.as_deref(), Some("resp_1"));
+        assert_eq!(skip, 3);
+        assert_eq!(conv.sent_fingerprints, vec![1, 2, 3]);
+
+        // A truncated or diverging history voids the chain: full replay,
+        // no continuation id.
+        let mut conv = Conv {
+            socket: None,
+            previous_response_id: Some("resp_1".to_string()),
+            sent_fingerprints: vec![1, 2, 3],
+        };
+        let (skip, previous) = conv.plan(&[1, 2, 9], &[]);
+        assert_eq!(previous, None);
+        assert_eq!(skip, 0);
+        assert!(conv.previous_response_id.is_none());
+        assert!(conv.sent_fingerprints.is_empty());
     }
 
     #[test]
     fn an_empty_turn_serializes_input_as_a_list() {
-        // Skipping every new item leaves nothing to send. The API rejects an
-        // empty string here with "Input must be a list", so the empty case
-        // has to stay an array.
+        // A chained turn whose history carries nothing new beyond the
+        // recorded chain (the caller re-sent exactly what was already
+        // delivered) skips every item. The API rejects an empty string
+        // here with "Input must be a list", so the empty case has to stay
+        // an array.
         let messages: Vec<ModelRequest> = Vec::new();
         let request = build_request(
             &inner(),
