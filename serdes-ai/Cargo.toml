@@ -39,7 +39,6 @@ full = [
     "macros",
     "tracing-integration",
     "otel",
-    "open-responses",
 ]
 
 # Model providers

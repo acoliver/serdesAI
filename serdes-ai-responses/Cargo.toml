@@ -34,7 +34,7 @@ futures = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream = { workspace = true }
 base64 = { workspace = true }
 
 # Test rig only (optional)
@@ -48,6 +48,5 @@ tracing-subscriber = { workspace = true }
 tokio-test = { workspace = true }
 rstest = { workspace = true }
 pretty_assertions = { workspace = true }
-tokio-tungstenite = "0.21"
-reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
 serdes-ai-responses = { path = ".", features = ["test-server"] }

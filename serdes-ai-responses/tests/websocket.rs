@@ -27,7 +27,9 @@ async fn run_turn(ws: &mut Ws, response: Value) -> Vec<Value> {
     // Codex sends response.create frames flat: parameters on the frame root.
     let mut frame = response;
     frame["type"] = json!("response.create");
-    ws.send(Message::Text(frame.to_string())).await.unwrap();
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
 
     let mut events = Vec::new();
     loop {
@@ -186,7 +188,9 @@ async fn stream_keys_are_ignored() {
 
 /// Like [`run_turn`] but sends an arbitrary frame.
 async fn run_turn_raw(ws: &mut Ws, frame: Value) -> Vec<Value> {
-    ws.send(Message::Text(frame.to_string())).await.unwrap();
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
     let mut events = Vec::new();
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
@@ -212,7 +216,7 @@ async fn ping_is_answered_with_pong() {
     let addr = spawn_server_with_ws_config(model, Default::default()).await;
     let mut ws = connect(&addr).await;
 
-    ws.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
+    ws.send(Message::Ping(vec![1, 2, 3].into())).await.unwrap();
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
@@ -252,7 +256,9 @@ async fn connection_lifetime_limit_closes_the_socket() {
     // After the TTL the turn is refused, the envelope carries the codex
     // retryable code, and the server closes the socket.
     ws.send(Message::Text(
-        json!({"type": "response.create", "response": {"model": "m", "input": "late"}}).to_string(),
+        json!({"type": "response.create", "response": {"model": "m", "input": "late"}})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
