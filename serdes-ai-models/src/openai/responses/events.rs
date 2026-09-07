@@ -436,7 +436,7 @@ pub fn failure(response: &ResponseObject) -> ModelError {
         .map(|error| error.code.clone())
         .unwrap_or_else(|| "response_failed".to_string());
     ModelError::provider(
-        "open-responses",
+        "openai",
         code.clone(),
         body.map(|error| error.message.clone())
             .unwrap_or_else(|| "response failed".to_string()),
@@ -446,7 +446,7 @@ pub fn failure(response: &ResponseObject) -> ModelError {
 }
 
 /// Classify a wire error code for retry/fallback policies.
-fn failure_kind(code: &str) -> ModelFailureKind {
+pub(super) fn failure_kind(code: &str) -> ModelFailureKind {
     match code {
         codes::WEBSOCKET_CONNECTION_LIMIT_REACHED => ModelFailureKind::RateLimited,
         codes::NOT_FOUND_ERROR | codes::PREVIOUS_RESPONSE_NOT_FOUND => ModelFailureKind::NotFound,

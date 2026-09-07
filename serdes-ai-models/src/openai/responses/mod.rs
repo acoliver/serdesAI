@@ -17,6 +17,15 @@ pub mod wire;
 /// serdesAI model stream events.
 pub mod events;
 
+mod convert;
+
+mod session;
+
+pub use session::Transport;
+
+#[cfg(feature = "responses-ws")]
+mod ws;
+
 use crate::error::ModelError;
 use crate::model::{Model, ModelRequestParameters, StreamedResponse};
 use crate::profile::{ModelProfile, openai_o1_profile};
@@ -35,6 +44,9 @@ use serdes_ai_core::{
     RequestUsage,
 };
 use serdes_ai_tools::ToolDefinition;
+use session::SharedConv;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ============================================================================
@@ -717,6 +729,19 @@ pub struct OpenAIResponsesModel {
     profile: ModelProfile,
     default_timeout: Duration,
     default_settings: OpenAIResponsesModelSettings,
+    /// Transport used to reach the endpoint; HTTP is the default so the
+    /// model's behavior is unchanged unless the websocket transport is
+    /// selected explicitly.
+    transport: Transport,
+    /// Headers applied to both the websocket handshake and HTTP requests.
+    headers: Vec<(String, String)>,
+    /// Whether turns chain per conversation (session state, delta-only
+    /// continuation input).
+    chaining: bool,
+    /// Conversation state, keyed by first-request fingerprint. The map lock
+    /// guards lookup and insert only (no await is performed under it);
+    /// each conversation serializes its own turns on its lock.
+    conversations: Arc<std::sync::Mutex<HashMap<u64, SharedConv>>>,
 }
 
 impl OpenAIResponsesModel {
@@ -735,6 +760,10 @@ impl OpenAIResponsesModel {
             profile,
             default_timeout: Duration::from_secs(300), // Longer for reasoning
             default_settings: OpenAIResponsesModelSettings::default(),
+            transport: Transport::Http,
+            headers: Vec::new(),
+            chaining: false,
+            conversations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -809,6 +838,40 @@ impl OpenAIResponsesModel {
     #[must_use]
     pub fn with_profile(mut self, profile: ModelProfile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Select the transport used to reach the endpoint.
+    ///
+    /// The websocket transport dials the base URL verbatim as the responses
+    /// endpoint (a full `wss://…/v1/responses` URL) and requires the
+    /// `responses-ws` feature; requests fail fast with a configuration
+    /// error when the feature is compiled out. HTTP (the default) appends
+    /// `/responses` to the base URL as before.
+    #[must_use]
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Add a header applied to both the websocket handshake and HTTP
+    /// requests.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Enable or disable conversation-keyed session chaining.
+    ///
+    /// With chaining on, turns keep per-conversation session state
+    /// (`previous_response_id` plus the requests already delivered) and
+    /// send only each turn's new input items. HTTP chaining is not
+    /// implemented yet; selecting chaining over HTTP fails the request
+    /// with a configuration error.
+    #[must_use]
+    pub fn with_session_chaining(mut self, chaining: bool) -> Self {
+        self.chaining = chaining;
         self
     }
 
@@ -1165,6 +1228,66 @@ impl OpenAIResponsesModel {
     }
 }
 
+/// Run one turn over the websocket transport, folding events into a
+/// complete response.
+#[cfg(feature = "responses-ws")]
+async fn ws_request(
+    model: &OpenAIResponsesModel,
+    messages: &[ModelRequest],
+    settings: &ModelSettings,
+    params: &ModelRequestParameters,
+) -> Result<ModelResponse, ModelError> {
+    ws::request(model, messages, settings, params).await
+}
+
+/// The websocket transport is compiled out; fail fast with a clear error.
+#[cfg(not(feature = "responses-ws"))]
+async fn ws_request(
+    model: &OpenAIResponsesModel,
+    messages: &[ModelRequest],
+    settings: &ModelSettings,
+    params: &ModelRequestParameters,
+) -> Result<ModelResponse, ModelError> {
+    let _ = (model, messages, settings, params);
+    Err(ModelError::Configuration(
+        "websocket transport requires the responses-ws feature".to_string(),
+    ))
+}
+
+/// Start a streamed turn over the websocket transport.
+#[cfg(feature = "responses-ws")]
+fn ws_stream(
+    model: &OpenAIResponsesModel,
+    messages: &[ModelRequest],
+    settings: &ModelSettings,
+    params: &ModelRequestParameters,
+) -> Result<StreamedResponse, ModelError> {
+    ws::stream(model, messages, settings, params)
+}
+
+/// The websocket transport is compiled out; fail fast with a clear error.
+#[cfg(not(feature = "responses-ws"))]
+fn ws_stream(
+    model: &OpenAIResponsesModel,
+    messages: &[ModelRequest],
+    settings: &ModelSettings,
+    params: &ModelRequestParameters,
+) -> Result<StreamedResponse, ModelError> {
+    let _ = (model, messages, settings, params);
+    Err(ModelError::Configuration(
+        "websocket transport requires the responses-ws feature".to_string(),
+    ))
+}
+
+/// The HTTP chaining path is a later stage; selecting chaining over HTTP
+/// fails fast instead of silently sending unchained turns.
+fn http_chaining_unavailable() -> ModelError {
+    ModelError::Configuration(
+        "http session chaining is not implemented yet; disable chaining or use the websocket transport"
+            .to_string(),
+    )
+}
+
 #[async_trait]
 impl Model for OpenAIResponsesModel {
     fn name(&self) -> &str {
@@ -1185,73 +1308,94 @@ impl Model for OpenAIResponsesModel {
         settings: &ModelSettings,
         params: &ModelRequestParameters,
     ) -> Result<ModelResponse, ModelError> {
-        let body = self.build_request(messages, settings, params, false);
+        match self.transport {
+            Transport::WebSocket => ws_request(self, messages, settings, params).await,
+            Transport::Http => {
+                if self.chaining {
+                    return Err(http_chaining_unavailable());
+                }
+                let body = self.build_request(messages, settings, params, false);
 
-        let timeout = settings.timeout.unwrap_or(self.default_timeout);
+                let timeout = settings.timeout.unwrap_or(self.default_timeout);
 
-        let mut request = self
-            .client
-            .post(format!("{}/responses", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .timeout(timeout);
+                let mut request = self
+                    .client
+                    .post(format!("{}/responses", self.base_url))
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .timeout(timeout);
 
-        if let Some(ref org) = self.organization {
-            request = request.header("OpenAI-Organization", org);
+                if let Some(ref org) = self.organization {
+                    request = request.header("OpenAI-Organization", org);
+                }
+                if let Some(ref project) = self.project {
+                    request = request.header("OpenAI-Project", project);
+                }
+
+                let response = request.json(&body).send().await?;
+
+                let status = response.status().as_u16();
+                if !response.status().is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(self.handle_error_response(status, &body));
+                }
+
+                let resp: ResponsesApiResponse = response
+                    .json()
+                    .await
+                    .map_err(|e| ModelError::invalid_response(e.to_string()))?;
+
+                self.process_response(resp)
+            }
         }
-        if let Some(ref project) = self.project {
-            request = request.header("OpenAI-Project", project);
-        }
-
-        let response = request.json(&body).send().await?;
-
-        let status = response.status().as_u16();
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(self.handle_error_response(status, &body));
-        }
-
-        let resp: ResponsesApiResponse = response
-            .json()
-            .await
-            .map_err(|e| ModelError::invalid_response(e.to_string()))?;
-
-        self.process_response(resp)
     }
 
-    /// Stream a response through the non-streaming request fallback.
+    /// Stream a response.
+    ///
+    /// The websocket transport streams wire events natively; HTTP keeps the
+    /// non-streaming request fallback, replaying the buffered completed
+    /// response as part events and ending with one terminal event.
     async fn request_stream(
         &self,
         messages: &[ModelRequest],
         settings: &ModelSettings,
         params: &ModelRequestParameters,
     ) -> Result<StreamedResponse, ModelError> {
-        // For now, fall back to non-streaming
-        // TODO: Implement proper streaming with ResponsesStreamParser
-        let response = self.request(messages, settings, params).await?;
+        match self.transport {
+            Transport::WebSocket => ws_stream(self, messages, settings, params),
+            Transport::Http => {
+                if self.chaining {
+                    return Err(http_chaining_unavailable());
+                }
 
-        let ModelResponse {
-            parts,
-            finish_reason,
-            usage,
-            ..
-        } = response;
+                // For now, fall back to non-streaming
+                // TODO: Implement proper streaming with ResponsesStreamParser
+                let response = self.request(messages, settings, params).await?;
 
-        // Part events first, terminal event last; the request error above
-        // short-circuits failures before any event is emitted.
-        let mut events: Vec<Result<ModelResponseStreamEvent, ModelError>> = parts
-            .into_iter()
-            .enumerate()
-            .map(|(idx, part)| {
-                Ok(ModelResponseStreamEvent::PartStart(PartStartEvent::new(
-                    idx, part,
-                )))
-            })
-            .collect();
+                let ModelResponse {
+                    parts,
+                    finish_reason,
+                    usage,
+                    ..
+                } = response;
 
-        events.push(Ok(stream_complete_event(finish_reason, usage.as_ref())));
+                // Part events first, terminal event last; the request error above
+                // short-circuits failures before any event is emitted.
+                let mut events: Vec<Result<ModelResponseStreamEvent, ModelError>> = parts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, part)| {
+                        Ok(ModelResponseStreamEvent::PartStart(PartStartEvent::new(
+                            idx, part,
+                        )))
+                    })
+                    .collect();
 
-        Ok(Box::pin(futures::stream::iter(events)))
+                events.push(Ok(stream_complete_event(finish_reason, usage.as_ref())));
+
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+        }
     }
 }
 

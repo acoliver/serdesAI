@@ -13,10 +13,11 @@ readme = "README.md"
 
 [features]
 default = ["openai"]
-full = ["openai", "anthropic", "google", "mistral", "groq", "ollama", "bedrock", "azure", "openrouter", "huggingface", "cohere", "chatgpt-oauth", "claude-code-oauth", "antigravity"]
+full = ["openai", "anthropic", "google", "mistral", "groq", "ollama", "bedrock", "azure", "openrouter", "huggingface", "cohere", "chatgpt-oauth", "claude-code-oauth", "antigravity", "responses-ws"]
 
 # Provider implementations
 openai = []
+responses-ws = ["serdes-ai-streaming/websocket"]
 anthropic = []
 google = []
 gemini = ["google"]  # Alias
