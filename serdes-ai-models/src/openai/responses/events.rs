@@ -17,10 +17,27 @@ use serdes_ai_core::messages::{
     ThinkingPartDelta, ToolCallArgs, ToolCallPart, ToolCallPartDelta,
 };
 
+/// A decoded data frame shared by the HTTP and websocket readers.
+pub(super) enum DataEvent {
+    Event(Box<StreamEvent>),
+    Error(super::wire::WsErrorEnvelope),
+}
+
+pub(super) fn decode(payload: &str) -> Result<DataEvent, ModelError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|e| ModelError::invalid_response(e.to_string()))?;
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("error") {
+        serde_json::from_value(value).map(DataEvent::Error)
+    } else {
+        serde_json::from_value(value).map(DataEvent::Event)
+    }
+    .map_err(|e| ModelError::invalid_response(e.to_string()))
+}
+
 /// A streaming event, used identically by SSE and the websocket transport.
 ///
-/// Every event carries a `sequence_number` that increases by one within a
-/// single response, starting at 0 for `response.created`.
+/// Supported events carry a `sequence_number` within a single response.
+/// Unknown external event names are ignored; malformed known events error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
@@ -220,10 +237,13 @@ pub enum StreamEvent {
         /// The final response object carrying `incomplete_details`.
         response: ResponseObject,
     },
+    /// An external event outside the supported subset. It produces no model event.
+    #[serde(other)]
+    Unknown,
 }
 
 impl StreamEvent {
-    /// The event's sequence number.
+    /// The event's sequence number, or zero for an ignored unknown event.
     #[must_use]
     pub fn sequence_number(&self) -> u64 {
         match self {
@@ -278,6 +298,7 @@ impl StreamEvent {
             | Self::ResponseIncomplete {
                 sequence_number, ..
             } => *sequence_number,
+            Self::Unknown => 0,
         }
     }
 
@@ -302,6 +323,7 @@ impl StreamEvent {
             Self::ResponseCompleted { .. } => "response.completed",
             Self::ResponseFailed { .. } => "response.failed",
             Self::ResponseIncomplete { .. } => "response.incomplete",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -309,6 +331,7 @@ impl StreamEvent {
 /// Translate one wire event into zero or more model stream events.
 pub fn translate(event: StreamEvent) -> Vec<Result<ModelResponseStreamEvent, ModelError>> {
     match event {
+        StreamEvent::Unknown => Vec::new(),
         StreamEvent::ResponseCreated { .. } | StreamEvent::ResponseInProgress { .. } => Vec::new(),
 
         StreamEvent::OutputItemAdded {

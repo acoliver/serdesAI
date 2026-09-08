@@ -485,3 +485,301 @@ async fn health_check() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), "ok");
 }
+
+#[tokio::test]
+async fn unknown_tool_output_is_rejected_without_invoking_model() {
+    let (model, calls) = recording_model();
+    let addr = spawn_server(model).await;
+    let response = client().post(format!("http://{addr}/v1/responses"))
+        .json(&json!({"model":"m","input":[{"type":"function_call_output","call_id":"missing","output":"x"}]}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown call_id 'missing'")
+    );
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replacing_instructions_preserves_input_system_messages_and_order() {
+    use rig::engine::ResponsesEngine;
+    use serdes_ai_models::mock::FunctionModel;
+    let engine = ResponsesEngine::new(std::sync::Arc::new(FunctionModel::constant_text("ok")));
+    let request = serde_json::from_value(json!({"model":"m", "instructions":"initial", "input":[
+        {"role":"system", "content":"input system"},
+        {"role":"user", "content":"first"},
+        {"role":"developer", "content":"mid-conversation developer"}
+    ]}))
+    .unwrap();
+    let turn = engine.prepare(&request, None).await.unwrap();
+    let input_history = serde_json::to_value(&turn.history[1..]).unwrap();
+    let output = engine.execute(turn).await.unwrap();
+    engine.persist(&request, None, &output).await;
+    let mut previous = output.response.id;
+    for instructions in [None, Some("replacement"), None, Some("another replacement")] {
+        let request = serde_json::from_value(json!({"model":"m", "instructions":instructions, "previous_response_id":previous, "input":"next"})).unwrap();
+        let turn = engine.prepare(&request, None).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&turn.history[1..4]).unwrap(),
+            input_history
+        );
+        if let Some(expected) = instructions {
+            assert_eq!(
+                serde_json::to_value(&turn.history[0]).unwrap()["parts"][0]["content"],
+                expected
+            );
+        }
+        let output = engine.execute(turn).await.unwrap();
+        engine.persist(&request, None, &output).await;
+        previous = output.response.id;
+    }
+}
+
+#[tokio::test]
+async fn rig_preserves_encrypted_reasoning_in_json_stream_and_stored_history() {
+    use serdes_ai_core::messages::*;
+    use serdes_ai_models::mock::FunctionModel;
+    let thinking = ThinkingPart::new("summary").with_provider_details(
+        [("encrypted_content".to_string(), json!("initial-ciphertext"))]
+            .into_iter()
+            .collect(),
+    );
+    let original = thinking.clone();
+    let model = FunctionModel::with_both(
+        move |_, _| ModelResponse::with_parts(vec![ModelResponsePart::Thinking(original.clone())]),
+        move |_, _| {
+            Box::pin(futures::stream::iter(vec![
+                Ok(ModelResponseStreamEvent::PartStart(PartStartEvent::new(
+                    0,
+                    ModelResponsePart::Thinking(thinking.clone()),
+                ))),
+                Ok(ModelResponseStreamEvent::PartDelta(PartDeltaEvent::new(
+                    0,
+                    ModelResponsePartDelta::Thinking(ThinkingPartDelta {
+                        content_delta: " extended".into(),
+                        signature_delta: None,
+                        provider_name: None,
+                        provider_details: Some(
+                            [("encrypted_content".to_string(), json!("final-ciphertext"))]
+                                .into_iter()
+                                .collect(),
+                        ),
+                    }),
+                ))),
+                Ok(ModelResponseStreamEvent::PartEnd(PartEndEvent::new(0))),
+                Ok(ModelResponseStreamEvent::StreamComplete(
+                    StreamCompleteEvent::new(serdes_ai_core::FinishReason::Stop),
+                )),
+            ]))
+        },
+    );
+    let engine = rig::engine::ResponsesEngine::new(std::sync::Arc::new(model));
+    let request = serde_json::from_value(json!({"model":"m", "input":"reason"})).unwrap();
+    let output = engine
+        .execute(engine.prepare(&request, None).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&output.response).unwrap()["output"][0]["encrypted_content"],
+        "initial-ciphertext"
+    );
+    let mut events = Vec::new();
+    let output = engine
+        .execute_streaming(
+            engine.prepare(&request, None).await.unwrap(),
+            &mut |event| {
+                events.push(serde_json::to_value(event).unwrap());
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&output.response).unwrap()["output"][0]["encrypted_content"],
+        "final-ciphertext"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e["type"] == "response.output_item.done")
+            .unwrap()["item"]["encrypted_content"],
+        "final-ciphertext"
+    );
+    engine.persist(&request, None, &output).await;
+    let stored = engine.get_response(&output.response.id).await.unwrap();
+    let ModelRequestPart::ModelResponse(response) = &stored.history.last().unwrap().parts[0] else {
+        panic!("assistant history");
+    };
+    let ModelResponsePart::Thinking(thinking) = &response.parts[0] else {
+        panic!("thinking");
+    };
+    assert_eq!(thinking.content, "summary extended");
+    assert_eq!(
+        thinking.provider_details.as_ref().unwrap()["encrypted_content"],
+        "final-ciphertext"
+    );
+}
+
+struct PendingModelStream(std::sync::Arc<tokio::sync::Notify>);
+impl futures::Stream for PendingModelStream {
+    type Item =
+        Result<serdes_ai_core::messages::ModelResponseStreamEvent, serdes_ai_models::ModelError>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Pending
+    }
+}
+impl Drop for PendingModelStream {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn disconnected_clients_cancel_stalled_rig_streams_without_persisting() {
+    for websocket in [false, true] {
+        let dropped = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = dropped.clone();
+        let model = serdes_ai_models::mock::FunctionModel::with_stream(move |_, _| {
+            Box::pin(PendingModelStream(signal.clone()))
+        });
+        let engine = std::sync::Arc::new(rig::engine::ResponsesEngine::new(std::sync::Arc::new(
+            model,
+        )));
+        let router = rig::server::ResponsesServer::from_engine(engine.clone()).router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let created: Value = if websocket {
+            let mut ws = connect(&addr).await;
+            ws.send(Message::text(
+                json!({"type":"response.create", "model":"m", "input":"stall"}).to_string(),
+            ))
+            .await
+            .unwrap();
+            let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+                panic!("created frame");
+            };
+            let created = serde_json::from_str(&text).unwrap();
+            ws.close(None).await.unwrap();
+            created
+        } else {
+            let mut body = client()
+                .post(format!("http://{addr}/v1/responses"))
+                .json(&json!({"model":"m", "input":"stall", "stream":true}))
+                .send()
+                .await
+                .unwrap()
+                .bytes_stream();
+            let chunk = body.next().await.unwrap().unwrap();
+            serde_json::from_str(
+                std::str::from_utf8(&chunk)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .strip_prefix("data: ")
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        tokio::time::timeout(Duration::from_secs(5), dropped.notified())
+            .await
+            .expect("model stream must drop after disconnect");
+        assert!(
+            engine
+                .get_response(created["response"]["id"].as_str().unwrap())
+                .await
+                .is_none()
+        );
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn saturated_websocket_input_cancels_stalled_turn_without_persisting() {
+    let dropped = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = dropped.clone();
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let start_signal = started.clone();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let call_count = calls.clone();
+    let model = serdes_ai_models::mock::FunctionModel::with_stream(move |_, _| {
+        call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        start_signal.notify_one();
+        Box::pin(PendingModelStream(signal.clone()))
+    });
+    let engine = std::sync::Arc::new(rig::engine::ResponsesEngine::new(std::sync::Arc::new(
+        model,
+    )));
+    let router = rig::server::ResponsesServer::from_engine(engine.clone()).router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut ws = connect(&addr).await;
+        let create = Message::text(
+            json!({"type":"response.create", "model":"m", "input":"stall"}).to_string(),
+        );
+        ws.send(create.clone()).await.unwrap();
+        started.notified().await;
+        let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+            panic!("created frame");
+        };
+        let created: Value = serde_json::from_str(&text).unwrap();
+        // Buffer all seventeen frames and Close before flushing, so the peer
+        // sees a full queue even though overflow itself will close the socket.
+        for _ in 0..17 {
+            ws.feed(create.clone()).await.unwrap();
+        }
+        ws.feed(Message::Close(None)).await.unwrap();
+        ws.flush().await.unwrap();
+        dropped.notified().await;
+        assert!(
+            engine
+                .get_response(created["response"]["id"].as_str().unwrap())
+                .await
+                .is_none()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("overflow must cancel the stalled turn and close the socket");
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn idle_rig_socket_expires_without_another_create_frame() {
+    let (model, _) = recording_model();
+    let addr = spawn_server_with_ws_config(
+        model,
+        rig::websocket::WebSocketSessionConfig {
+            connection_ttl: Duration::from_millis(50),
+        },
+    )
+    .await;
+    let mut ws = connect(&addr).await;
+    let event = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = event else {
+        panic!("limit envelope");
+    };
+    let error: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(error["error"]["code"], "websocket_connection_limit_reached");
+    assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+}

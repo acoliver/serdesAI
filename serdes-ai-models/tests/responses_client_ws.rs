@@ -223,8 +223,8 @@ async fn ws_independent_conversations_stay_isolated() {
         assert_eq!(input_len(&request), 1, "chained turn sends only new input");
         send_completed_turn(&mut ws_a, "resp_a2", &request).await;
 
-        // A different first request starts a second conversation: its own
-        // socket, no continuation id, full input.
+        // A different first user request starts a second conversation despite
+        // shared system prompts: its own socket, no continuation id, full input.
         let mut ws_b = accept_ws(&listener).await;
         let request_b = read_turn(&mut ws_b).await;
         assert!(
@@ -262,7 +262,7 @@ async fn ws_independent_conversations_stay_isolated() {
         .await
         .expect("conversation A turn 2");
 
-    let convo_b = vec![system_turn("sys b"), user_turn("b1"), user_turn("b2")];
+    let convo_b = vec![convo_a[0].clone(), user_turn("b1"), user_turn("b2")];
     client
         .request(&convo_b, &settings(), &params())
         .await
@@ -364,8 +364,9 @@ async fn ws_concurrent_conversations_run_in_parallel() {
     });
 
     let client = ws_client(addr).with_session_chaining(true);
-    let turn_a = [user_turn("hello a")];
-    let turn_b = [user_turn("hello b")];
+    let system = system_turn("shared instructions");
+    let turn_a = [system.clone(), user_turn("hello a")];
+    let turn_b = [system, user_turn("hello b")];
     let settings = settings();
     let params = params();
     let (a, b) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -536,5 +537,73 @@ async fn dropped_model_closes_the_socket_with_a_handshake() {
         .await
         .expect("turn ok");
     drop(client);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn long_turn_gets_a_full_idle_window_after_completion() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+        let first = read_turn(&mut ws).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        send_completed_turn(&mut ws, "resp_long", &first).await;
+        let second = read_turn(&mut ws).await;
+        assert_eq!(second.previous_response_id.as_deref(), Some("resp_long"));
+        send_completed_turn(&mut ws, "resp_next", &second).await;
+    });
+    let client = ws_client(addr)
+        .with_session_chaining(true)
+        .with_conversation_idle_ttl(Duration::from_millis(100));
+    let mut history = vec![user_turn("long")];
+    let first = client
+        .request(&history, &settings(), &params())
+        .await
+        .unwrap();
+    history.extend([response_turn(first), user_turn("next")]);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request(&history, &settings(), &params()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_last_model_drops_close_the_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+        let request = read_turn(&mut ws).await;
+        send_completed_turn(&mut ws, "resp_drop", &request).await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .unwrap(),
+            Some(Ok(Message::Close(_)))
+        ));
+    });
+    let client = ws_client(addr);
+    client
+        .request(&[user_turn("drop")], &settings(), &params())
+        .await
+        .unwrap();
+    let sibling = client.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let other = barrier.clone();
+    let a = tokio::task::spawn_blocking(move || {
+        barrier.wait();
+        drop(client);
+    });
+    let b = tokio::task::spawn_blocking(move || {
+        other.wait();
+        drop(sibling);
+    });
+    a.await.unwrap();
+    b.await.unwrap();
     server.await.unwrap();
 }

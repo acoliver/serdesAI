@@ -549,7 +549,7 @@ pub(crate) struct RequestOverlay {
     pub(crate) skip: usize,
     /// The `stream` key: HTTP always sends it, websocket frames omit it.
     pub(crate) stream: Option<bool>,
-    /// The `store` key: HTTP omits it, websocket sends the session mode.
+    /// HTTP chaining sends true, stateless HTTP omits it, websocket sends false.
     pub(crate) store: Option<bool>,
     /// Continuation id: HTTP carries the configured default, websocket the
     /// session chain.
@@ -605,11 +605,11 @@ pub struct OpenAIResponsesModel {
     /// and its websocket, if any, closed — at the next conversation
     /// lookup.
     conversation_idle_ttl: Duration,
-    /// Conversation state, keyed by first-request fingerprint. The map lock
+    /// Conversation state, keyed by the initial-prefix fingerprints. The map lock
     /// guards lookup, insert, and the idle-eviction scan (no await is
     /// performed under it); each conversation serializes its own turns on
     /// its lock.
-    conversations: Arc<std::sync::Mutex<HashMap<u64, SharedConv>>>,
+    conversations: Arc<std::sync::Mutex<HashMap<Vec<u64>, SharedConv>>>,
 }
 
 /// Map the model's reasoning settings onto the request's reasoning config.
@@ -628,6 +628,10 @@ fn reasoning_config(settings: &OpenAIResponsesModelSettings) -> Option<Reasoning
 
 impl OpenAIResponsesModel {
     /// Create a new OpenAI Responses model.
+    ///
+    /// The API key authenticates both HTTP requests and WebSocket handshakes.
+    /// An explicit `Authorization` header supplied with [`Self::with_header`]
+    /// overrides it on either transport.
     pub fn new(model_name: impl Into<String>, api_key: impl Into<String>) -> Self {
         let model_name = model_name.into();
         let profile = Self::profile_for_model(&model_name);
@@ -689,14 +693,14 @@ impl OpenAIResponsesModel {
         self
     }
 
-    /// Set the organization ID.
+    /// Set the organization ID for HTTP requests and WebSocket handshakes.
     #[must_use]
     pub fn with_organization(mut self, org: impl Into<String>) -> Self {
         self.organization = Some(org.into());
         self
     }
 
-    /// Set the project ID.
+    /// Set the project ID for HTTP requests and WebSocket handshakes.
     #[must_use]
     pub fn with_project(mut self, project: impl Into<String>) -> Self {
         self.project = Some(project.into());
@@ -737,12 +741,43 @@ impl OpenAIResponsesModel {
         self
     }
 
-    /// Add a header applied to both the websocket handshake and HTTP
-    /// requests.
+    /// Set a header applied to both the websocket handshake and HTTP requests.
+    ///
+    /// Explicit headers override the API key's `Authorization` header and the
+    /// organization/project headers, regardless of builder call order. Names
+    /// are case-insensitive; the last `with_header` call for a name wins.
+    /// WebSocket headers apply when a connection is opened, not on each turn
+    /// of an already-open connection.
     #[must_use]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// Resolve auth, routing, and explicit overrides before either transport
+    /// applies headers, so HTTP appending and WebSocket insertion agree.
+    fn request_headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        )];
+        if let Some(org) = &self.organization {
+            headers.push(("OpenAI-Organization".to_string(), org.clone()));
+        }
+        if let Some(project) = &self.project {
+            headers.push(("OpenAI-Project".to_string(), project.clone()));
+        }
+        for (name, value) in &self.headers {
+            if let Some((_, existing)) = headers
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            {
+                existing.clone_from(value);
+            } else {
+                headers.push((name.clone(), value.clone()));
+            }
+        }
+        headers
     }
 
     /// Enable or disable conversation-keyed session chaining.
@@ -752,6 +787,14 @@ impl OpenAIResponsesModel {
     /// send only each turn's new input items, on both transports: the
     /// websocket keeps a live socket per conversation with `store: false`,
     /// HTTP persists every turn with `store: true` and streams SSE.
+    ///
+    /// Lookup fingerprints the leading system-only requests plus the first
+    /// request containing other material. Preserve that prefix across turns.
+    /// Independent histories sharing that entire prefix cannot be identified
+    /// by content; use separate model instances (not clones) for them.
+    /// Replayed identical histories and changed sent prefixes reset the chain.
+    /// System-only histories do not chain into histories with user material.
+    /// This opt-in contract does not infer universal conversation identity.
     #[must_use]
     pub fn with_session_chaining(mut self, chaining: bool) -> Self {
         self.chaining = chaining;
@@ -941,51 +984,6 @@ impl OpenAIResponsesModel {
     }
 }
 
-/// Close every conversation socket still open when the last model handle
-/// drops, so the peer observes a websocket Close frame instead of a bare
-/// connection reset.
-///
-/// Best-effort by design: with a tokio runtime on the current thread the
-/// handshakes are awaited on spawned tasks; without one there is nothing
-/// to await on, so the sockets drop without a handshake. Conversations
-/// locked by an in-flight turn are skipped — that turn closes or reuses
-/// its own socket.
-#[cfg(feature = "responses-ws")]
-impl Drop for OpenAIResponsesModel {
-    fn drop(&mut self) {
-        // Only the last handle runs the teardown: clones share the
-        // conversation map, and a dropped clone (one is moved into every
-        // streaming task) must not tear down sockets the surviving
-        // handles still use.
-        if Arc::strong_count(&self.conversations) != 1 {
-            return;
-        }
-        let mut sockets = Vec::new();
-        {
-            let conversations = self
-                .conversations
-                .lock()
-                .expect("conversations map lock poisoned; it is only held for lookup/insert");
-            for conv in conversations.values() {
-                if let Ok(mut state) = conv.try_lock() {
-                    sockets.extend(state.take_socket());
-                }
-            }
-        }
-        if sockets.is_empty() {
-            return;
-        }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                for mut socket in sockets {
-                    session::close_socket(&mut socket).await;
-                }
-            });
-        }
-        // Without a runtime the sockets drop here, sans handshake.
-    }
-}
-
 /// Run one turn over the websocket transport, folding events into a
 /// complete response.
 #[cfg(feature = "responses-ws")]
@@ -1067,21 +1065,7 @@ impl Model for OpenAIResponsesModel {
 
                 let timeout = settings.timeout.unwrap_or(self.default_timeout);
 
-                let mut request = self
-                    .client
-                    .post(format!("{}/responses", self.base_url))
-                    .header("Authorization", format!("Bearer {}", self.api_key))
-                    .header("Content-Type", "application/json")
-                    .timeout(timeout);
-
-                if let Some(ref org) = self.organization {
-                    request = request.header("OpenAI-Organization", org);
-                }
-                if let Some(ref project) = self.project {
-                    request = request.header("OpenAI-Project", project);
-                }
-
-                let response = request.json(&body).send().await?;
+                let response = http::post(self, &body, timeout).await?;
 
                 let status = response.status().as_u16();
                 if !response.status().is_success() {

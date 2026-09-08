@@ -70,9 +70,29 @@ pub fn tool_choice(choice: Option<&ResponsesToolChoice>) -> Option<ToolChoice> {
     }
 }
 
-/// Convert the request input into serdesAI conversation history.
+// Keep API instructions separate from system/developer input messages.
+pub(super) const INSTRUCTIONS_KIND: &str = "responses_instructions";
+
+pub(super) fn instructions_request(instructions: &str) -> ModelRequest {
+    let mut request = ModelRequest::with_parts(vec![ModelRequestPart::SystemPrompt(
+        SystemPromptPart::new(instructions),
+    )]);
+    request.kind = INSTRUCTIONS_KIND.to_string();
+    request
+}
+
+pub(super) fn encrypted_content(thinking: &ThinkingPart) -> Option<String> {
+    thinking
+        .provider_details
+        .as_ref()?
+        .get("encrypted_content")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Convert request input into serdesAI conversation history.
 ///
-/// Instructions become a leading system prompt part. Consecutive assistant
+/// Instructions become a tagged leading system prompt. Consecutive assistant
 /// items (messages, reasoning, function calls) are folded into a single
 /// [`ModelResponse`] request part, mirroring how serdesAI agents record
 /// runs; consecutive function call outputs are folded into a single request
@@ -84,11 +104,7 @@ pub fn input_to_history(
 ) -> Result<Vec<ModelRequest>, ResponsesError> {
     let mut history: Vec<ModelRequest> = Vec::new();
     if let Some(instructions) = instructions {
-        let mut request = ModelRequest::new();
-        request.add_part(ModelRequestPart::SystemPrompt(SystemPromptPart::new(
-            instructions,
-        )));
-        history.push(request);
+        history.push(instructions_request(instructions));
     }
 
     // call_id -> tool name, seeded from function calls already present in
@@ -194,10 +210,11 @@ pub fn input_to_history(
             }
             InputItem::Typed(TypedInputItem::FunctionCallOutput { call_id, output }) => {
                 flush_assistant(&mut history, &mut pending);
-                let tool_name = call_names
-                    .get(&call_id)
-                    .cloned()
-                    .unwrap_or_else(|| call_id.clone());
+                let tool_name = call_names.get(&call_id).cloned().ok_or_else(|| {
+                    ResponsesError::InvalidRequest(format!(
+                        "function_call_output references unknown call_id '{call_id}'"
+                    ))
+                })?;
                 let part = match &mut pending {
                     Some(Pending::ToolReturns(parts)) => parts,
                     _ => {
@@ -379,7 +396,7 @@ pub fn output_items_from_response(response: &ModelResponse) -> Vec<OutputItem> {
             ModelResponsePart::Thinking(thinking) => Some(OutputItem::Reasoning {
                 id: new_id("rs_"),
                 summary: vec![SummaryTextItem::new(thinking.content.clone())],
-                encrypted_content: None,
+                encrypted_content: encrypted_content(thinking),
             }),
             ModelResponsePart::ToolCall(call) => Some(OutputItem::FunctionCall {
                 id: new_id("fc_"),

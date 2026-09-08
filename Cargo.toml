@@ -84,6 +84,9 @@ proc-macro2 = "1.0"
 darling = "0.20"
 
 # Testing
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+http-body = "1"
 tokio-test = "0.4"
 mockall = "0.14"
 wiremock = "0.6"

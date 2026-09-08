@@ -33,12 +33,12 @@ use super::engine::ResponsesEngine;
 use super::error::{FromResponsesError, ResponsesError, WsErrorEnvelope, codes};
 use super::store::SessionResponseCache;
 use axum::extract::ws::{Message, WebSocket};
-use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use serdes_ai_models::openai::responses::events::StreamEvent;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 /// Configuration for websocket sessions.
 #[derive(Debug, Clone)]
@@ -62,7 +62,7 @@ impl Default for WebSocketSessionConfig {
 const FORBIDDEN_KEYS: [&str; 3] = ["stream", "stream_options", "background"];
 
 /// Outgoing frame sender shared by turn execution and control paths.
-type FrameSender = mpsc::UnboundedSender<Message>;
+type FrameSender = mpsc::Sender<Message>;
 
 /// Serve one websocket connection until the client closes or the lifetime
 /// limit is reached.
@@ -71,13 +71,29 @@ pub async fn handle_socket(
     engine: Arc<ResponsesEngine>,
     config: WebSocketSessionConfig,
 ) {
-    // Split the socket so a forwarding task can write frames while the
-    // receive loop keeps reading; turns push events through an unbounded
-    // channel, keeping the sync engine sink non-blocking.
+    // Bounded queues let socket backpressure reach the model stream. Reading
+    // stays active during a turn so a Close cancels even a stalled model.
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (msg_tx, mut msg_rx) = mpsc::unbounded::<Message>();
+    let (input_tx, mut input_rx) = mpsc::channel(16);
+    let (disconnected_tx, mut disconnected_rx) = tokio::sync::oneshot::channel::<()>();
+    let reader = tokio::spawn(async move {
+        while let Some(frame) = ws_rx.next().await {
+            match frame {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(frame) => {
+                    // Reject overflow rather than parking the only reader that
+                    // can cancel a stalled turn on disconnect.
+                    if input_tx.try_send(frame).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = disconnected_tx.send(());
+    });
+    let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(64);
     let forwarder = tokio::spawn(async move {
-        while let Some(message) = msg_rx.next().await {
+        while let Some(message) = msg_rx.recv().await {
             if ws_tx.send(message).await.is_err() {
                 break;
             }
@@ -94,27 +110,41 @@ pub async fn handle_socket(
     // contract (a fresh connection is a fresh allowance).
     let mut turns_served = false;
 
-    while let Some(frame) = ws_rx.next().await {
-        let frame = match frame {
-            Ok(frame) => frame,
-            Err(err) => {
-                tracing::debug!("websocket receive error, closing: {err}");
+    loop {
+        let receive = async {
+            // A zero TTL is the rig's one-turn-per-connection mode.
+            if config.connection_ttl.is_zero() && !turns_served {
+                Ok(input_rx.recv().await)
+            } else {
+                tokio::time::timeout(
+                    config.connection_ttl.saturating_sub(connected_at.elapsed()),
+                    input_rx.recv(),
+                )
+                .await
+            }
+        };
+        let frame = match receive.await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(_) => {
+                let envelope = WsErrorEnvelope::from_error(&ResponsesError::ConnectionLimitReached);
+                let _ = msg_tx.send(Message::Text(envelope.to_json().into())).await;
+                let _ = msg_tx.send(Message::Close(None)).await;
                 break;
             }
         };
         match frame {
             Message::Text(text) => {
                 let mut sender = msg_tx.clone();
-                let rejection = run_turn(
-                    engine.as_ref(),
-                    &session,
-                    connected_at,
-                    turns_served,
-                    &config,
-                    text.as_str(),
-                    &mut sender,
-                )
-                .await;
+                let rejection = tokio::select! {
+                    biased;
+                    _ = &mut disconnected_rx => break,
+                    _ = msg_tx.closed() => break,
+                    result = run_turn(
+                        engine.as_ref(), &session, connected_at, turns_served,
+                        &config, text.as_str(), &mut sender,
+                    ) => result,
+                };
                 if let Some(error) = rejection {
                     // A rejected turn emitted no events, so the error
                     // envelope is the only signal the client gets. Evict the
@@ -124,10 +154,11 @@ pub async fn handle_socket(
                         session.evict(&id);
                     }
                     let envelope = WsErrorEnvelope::from_error(&error);
-                    let _ =
-                        sender.unbounded_send(Message::Text(envelope.to_json().to_string().into()));
+                    let _ = sender
+                        .send(Message::Text(envelope.to_json().to_string().into()))
+                        .await;
                     if envelope.error.code == codes::WEBSOCKET_CONNECTION_LIMIT_REACHED {
-                        let _ = sender.unbounded_send(Message::Close(None));
+                        let _ = sender.send(Message::Close(None)).await;
                         break;
                     }
                 } else {
@@ -135,7 +166,7 @@ pub async fn handle_socket(
                 }
             }
             Message::Ping(payload) => {
-                let _ = msg_tx.unbounded_send(Message::Pong(payload));
+                let _ = msg_tx.send(Message::Pong(payload)).await;
             }
             Message::Pong(_) => {}
             Message::Close(_) => break,
@@ -144,10 +175,14 @@ pub async fn handle_socket(
                     "binary frames are not supported; send response.create as a text frame"
                         .to_string(),
                 ));
-                let _ = msg_tx.unbounded_send(Message::Text(envelope.to_json().to_string().into()));
+                let _ = msg_tx
+                    .send(Message::Text(envelope.to_json().to_string().into()))
+                    .await;
             }
         }
     }
+    reader.abort();
+    let _ = reader.await;
     drop(msg_tx);
     let _ = forwarder.await;
 }
@@ -228,11 +263,13 @@ async fn run_turn(
     let mut streamed_anything = false;
     let mut sink = |event: StreamEvent| {
         streamed_anything = true;
-        match serde_json::to_string(&event) {
-            Ok(payload) => {
-                let _ = sender.unbounded_send(Message::Text(payload.into()));
-            }
-            Err(err) => tracing::error!("failed to serialize stream event: {err}"),
+        let sender = &*sender;
+        async move {
+            let payload = serde_json::to_string(&event).expect("wire event serializes");
+            sender
+                .send(Message::Text(payload.into()))
+                .await
+                .map_err(|_| ResponsesError::Model("socket receiver closed".into()))
         }
     };
 

@@ -78,7 +78,7 @@ async fn run_ws_turn(
         // session, so continuation state from the old socket is void.
         if state.socket.is_none() {
             let mut config = WebSocketConfig::new(model.base_url.clone());
-            config.headers = model.headers.clone();
+            config.headers = model.request_headers();
             state.socket = Some(
                 WebSocketStream::connect(config)
                     .await
@@ -89,7 +89,7 @@ async fn run_ws_turn(
         }
 
         let (skip, previous) = state.plan(&fingerprints, messages);
-        let request = build_request(model, messages, settings, params, skip, previous, false)?;
+        let request = build_request(model, messages, settings, params, skip, previous)?;
         let frame = ResponseCreateFrame {
             kind: "response.create",
             response: &request,
@@ -119,6 +119,7 @@ async fn run_ws_turn(
                     state.previous_response_id = Some(response.id.clone());
                     state.sent_fingerprints = fingerprints.clone();
                 }
+                state.last_used = std::time::Instant::now();
                 return Ok(*response);
             }
             AttemptOutcome::Retry(RetryKind::StaleContinuation) => {
@@ -135,7 +136,14 @@ async fn run_ws_turn(
                 }
                 continue;
             }
-            AttemptOutcome::Failed(error) => return Err(error),
+            AttemptOutcome::Failed(error) => {
+                // A failed read or cancelled sink may leave response frames
+                // unread. They must not become the next turn's response.
+                if let Some(mut socket) = state.take_socket() {
+                    close_socket(&mut socket).await;
+                }
+                return Err(error);
+            }
         }
     }
 
@@ -198,24 +206,19 @@ async fn read_ws_events(
             WsStreamMessage::Ping | WsStreamMessage::Pong | WsStreamMessage::Binary(_) => continue,
         };
 
-        let event = match serde_json::from_str::<StreamEvent>(&text) {
-            Ok(event) => event,
-            Err(event_error) => match serde_json::from_str::<WsErrorEnvelope>(&text) {
-                Ok(envelope) => {
-                    let code = envelope.error.code.as_str();
-                    if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && !*streamed_any {
-                        return AttemptOutcome::Retry(RetryKind::StaleContinuation);
-                    }
-                    if code == codes::WEBSOCKET_CONNECTION_LIMIT_REACHED && !*streamed_any {
-                        return AttemptOutcome::Retry(RetryKind::Reconnect);
-                    }
-                    return AttemptOutcome::Failed(envelope_error(&envelope));
+        let event = match super::events::decode(&text) {
+            Ok(super::events::DataEvent::Event(event)) => *event,
+            Ok(super::events::DataEvent::Error(envelope)) => {
+                let code = envelope.error.code.as_str();
+                if code == codes::PREVIOUS_RESPONSE_NOT_FOUND && !*streamed_any {
+                    return AttemptOutcome::Retry(RetryKind::StaleContinuation);
                 }
-                Err(envelope_error) => {
-                    tracing::warn!(frame = %text, event_error = %event_error, envelope_error = %envelope_error, "unparseable websocket frame");
-                    continue;
+                if code == codes::WEBSOCKET_CONNECTION_LIMIT_REACHED && !*streamed_any {
+                    return AttemptOutcome::Retry(RetryKind::Reconnect);
                 }
-            },
+                return AttemptOutcome::Failed(envelope_error(&envelope));
+            }
+            Err(error) => return AttemptOutcome::Failed(error),
         };
 
         // Capture the terminal response object before translation consumes
@@ -257,7 +260,7 @@ async fn read_ws_events(
 /// The mapping is shared with the HTTP path (see
 /// `OpenAIResponsesModel::compose_request`); the websocket pins its
 /// transport fields: delta-only input past the session's skip point,
-/// `store` from the session mode, `stream` omitted entirely, no routing
+/// `store: false`, `stream` omitted entirely, no routing
 /// fields the transport has never sent.
 pub(super) fn build_request(
     model: &OpenAIResponsesModel,
@@ -266,7 +269,6 @@ pub(super) fn build_request(
     params: &ModelRequestParameters,
     skip: usize,
     previous_response_id: Option<String>,
-    store: bool,
 ) -> Result<ResponsesApiRequest, ModelError> {
     model.compose_request(
         messages,
@@ -275,7 +277,7 @@ pub(super) fn build_request(
         RequestOverlay {
             skip,
             stream: None,
-            store: Some(store),
+            store: Some(false),
             previous_response_id,
             service_tier: None,
             truncation: None,
@@ -334,7 +336,7 @@ pub(crate) fn stream(
         if let Err(error) = result {
             // A failure after events escaped still reaches the caller as
             // an error item; a failure before that is the only item.
-            let _ = tx.try_send(Err(error));
+            let _ = tx.send(Err(error)).await;
         }
     });
 

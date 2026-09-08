@@ -1,12 +1,14 @@
 //! Conversation-keyed session state for the responses model.
 //!
-//! Conversations are keyed by the fingerprint of the history's first
-//! request, so different conversations through one model instance stay
-//! isolated and run concurrently; each turn only sends the new input items
-//! of its own conversation, and a history that adds nothing restarts the
-//! conversation instead of chaining. Both transports consume this state:
-//! the websocket keeps a live socket per conversation, and HTTP chaining
-//! records each completed turn's response id with `store: true`.
+//! Lookup uses fingerprints of leading system-only requests and the first
+//! request containing other material. Shared system prompts alone do not
+//! identify a conversation. This is a bounded content-based contract:
+//! callers must preserve that prefix and must not interleave independent
+//! histories with the same prefix through one model. Use separate model
+//! instances (not clones) for those histories. Equal content cannot prove
+//! identity. Full sent-prefix checks reject edits and identical-history
+//! replays reset the chain. Websockets keep a socket per lookup key; HTTP
+//! records completed response ids with `store: true`.
 // The EventSink helpers serve only the websocket transport; with that
 // feature compiled out they are unreachable, which is expected, not dead
 // code. The conversation state itself serves both transports.
@@ -61,8 +63,8 @@ pub(crate) const CONVERSATION_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Connection-local state for one conversation.
 ///
-/// Conversations are keyed by the fingerprint of the history's first
-/// request (see [`fingerprint`]). The websocket variant keeps the socket
+/// Conversations use the initial prefix described in this module.
+/// The websocket variant keeps the socket
 /// alive across the conversation's turns; continuation state
 /// (`previous_response_id`, the requests already sent) lives here, which is
 /// what makes delta-only continuation turns possible. Turns of one
@@ -79,7 +81,7 @@ pub(crate) struct Conv {
     /// turn's history must extend this sequence exactly; anything else
     /// voids the chain and forces a full replay.
     pub(crate) sent_fingerprints: Vec<u64>,
-    /// When this conversation was last planned for a turn; drives lazy
+    /// Last turn activity, refreshed at planning and completion; drives lazy
     /// idle eviction.
     pub(crate) last_used: Instant,
 }
@@ -157,6 +159,22 @@ impl Conv {
         &mut self,
     ) -> Option<serdes_ai_streaming::websocket::WebSocketStream> {
         self.socket.take()
+    }
+}
+
+/// Teardown belongs to the socket owner, not to a model handle checking
+/// Arc counts. This also closes sockets when the last clones drop concurrently.
+/// Without a current runtime a close frame cannot be sent asynchronously.
+#[cfg(feature = "responses-ws")]
+impl Drop for Conv {
+    fn drop(&mut self) {
+        if let Some(mut socket) = self.socket.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    close_socket(&mut socket).await;
+                });
+            }
+        }
     }
 }
 
@@ -254,16 +272,22 @@ impl EventSink for ChannelSink<'_> {
 impl super::OpenAIResponsesModel {
     /// Look up or create the conversation state for this history.
     ///
-    /// Conversations are keyed by the first request's fingerprint: a
-    /// continued history lands in the conversation it extends, a fresh first
-    /// request starts its own conversation. The map lock guards lookup,
-    /// insert, and the eviction scan (no await is performed under it);
+    /// Conversations use the initial prefix described in this module.
+    /// The map lock guards lookup, insert, and the eviction scan
+    /// (no await is performed under it);
     /// turn serialization happens on the conversation's own lock, so
     /// different conversations never wait on each other.
     pub(crate) async fn conversation(&self, messages: &[ModelRequest]) -> SharedConv {
-        let key = messages
-            .first()
-            .map_or_else(|| fingerprint(&ModelRequest::new()), fingerprint);
+        let prefix_len = messages
+            .iter()
+            .position(|request| {
+                request
+                    .parts
+                    .iter()
+                    .any(|part| !matches!(part, ModelRequestPart::SystemPrompt(_)))
+            })
+            .map_or(messages.len(), |index| index + 1);
+        let key: Vec<u64> = messages[..prefix_len].iter().map(fingerprint).collect();
         self.evict_idle_conversations().await;
         self.conversations
             .lock()
@@ -285,16 +309,11 @@ impl super::OpenAIResponsesModel {
     /// sockets with a proper handshake so the peer sees a Close frame
     /// rather than a connection reset.
     ///
-    /// Lazy by design: the purge scans the whole map on each lookup —
-    /// O(live conversations), cheap at the expected scale of a few
-    /// conversations per model — instead of running a background task. A
-    /// conversation whose lock is held is mid-turn and can neither be idle
-    /// nor be evicted under the caller's feet. Closing the evicted
-    /// sockets happens after the map lock is released because the
-    /// handshake is async; re-locking an evicted conversation is then
-    /// uncontended (it was unlocked during the scan and is out of the
-    /// map), and a turn that had already cloned its handle before the
-    /// scan simply finds no socket and reconnects fresh.
+    /// Lazy by design: each lookup scans the live conversations instead of
+    /// running a background task. Both locked turns and handles reserved by
+    /// queued turns prevent eviction. Lookup and the ownership check share
+    /// the map lock, so an evicted conversation has no remaining caller.
+    /// Its socket closes after releasing the map lock.
     async fn evict_idle_conversations(&self) {
         let evicted: Vec<SharedConv> = {
             let mut conversations = self
@@ -303,6 +322,8 @@ impl super::OpenAIResponsesModel {
                 .expect("conversations map lock poisoned; it is only held for lookup/insert");
             let mut evicted = Vec::new();
             conversations.retain(|_, conv| match conv.try_lock() {
+                // A looked-up or queued turn owns a handle before locking it.
+                Ok(_) if Arc::strong_count(conv) != 1 => true,
                 Ok(state) => {
                     let idle = state.last_used.elapsed() > self.conversation_idle_ttl;
                     if idle {
@@ -407,7 +428,6 @@ mod session_state_tests {
             &ModelRequestParameters::default(),
             0,
             Some("resp_1".to_string()),
-            false,
         )
         .expect("request");
 
@@ -444,6 +464,24 @@ mod session_state_tests {
         let (skip, previous) = conv.plan(&[1, 2, 3, 4], &[]);
         assert_eq!(previous.as_deref(), Some("resp_2"));
         assert_eq!(skip, 3);
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_preserves_a_reserved_turn_until_its_handle_is_released() {
+        let model = model().with_conversation_idle_ttl(std::time::Duration::ZERO);
+        let history = vec![user_request("reserved")];
+        let reserved = model.conversation(&history).await;
+        reserved.lock().await.previous_response_id = Some("resp_reserved".into());
+        // A turn owns a handle between lookup and acquiring its turn lock.
+        let next = model.conversation(&history).await;
+        assert_eq!(
+            next.lock().await.previous_response_id.as_deref(),
+            Some("resp_reserved")
+        );
+        drop(next);
+        drop(reserved);
+        let expired = model.conversation(&history).await;
+        assert!(expired.lock().await.previous_response_id.is_none());
     }
 
     #[test]

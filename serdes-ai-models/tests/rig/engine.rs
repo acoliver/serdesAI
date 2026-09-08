@@ -13,8 +13,8 @@ use super::store::{InMemoryResponseStore, SessionResponseCache, StoredResponse};
 use chrono::Utc;
 use futures::StreamExt;
 use serdes_ai_core::messages::{
-    ModelRequestPart, ModelResponsePart, ModelResponseStreamEvent, StreamCompleteEvent,
-    SystemPromptPart, TextPart, ThinkingPart, ToolCallArgs, ToolCallPart,
+    ModelRequestPart, ModelResponsePart, ModelResponseStreamEvent, StreamCompleteEvent, TextPart,
+    ThinkingPart, ThinkingPartDelta, ToolCallArgs, ToolCallPart,
 };
 use serdes_ai_core::{FinishReason, ModelRequest, ModelResponse, ModelSettings, RequestUsage};
 use serdes_ai_models::model::{Model, ModelRequestParameters};
@@ -22,6 +22,19 @@ use serdes_ai_models::openai::responses::events::StreamEvent;
 use serdes_ai_models::openai::responses::wire::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+async fn emit<S, F>(
+    event: StreamEvent,
+    sequence: &mut u64,
+    sink: &mut S,
+) -> Result<(), ResponsesError>
+where
+    S: FnMut(StreamEvent) -> F + Send,
+    F: std::future::Future<Output = Result<(), ResponsesError>> + Send,
+{
+    sink(event).await?;
+    *sequence += 1;
+    Ok(())
+}
 
 /// Executes Responses API turns against a backing serdesAI model.
 pub struct ResponsesEngine {
@@ -140,18 +153,17 @@ impl ResponsesEngine {
     /// failure or premature stream end, open items are closed, the response
     /// is finished as `failed`, `response.failed` is emitted, and the error
     /// is returned.
-    pub async fn execute_streaming(
+    pub async fn execute_streaming<S, F>(
         &self,
         turn: PreparedTurn,
-        sink: &mut (dyn FnMut(StreamEvent) + Send),
-    ) -> Result<TurnOutput, ResponsesError> {
+        sink: &mut S,
+    ) -> Result<TurnOutput, ResponsesError>
+    where
+        S: FnMut(StreamEvent) -> F + Send,
+        F: std::future::Future<Output = Result<(), ResponsesError>> + Send,
+    {
         let mut object = self.skeleton(&turn);
         let mut sequence: u64 = 0;
-        let emit =
-            |event: StreamEvent, sequence: &mut u64, sink: &mut (dyn FnMut(StreamEvent) + Send)| {
-                sink(event);
-                *sequence += 1;
-            };
 
         let mut stream = self
             .model
@@ -166,7 +178,8 @@ impl ResponsesEngine {
             },
             &mut sequence,
             sink,
-        );
+        )
+        .await?;
         emit(
             StreamEvent::ResponseInProgress {
                 sequence_number: sequence,
@@ -174,7 +187,8 @@ impl ResponsesEngine {
             },
             &mut sequence,
             sink,
-        );
+        )
+        .await?;
 
         let mut assembler = StreamAssembler::new();
         let mut failure: Option<String> = None;
@@ -193,17 +207,17 @@ impl ResponsesEngine {
             match event {
                 ModelResponseStreamEvent::PartStart(start) => {
                     for event in assembler.part_started(&start, &mut sequence) {
-                        sink(event);
+                        sink(event).await?;
                     }
                 }
                 ModelResponseStreamEvent::PartDelta(delta) => {
                     if let Some(event) = assembler.part_delta(&delta, &mut sequence) {
-                        sink(event);
+                        sink(event).await?;
                     }
                 }
                 ModelResponseStreamEvent::PartEnd(end) => {
                     for event in assembler.part_ended(&end.index, &mut sequence) {
-                        sink(event);
+                        sink(event).await?;
                     }
                 }
                 ModelResponseStreamEvent::StreamComplete(complete) => {
@@ -216,7 +230,7 @@ impl ResponsesEngine {
         }
 
         for event in assembler.close_open_items(&mut sequence) {
-            sink(event);
+            sink(event).await?;
         }
         object.output = assembler.completed_items();
         let parts = assembler.take_parts();
@@ -238,7 +252,8 @@ impl ResponsesEngine {
                 },
                 &mut sequence,
                 sink,
-            );
+            )
+            .await?;
             return Err(ResponsesError::Model(reason));
         }
 
@@ -254,7 +269,7 @@ impl ResponsesEngine {
                 response: object.clone(),
             }
         };
-        emit(final_event, &mut sequence, sink);
+        emit(final_event, &mut sequence, sink).await?;
 
         Ok(TurnOutput {
             response: object,
@@ -347,42 +362,20 @@ pub struct TurnOutput {
 ///
 /// If the chained request carries no instructions, the stored instructions
 /// are kept.
-fn apply_instructions(history: Vec<ModelRequest>, instructions: Option<&str>) -> Vec<ModelRequest> {
-    // Split the stored system prompts out of the history; the rest of each
-    // request is preserved in order.
-    let mut system_parts: Vec<ModelRequestPart> = Vec::new();
-    let mut result: Vec<ModelRequest> = Vec::new();
-    for request in history {
-        let mut rest = Vec::new();
-        for part in request.parts {
-            if matches!(part, ModelRequestPart::SystemPrompt(_)) {
-                system_parts.push(part);
-            } else {
-                rest.push(part);
-            }
+fn apply_instructions(
+    mut history: Vec<ModelRequest>,
+    instructions: Option<&str>,
+) -> Vec<ModelRequest> {
+    if let Some(instructions) = instructions {
+        if history
+            .first()
+            .is_some_and(|request| request.kind == super::convert::INSTRUCTIONS_KIND)
+        {
+            history.remove(0);
         }
-        if !rest.is_empty() {
-            result.push(ModelRequest::with_parts(rest));
-        }
+        history.insert(0, super::convert::instructions_request(instructions));
     }
-
-    match instructions {
-        Some(instructions) => {
-            let mut request = ModelRequest::new();
-            request.add_part(ModelRequestPart::SystemPrompt(SystemPromptPart::new(
-                instructions,
-            )));
-            result.insert(0, request);
-        }
-        None => {
-            // No new instructions: keep the stored ones so chained turns do
-            // not silently lose their system prompt.
-            if !system_parts.is_empty() {
-                result.insert(0, ModelRequest::with_parts(system_parts));
-            }
-        }
-    }
-    result
+    history
 }
 
 /// Map a stream-complete event onto request usage, if it reported any tokens.
@@ -459,7 +452,7 @@ enum OpenItem {
     Reasoning {
         output_index: u64,
         item_id: String,
-        text: String,
+        thinking: ThinkingPart,
     },
     FunctionCall {
         output_index: u64,
@@ -539,7 +532,7 @@ impl StreamAssembler {
                         item: OutputItem::Reasoning {
                             id: item_id.clone(),
                             summary: Vec::new(),
-                            encrypted_content: None,
+                            encrypted_content: super::convert::encrypted_content(thinking),
                         },
                     },
                     StreamEvent::ReasoningSummaryPartAdded {
@@ -556,13 +549,18 @@ impl StreamAssembler {
                     OpenItem::Reasoning {
                         output_index,
                         item_id,
-                        text: String::new(),
+                        thinking: ThinkingPart {
+                            content: String::new(),
+                            ..thinking.clone()
+                        },
                     },
                 );
                 if !thinking.content.is_empty() {
-                    if let Some(event) =
-                        self.reasoning_delta(start.index, &thinking.content, sequence)
-                    {
+                    if let Some(event) = self.reasoning_delta(
+                        start.index,
+                        &ThinkingPartDelta::new(&thinking.content),
+                        sequence,
+                    ) {
                         events.push(event);
                     }
                 }
@@ -642,7 +640,7 @@ impl StreamAssembler {
     fn reasoning_delta(
         &mut self,
         index: usize,
-        delta: &str,
+        delta: &ThinkingPartDelta,
         sequence: &mut u64,
     ) -> Option<StreamEvent> {
         let open = self.open.get_mut(&index)?;
@@ -650,15 +648,15 @@ impl StreamAssembler {
             OpenItem::Reasoning {
                 output_index,
                 item_id,
-                text,
+                thinking,
             } => {
-                text.push_str(delta);
+                delta.apply(thinking);
                 let event = StreamEvent::ReasoningSummaryTextDelta {
                     sequence_number: *sequence,
                     item_id: item_id.clone(),
                     output_index: *output_index,
                     summary_index: 0,
-                    delta: delta.to_string(),
+                    delta: delta.content_delta.clone(),
                 };
                 *sequence += 1;
                 Some(event)
@@ -678,7 +676,7 @@ impl StreamAssembler {
                 self.text_delta(delta.index, &text.content_delta, sequence)
             }
             ModelResponsePartDelta::Thinking(thinking) => {
-                self.reasoning_delta(delta.index, &thinking.content_delta, sequence)
+                self.reasoning_delta(delta.index, thinking, sequence)
             }
             ModelResponsePartDelta::ToolCall(tool) => {
                 let open = self.open.get_mut(&delta.index)?;
@@ -750,8 +748,9 @@ impl StreamAssembler {
             OpenItem::Reasoning {
                 output_index,
                 item_id,
-                text,
+                thinking,
             } => {
+                let text = &thinking.content;
                 events.push(StreamEvent::ReasoningSummaryTextDone {
                     sequence_number: *sequence,
                     item_id: item_id.clone(),
@@ -771,10 +770,10 @@ impl StreamAssembler {
                 let item = OutputItem::Reasoning {
                     id: item_id,
                     summary: vec![SummaryTextItem::new(text.clone())],
-                    encrypted_content: None,
+                    encrypted_content: super::convert::encrypted_content(&thinking),
                 };
                 self.completed_parts
-                    .push(ModelResponsePart::Thinking(ThinkingPart::new(text)));
+                    .push(ModelResponsePart::Thinking(thinking));
                 events.push(StreamEvent::OutputItemDone {
                     sequence_number: *sequence,
                     output_index,
@@ -999,7 +998,10 @@ mod tests {
         let turn = engine.prepare(&request("m", "hi"), None).await.unwrap();
         let mut events = Vec::new();
         let output = engine
-            .execute_streaming(turn, &mut |event| events.push(event))
+            .execute_streaming(turn, &mut |event| {
+                events.push(event);
+                std::future::ready(Ok(()))
+            })
             .await
             .unwrap();
 

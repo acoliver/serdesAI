@@ -1,5 +1,5 @@
 //! Wire-accurate axum server used as a **test rig** for the client in this
-//! crate (feature `test-server`). Not a product surface.
+//! crate's integration tests. Not a product surface.
 //!
 //! Routes:
 //!
@@ -20,8 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use serdes_ai_models::openai::responses::events::StreamEvent;
 use serdes_ai_models::openai::responses::wire::{
     CreateResponseRequest, OutputItem, OutputItemStatus,
@@ -29,6 +28,7 @@ use serdes_ai_models::openai::responses::wire::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 /// Server error types.
 #[derive(Debug, thiserror::Error)]
@@ -161,25 +161,33 @@ async fn stream_response(
     turn: PreparedTurn,
     request: CreateResponseRequest,
 ) -> Response {
-    let (mut event_tx, event_rx) = mpsc::unbounded::<Result<String, std::io::Error>>();
+    let (event_tx, event_rx) = mpsc::channel::<Result<String, std::io::Error>>(64);
     let engine = state.engine.clone();
 
     tokio::spawn(async move {
-        let mut sink = |event: StreamEvent| match serde_json::to_string(&event) {
-            Ok(payload) => {
-                let _ = event_tx.start_send(Ok(payload));
+        let mut sink = |event: StreamEvent| {
+            let sender = &event_tx;
+            async move {
+                let payload = serde_json::to_string(&event).expect("wire event serializes");
+                sender
+                    .send(Ok(payload))
+                    .await
+                    .map_err(|_| ResponsesError::Model("stream receiver closed".into()))
             }
-            Err(err) => tracing::error!("failed to serialize stream event: {err}"),
         };
-        match engine.execute_streaming(turn, &mut sink).await {
+        let result = tokio::select! {
+            biased;
+            _ = event_tx.closed() => return,
+            result = engine.execute_streaming(turn, &mut sink) => result,
+        };
+        match result {
             Ok(output) => engine.persist(&request, None, &output).await,
             Err(err) => tracing::warn!("streaming turn failed: {err}"),
         }
-        let _ = event_tx.start_send(Ok("[DONE]".to_string()));
-        let _ = event_tx.close().await;
+        let _ = event_tx.send(Ok("[DONE]".to_string())).await;
     });
 
-    let body_stream = event_rx.map(|item| {
+    let body_stream = tokio_stream::wrappers::ReceiverStream::new(event_rx).map(|item| {
         item.map(|payload| {
             let mut frame = String::with_capacity(payload.len() + 8);
             frame.push_str("data: ");

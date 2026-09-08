@@ -27,6 +27,142 @@ use ws_fakes_common::{
     user_turn, ws_client,
 };
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Tungstenite requires the handshake callback to return its unboxed ErrorResponse"
+)]
+async fn capture_handshake(
+    client: serdes_ai_models::openai::responses::OpenAIResponsesModel,
+    streaming: bool,
+) -> tokio_tungstenite::tungstenite::http::HeaderMap {
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut headers = None;
+        let mut ws =
+            tokio_tungstenite::accept_hdr_async(socket, |request: &Request, response: Response| {
+                headers = Some(request.headers().clone());
+                Ok(response)
+            })
+            .await
+            .unwrap();
+        let request = read_turn(&mut ws).await;
+        send_completed_turn(&mut ws, "resp_headers", &request).await;
+        headers.unwrap()
+    });
+    let client = client
+        .with_base_url(format!("ws://{addr}/v1/responses"))
+        .with_transport(serdes_ai_models::openai::responses::Transport::WebSocket);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        if streaming {
+            let events: Vec<_> = client
+                .request_stream(&[user_turn("headers")], &settings(), &params())
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(events.iter().all(Result::is_ok));
+            assert!(matches!(
+                events.last(),
+                Some(Ok(ModelResponseStreamEvent::StreamComplete(_)))
+            ));
+        } else {
+            let response = client
+                .request(&[user_turn("headers")], &settings(), &params())
+                .await
+                .unwrap();
+            assert_eq!(text_of(&response), "ok");
+        }
+        server.await.unwrap()
+    })
+    .await
+    .expect("handshake and turn complete")
+}
+
+fn assert_header(
+    headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
+    name: &str,
+    expected: &str,
+) {
+    let values: Vec<_> = headers.get_all(name).iter().collect();
+    assert_eq!(values.len(), 1, "exactly one {name} header");
+    assert_eq!(values[0], expected);
+}
+
+#[tokio::test]
+async fn websocket_handshake_inherits_constructor_api_key() {
+    use serdes_ai_models::openai::responses::OpenAIResponsesModel;
+
+    for streaming in [false, true] {
+        let headers = capture_handshake(
+            OpenAIResponsesModel::new("test-model", "constructor-key"),
+            streaming,
+        )
+        .await;
+        assert_header(&headers, "authorization", "Bearer constructor-key");
+        assert!(!headers.contains_key("openai-organization"));
+        assert!(!headers.contains_key("openai-project"));
+    }
+}
+
+#[tokio::test]
+async fn websocket_handshake_inherits_organization_and_project() {
+    use serdes_ai_models::openai::responses::OpenAIResponsesModel;
+
+    for streaming in [false, true] {
+        let client = OpenAIResponsesModel::new("test-model", "constructor-key")
+            .with_organization("org-constructor")
+            .with_project("project-constructor");
+        let headers = capture_handshake(client, streaming).await;
+        assert_header(&headers, "authorization", "Bearer constructor-key");
+        assert_header(&headers, "openai-organization", "org-constructor");
+        assert_header(&headers, "openai-project", "project-constructor");
+    }
+}
+
+#[tokio::test]
+async fn websocket_handshake_explicit_headers_override_defaults_case_insensitively() {
+    use serdes_ai_models::openai::responses::OpenAIResponsesModel;
+
+    for streaming in [false, true] {
+        let client = OpenAIResponsesModel::new("test-model", "constructor-key")
+            .with_header("Authorization", "Bearer superseded")
+            .with_header("aUtHoRiZaTiOn", "Bearer explicit-key")
+            .with_header("OPENAI-ORGANIZATION", "org-explicit")
+            .with_header("OpenAI-Project", "project-explicit")
+            .with_header("X-Gateway-Key", "superseded")
+            .with_header("x-gateway-key", "gateway-explicit")
+            .with_organization("org-default")
+            .with_project("project-default");
+        let headers = capture_handshake(client, streaming).await;
+        assert_header(&headers, "authorization", "Bearer explicit-key");
+        assert_header(&headers, "openai-organization", "org-explicit");
+        assert_header(&headers, "openai-project", "project-explicit");
+        assert_header(&headers, "x-gateway-key", "gateway-explicit");
+    }
+}
+
+#[tokio::test]
+async fn websocket_handshake_preserves_codex_explicit_bearer_auth() {
+    use serdes_ai_models::openai::responses::OpenAIResponsesModel;
+
+    for streaming in [false, true] {
+        let client = OpenAIResponsesModel::new("test-model", "")
+            .with_header("Authorization", "Bearer codex-test-token")
+            .with_header("ChatGPT-Account-Id", "test-account")
+            .with_header("OpenAI-Beta", "responses_websockets=2026-02-06")
+            .with_header("originator", "codex_cli_rs");
+        let headers = capture_handshake(client, streaming).await;
+        assert_header(&headers, "authorization", "Bearer codex-test-token");
+        assert_header(&headers, "chatgpt-account-id", "test-account");
+        assert_header(&headers, "openai-beta", "responses_websockets=2026-02-06");
+        assert_header(&headers, "originator", "codex_cli_rs");
+    }
+}
+
 #[tokio::test]
 async fn stale_continuation_clears_chain_and_replays_full_input() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -213,7 +349,7 @@ async fn mid_stream_error_is_surfaced_without_replay() {
         // The delta already escaped to the caller, so the client must NOT
         // send another response.create frame on this turn.
         match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-            Err(_elapsed) => {}
+            Err(_) | Ok(Some(Ok(Message::Close(_)))) => {}
             Ok(frame) => panic!("client replayed a committed stream: {frame:?}"),
         }
     });
@@ -252,5 +388,69 @@ async fn mid_stream_error_is_surfaced_without_replay() {
         ModelError::Provider { code, .. } => assert_eq!(code, "previous_response_not_found"),
         other => panic!("expected provider error, got {other:?}"),
     }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_ignores_unknown_but_rejects_malformed_known_events() {
+    for payload in [
+        r#"{"type":"codex.rate_limits","limits":{}}"#,
+        r#"{"type":"response.output_text.delta","sequence_number":0}"#,
+        "{bad json}",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut ws = accept_ws(&listener).await;
+            let request = read_turn(&mut ws).await;
+            ws.send(Message::text(payload)).await.unwrap();
+            send_completed_turn(&mut ws, "resp_decode", &request).await;
+        });
+        let client = ws_client(addr);
+        let result = client
+            .request(&[user_turn("decode")], &settings(), &params())
+            .await;
+        if payload.contains("codex.rate_limits") {
+            assert_eq!(text_of(&result.unwrap()), "ok");
+        } else {
+            assert!(matches!(result, Err(ModelError::InvalidResponse(_))));
+        }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn malformed_turn_retires_socket_before_next_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener).await;
+        let request = read_turn(&mut ws).await;
+        ws.send(Message::Text(
+            r#"{"type":"response.output_text.delta"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        send_completed_turn(&mut ws, "resp_unread", &request).await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+        let mut fresh = accept_ws(&listener).await;
+        let request = read_turn(&mut fresh).await;
+        assert!(request.previous_response_id.is_none());
+        send_completed_turn(&mut fresh, "resp_fresh", &request).await;
+    });
+    let client = ws_client(addr).with_session_chaining(true);
+    let history = vec![user_turn("retry caller")];
+    assert!(matches!(
+        client.request(&history, &settings(), &params()).await,
+        Err(ModelError::InvalidResponse(_))
+    ));
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request(&history, &settings(), &params()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.vendor_id.as_deref(), Some("resp_fresh"));
     server.await.unwrap();
 }

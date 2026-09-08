@@ -62,7 +62,7 @@ fn build_chained_request(
 
 /// POST a request body to the responses endpoint with the model's auth,
 /// routing, and custom headers.
-async fn post(
+pub(super) async fn post(
     model: &OpenAIResponsesModel,
     body: &ResponsesApiRequest,
     timeout: Duration,
@@ -70,16 +70,8 @@ async fn post(
     let mut request = model
         .client
         .post(format!("{}/responses", model.base_url))
-        .header("Authorization", format!("Bearer {}", model.api_key))
-        .header("Content-Type", "application/json")
         .timeout(timeout);
-    if let Some(ref org) = model.organization {
-        request = request.header("OpenAI-Organization", org);
-    }
-    if let Some(ref project) = model.project {
-        request = request.header("OpenAI-Project", project);
-    }
-    for (name, value) in &model.headers {
+    for (name, value) in model.request_headers() {
         request = request.header(name, value);
     }
     request
@@ -184,6 +176,7 @@ pub(crate) async fn request(
     // continuation.
     state.previous_response_id = Some(response_id);
     state.sent_fingerprints = fingerprints.clone();
+    state.last_used = std::time::Instant::now();
     Ok(model_response)
 }
 
@@ -205,7 +198,7 @@ pub(crate) fn stream(
         if let Err(error) = result {
             // A failure after events escaped still reaches the caller as
             // an error item; a failure before that is the only item.
-            let _ = tx.try_send(Err(error));
+            let _ = tx.send(Err(error)).await;
         }
     });
 
@@ -245,7 +238,6 @@ async fn stream_events(
 
     let mut byte_stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut terminal_seen = false;
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| ModelError::Connection(e.to_string()))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -256,15 +248,21 @@ async fn stream_events(
                 continue;
             };
             if payload == "[DONE]" {
-                if terminal_seen {
-                    return Ok(());
-                }
                 return Err(ModelError::incomplete_stream(
                     "sse stream sent [DONE] without a terminal response.completed/incomplete/failed event",
                 ));
             }
-            let event: StreamEvent = serde_json::from_str(payload)
-                .map_err(|e| ModelError::invalid_response(e.to_string()))?;
+            let event = match super::events::decode(payload)? {
+                super::events::DataEvent::Event(event) => *event,
+                super::events::DataEvent::Error(envelope) => {
+                    return Err(envelope_error(
+                        &HttpErrorEnvelope {
+                            error: envelope.error,
+                        },
+                        envelope.status_code,
+                    ));
+                }
+            };
             // Record the continuation before translation consumes the
             // event; a failed response never advances the chain.
             if let StreamEvent::ResponseCompleted { response, .. }
@@ -276,12 +274,14 @@ async fn stream_events(
             for translated in translate(event) {
                 match translated {
                     Ok(event) => {
-                        if matches!(event, ModelResponseStreamEvent::StreamComplete(_)) {
-                            terminal_seen = true;
-                        }
+                        let terminal = matches!(event, ModelResponseStreamEvent::StreamComplete(_));
                         tx.send(Ok(event))
                             .await
                             .map_err(|_| ModelError::Cancelled)?;
+                        if terminal {
+                            state.last_used = std::time::Instant::now();
+                            return Ok(());
+                        }
                     }
                     Err(error) => {
                         // A failed turn surfaces as an error item instead of
